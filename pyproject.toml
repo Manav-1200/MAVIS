@@ -1,0 +1,25 @@
+[project]
+name = "mavis"
+version = "0.1.0"
+description = "A modular, context-aware desktop AI companion."
+readme = "README.md"
+requires-python = ">=3.14"
+
+authors = [
+    { name = "Manav Neupane" }
+]
+
+dependencies = []
+
+[project.scripts]
+mavis = "mavis.main:main"
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pre-commit>=4.6.1",
+    "ruff>=0.16.1",
+]
