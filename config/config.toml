@@ -1,0 +1,24 @@
+# ============================================================================
+# MAVIS Configuration
+# ============================================================================
+# This file contains user-configurable settings.
+#
+# Values in this file may be changed without modifying the source code.
+# ============================================================================
+
+[application]
+name = "MAVIS"
+version = "0.1.0"
+debug = false
+
+[logging]
+level = "INFO"
+
+[ui]
+theme = "dark"
+
+[voice]
+enabled = true
+
+[ai]
+provider = "local"
