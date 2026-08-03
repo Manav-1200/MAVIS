@@ -1,93 +1,152 @@
 """
-Application configuration.
+src/mavis/core/config.py
 
-Purpose
--------
-Load and provide access to MAVIS runtime configuration.
+MAVIS Configuration Manager
 
-Design
-------
-Configuration is loaded from ``config/config.toml``.
+Loads, validates, and provides access to the MAVIS configuration.
 
-The configuration is parsed only once during application startup.
-Subsequent calls return the cached configuration object.
-
-If a value is missing, sensible defaults are used. This allows new
-configuration options to be added in future versions without breaking
-older configuration files.
+Responsibilities:
+- Load configuration from TOML.
+- Apply default values.
+- Validate configuration values.
+- Provide read-only access.
 """
 
 from __future__ import annotations
 
 import tomllib
-from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
-from mavis.core.constants import APP_NAME, APP_VERSION
-from mavis.core.paths import CONFIG_FILE
+from mavis.core.constants import DEFAULT_CONFIG_FILE
+from mavis.core.paths import CONFIG_DIR
 
-
-@dataclass(slots=True)
-class AppConfig:
-    """
-    Runtime configuration for MAVIS.
-    """
-
-    app_name: str
-    version: str
-    debug: bool
-    log_level: str
-    theme: str
-    voice_enabled: bool
-    ai_provider: str
+# ============================================================================
+# Exceptions
+# ============================================================================
 
 
-# Cached configuration instance.
-#
-# The configuration is loaded only once during application startup.
-# All subsequent calls to get_config() return this cached object.
-_CONFIG: AppConfig | None = None
+class ConfigurationError(Exception):
+    """Raised when the configuration is invalid."""
 
 
-def load_config() -> AppConfig:
-    """
-    Load configuration from ``config/config.toml``.
-
-    Returns
-    -------
-    AppConfig
-        Loaded application configuration.
-    """
-
-    with CONFIG_FILE.open("rb") as file:
-        config = tomllib.load(file)
-
-    return AppConfig(
-        app_name=config.get("application", {}).get("name", APP_NAME),
-        version=config.get("application", {}).get("version", APP_VERSION),
-        debug=config.get("application", {}).get("debug", False),
-        log_level=config.get("logging", {}).get("level", "INFO"),
-        theme=config.get("ui", {}).get("theme", "dark"),
-        voice_enabled=config.get("voice", {}).get("enabled", True),
-        ai_provider=config.get("ai", {}).get("provider", "local"),
-    )
+# ============================================================================
+# Configuration Manager
+# ============================================================================
 
 
-def get_config() -> AppConfig:
-    """
-    Return the application's runtime configuration.
+class Config:
+    """Loads and manages the MAVIS configuration."""
 
-    The configuration is loaded from disk only on the first call.
-    Later calls return the cached configuration instance.
+    def __init__(self, config_path: Path | None = None) -> None:
+        """
+        Initialize the configuration manager.
 
-    Returns
-    -------
-    AppConfig
-        The current application configuration.
-    """
+        Args:
+            config_path:
+                Optional path to the configuration file.
+        """
+        self._config_path = config_path or CONFIG_DIR / DEFAULT_CONFIG_FILE
+        self._data: dict[str, Any] = {}
 
-    global _CONFIG
+    @property
+    def path(self) -> Path:
+        """Return the configuration file path."""
+        return self._config_path
 
-    if _CONFIG is None:
-        _CONFIG = load_config()
+    @property
+    def data(self) -> dict[str, Any]:
+        """Return the loaded configuration."""
+        return self._data
 
-    return _CONFIG
+    def load(self) -> None:
+        """
+        Load the configuration from disk.
+
+        If the configuration file does not exist,
+        the default configuration is used.
+
+        Raises:
+            ConfigurationError:
+                If the configuration cannot be loaded
+                or fails validation.
+        """
+        if not self._config_path.exists():
+            self._data = self._default_config()
+            return
+
+        try:
+            with self._config_path.open("rb") as file:
+                self._data = tomllib.load(file)
+        except Exception as exc:
+            raise ConfigurationError(f"Failed to load configuration: {exc}") from exc
+
+        self._validate()
+
+    def reload(self) -> None:
+        """Reload the configuration."""
+        self.load()
+
+    def get(self, key: str, default: Any = None) -> Any:
+        """
+        Return a configuration value.
+
+        Supports dotted keys.
+
+        Example:
+            config.get("logging.level")
+        """
+        value: Any = self._data
+
+        for part in key.split("."):
+            if not isinstance(value, dict):
+                return default
+
+            value = value.get(part)
+
+            if value is None:
+                return default
+
+        return value
+
+    @staticmethod
+    def _default_config() -> dict[str, Any]:
+        """Return the default configuration."""
+
+        return {
+            "application": {
+                "debug": False,
+            },
+            "logging": {
+                "level": "INFO",
+            },
+        }
+
+    def _validate(self) -> None:
+        """
+        Validate the loaded configuration.
+
+        Raises:
+            ConfigurationError:
+                If a configuration value is invalid.
+        """
+        valid_levels = {
+            "DEBUG",
+            "INFO",
+            "WARNING",
+            "ERROR",
+            "CRITICAL",
+        }
+
+        level = self.get("logging.level")
+
+        if level not in valid_levels:
+            raise ConfigurationError(f"Invalid logging level: {level}")
+
+
+# ============================================================================
+# Global Configuration Instance
+# ============================================================================
+
+config = Config()
+config.load()
