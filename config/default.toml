@@ -1,0 +1,9 @@
+[core]
+log_level = "info"
+
+[event_bus]
+capacity = 256
+
+[worker]
+timeout_seconds = 30
+idle_timeout_minutes = 5
