@@ -1,0 +1,54 @@
+MAVIS Source-Available License
+
+Copyright (c) 2026 Manav
+
+1. Grant of Rights
+
+   You are granted a perpetual, worldwide, non-exclusive, royalty-free license
+   to use, copy, modify, merge, publish, and distribute the Software and its
+   source code, subject to the restrictions below.
+
+2. Permitted Uses
+
+   - Personal use
+   - Educational and research use
+   - Internal business use (using MAVIS as a tool within your organization)
+   - Modification and customization
+   - Distribution of modified source code, provided this license is included
+
+3. Strictly Prohibited
+
+   You may NOT, under any circumstances:
+
+   - Sell, resell, license, sublicense, or otherwise commercialize the Software
+     as a standalone product, service, or offering.
+   - Rebrand the Software and sell or offer it as a competing product.
+   - Bundle the Software into a commercial product where the Software itself
+     is the primary value proposition being sold.
+   - Remove or alter this license in distributed copies.
+
+   This prohibition applies to unmodified versions, modified versions, and
+   derivative works.
+
+4. Commercial Use Exception
+
+   Using MAVIS as an internal tool or assistant within a business is permitted.
+   The prohibition applies only to selling MAVIS itself — not to using it.
+
+5. Attribution
+
+   Any distributed modified version must include a prominent notice stating it
+   is based on MAVIS and must retain this license in full.
+
+6. Termination
+
+   Any violation of Section 3 automatically terminates your rights under this
+   license.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

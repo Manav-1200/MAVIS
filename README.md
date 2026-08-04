@@ -1,302 +1,93 @@
 # MAVIS
-
-> **Modular Autonomous Virtual Intelligence System**
-
-A modular, context-aware, local-first desktop AI companion built with Python and Rust.
-
----
-
-# Overview
-
-MAVIS is an open-source desktop AI companion designed to integrate naturally with the operating system instead of existing as just another chatbot.
-
-Rather than simply answering prompts, MAVIS is being built to understand context, remember useful information, assist with planning, automate repetitive workflows, and provide intelligent desktop assistance while keeping the user in control.
-
-The project follows a modular architecture where each subsystem has a single responsibility and communicates through well-defined interfaces.
-
----
-
-# Project Status
-
-Current Version
-
-```
-v0.1.0
-```
-
-Current Phase
-
-```
-Foundation
-```
-
-Status
-
-```
-Active Development
-```
-
-The project is currently focused on building a robust engineering foundation before implementing advanced AI capabilities.
-
----
-
-# Vision
-
-MAVIS aims to become a reliable desktop AI companion capable of:
-
-- Understanding user context
-- Maintaining long-term memory
-- Planning multi-step tasks
-- Executing workflows safely
-- Integrating deeply with the operating system
-- Extending functionality through plugins
-- Operating locally whenever possible
-
-The goal is to create software that remains understandable, maintainable, and extensible for many years.
-
----
-
-# Core Principles
-
-- Desktop AI companion first
-- Local-first architecture
-- Privacy by default
-- Modular design
-- Event-driven communication
-- Layered memory
-- Safe automation
-- Human-centered interaction
-- Cross-platform compatibility
-
----
-
-# Planned Features
-
-## Core
-
-- Bootstrap system
-- Logging
-- Configuration management
-- Runtime lifecycle
-- Event bus
-
-## Memory
-
-- Working Memory
-- Session Memory
-- Episodic Memory
-- Long-Term Memory
-- Permanent Memory
-
-## Intelligence
-
-- Context Engine
-- Planner
-- Executor
-- AI provider abstraction
-
-## User Interface
-
-- Living Orb
-- Expandable workspace
-- Companion display mode
-
-## Voice
-
-- Wake word
-- Speech-to-text
-- Text-to-speech
-- Voice activity detection
-
-## Plugins
-
-- Dynamic plugin loading
-- Skill registration
-- Plugin permissions
-- Public plugin API
-
-## Automation
-
-- Reminders
-- Workflow automation
-- Desktop integration
-- Scheduled tasks
-
----
-
-# Project Structure
-
-```
-MAVIS/
-
-config/
-data/
-logs/
-memory/
-plugins/
-
-src/
-└── mavis/
-
-tests/
-
-README.md
-ROADMAP.md
-ARCHITECTURE.md
-ENGINEERING.md
-MISSION.md
-VISION.md
-AI_CONTEXT.md
-CHANGELOG.md
-```
-
----
-
-# Technology Stack
-
-Primary Language
-
-- Python 3.14+
-
-Performance Components
-
-- Rust
-
-Package Manager
-
-- uv
-
-Formatter
-
-- Ruff
-
-Git Hooks
-
-- pre-commit
-
-Version Control
-
-- Git
-
----
-
-# Development Setup
-
-Clone the repository
+**Modular Autonomous Virtual Intelligence System**
+
+A persistent desktop-native AI companion. Not a chatbot. Not a web app.
+
+**Always present. Never intrusive.**
+
+## What MAVIS Is
+
+- A **local-first, privacy-first** desktop companion that stays alive forever
+- A **Rust runtime** (~50 MB) that owns the desktop: the orb, the event bus, the context engine
+- A **Python AI worker** that loads only when needed, runs your local LLM, then unloads to reclaim VRAM
+- A **living orb** that communicates state through subtle animation
+- A system that **remembers**, **plans**, and **assists** without taking control
+
+## What MAVIS Is Not
+
+- A browser-based chat interface
+- A cloud-dependent service
+- An autonomous agent that acts without permission
+- A memory-hungry process that slows your desktop
+
+## Architecture
+
+┌─────────────┐     ┌─────────────┐
+│  Living Orb │────▶│   Context   │
+│   (Rust)    │     │   Engine    │
+└─────────────┘     │   (Rust)    │
+▲            └──────┬──────┘
+│                   │
+│            ┌──────▼──────┐
+│            │   Planner   │
+│            │   (Rust)    │
+│            └──────┬──────┘
+│                   │
+│            ┌──────▼──────┐
+│            │   Executor  │
+│            │   (Rust)    │
+│            └──────┬──────┘
+│                   │
+│            ┌──────▼──────┐
+└────────────│  AI Worker  │
+│  (Python)   │
+└─────────────┘
+
+
+**Runtime split:**
+- **`mavis_core` (Rust):** UI, event bus, context engine, memory, system integration. ~50 MB. Always on.
+- **`mavis_worker` (Python):** AI inference, model weights, voice. Spawned on demand. Killed when idle.
+
+## Status
+
+| Phase | What | Status |
+|-------|------|--------|
+| 1 — Foundation | Rust runtime, event bus, orb window | 🚧 In progress |
+| 2 — Core Runtime | Context engine, memory, system integration | Not started |
+| 3 — AI Worker | Local LLM, Rust–Python bridge | Not started |
+| 4 — Integration | Voice pipeline, intent system, automations | Not started |
+| 5 — Polish | Performance, packaging, daily driver | Not started |
+
+Full roadmap in [`PHASES.md`](PHASES.md).
+
+## Tech Stack
+
+| Layer | Tools |
+|-------|-------|
+| Runtime | Rust, tokio, serde, rusqlite |
+| UI | winit → raw Wayland |
+| System | DBus, inotify, global hotkeys |
+| AI | Python, llama.cpp (Q4_K_M) |
+| Voice | porcupine, whisper.cpp, piper |
+| Audio | cpal |
+
+## Development
 
 ```bash
-git clone <repository>
-cd MAVIS
-```
+# Rust core
+cd mavis_core
+cargo run
 
-Install dependencies
-
-```bash
-uv sync
-```
-
-Run MAVIS
-
-```bash
+# Python worker
+cd mavis_worker
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
 python -m mavis
-```
 
-or
+## License
 
-```bash
-mavis
-```
+MAVIS Source-Available License — see [`LICENSE`](LICENSE).
 
----
-
-# Development Workflow
-
-Every new feature should follow this process:
-
-1. Update documentation.
-2. Design the architecture.
-3. Implement the feature.
-4. Test the implementation.
-5. Commit using a conventional commit message.
-
-Documentation is treated as part of the codebase rather than an afterthought.
-
----
-
-# Repository Documentation
-
-| Document | Purpose |
-|-----------|---------|
-| README.md | Project overview |
-| ROADMAP.md | Development roadmap |
-| ARCHITECTURE.md | Software architecture |
-| ENGINEERING.md | Engineering standards |
-| MISSION.md | Project mission |
-| VISION.md | Long-term vision |
-| AI_CONTEXT.md | AI coding guidance |
-| CHANGELOG.md | Release history |
-
----
-
-# Current Progress
-
-Completed
-
-- Project initialization
-- Git repository
-- uv project
-- Virtual environment
-- Ruff
-- Pre-commit hooks
-- Logging
-- Bootstrap
-- Lifecycle
-- Runtime directories
-- Documentation foundation
-
-In Progress
-
-- Core architecture
-- Configuration system
-- Event system
-
-Planned
-
-- Memory engine
-- Context engine
-- Planner
-- Executor
-- Orb UI
-- Plugin system
-- Voice
-- Native OS integration
-
----
-
-# Contributing
-
-Contributions should follow the project's engineering standards.
-
-Before implementing significant changes:
-
-- Read ENGINEERING.md
-- Read ARCHITECTURE.md
-- Review ROADMAP.md
-
-Maintain consistency with the existing architecture and coding style.
-
----
-
-# License
-
-License information will be added before the first public release.
-
----
-
-# Acknowledgements
-
-MAVIS is a long-term engineering project focused on building a trustworthy desktop AI companion through clean architecture, strong engineering practices, and thoughtful design.
-
----
-
-*"Build software that remains understandable years from now."*
+You are free to use, modify, and share MAVIS. Selling MAVIS as a standalone
+product or service is strictly prohibited.
