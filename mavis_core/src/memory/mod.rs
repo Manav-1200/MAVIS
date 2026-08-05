@@ -1,6 +1,3 @@
-// mavis_core/src/memory/mod.rs
-// Layered memory subsystem.
-
 pub mod episodic;
 pub mod long_term;
 pub mod manager;

@@ -1,4 +1,3 @@
-// mavis_core/src/main.rs
 // Entry point. Initializes subsystems, wires them together, runs until shutdown.
 
 use anyhow::Result;
@@ -28,10 +27,11 @@ async fn main() -> Result<()> {
     let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     // Context Engine
-    let bus_clone = Arc::clone(&bus);
-    let mut ctx_engine = context_engine::ContextEngine::new();
+    let bus_pub = Arc::clone(&bus);
+    let bus_sub = Arc::clone(&bus);
+    let mut ctx_engine = context_engine::ContextEngine::new(bus_pub);
     let ctx_handle = tokio::spawn(async move {
-        let mut rx = bus_clone.subscribe();
+        let mut rx = bus_sub.subscribe();
         info!("ContextEngine: listening for events");
         loop {
             match rx.recv().await {
@@ -69,7 +69,7 @@ async fn main() -> Result<()> {
     });
 
     // Worker Bridge
-    let (worker_event_tx, mut worker_event_rx) = mpsc::channel::<Event>(64);
+    let (worker_event_tx, mut worker_event_rx) = mpsc::channel(64);
     let bus_clone = Arc::clone(&bus);
     let mut bridge = worker_bridge::WorkerBridge::new(worker_event_tx);
     let bridge_handle = tokio::spawn(async move {

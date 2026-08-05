@@ -1,10 +1,24 @@
-// mavis_core/src/memory/manager.rs
-// Single interface to all memory layers.
+// Memory Manager: central coordinator for all memory layers.
+// Currently owns WorkingMemory; future iterations add SQLite-backed stores.
 
-pub struct MemoryManager;
+use crate::memory::working::WorkingMemory;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+pub struct MemoryManager {
+    pub working: Arc<RwLock<WorkingMemory>>,
+}
 
 impl MemoryManager {
     pub fn new() -> Self {
-        Self
+        Self {
+            working: Arc::new(RwLock::new(WorkingMemory::new())),
+        }
+    }
+}
+
+impl Default for MemoryManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
