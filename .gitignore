@@ -2,36 +2,44 @@
 __pycache__/
 *.py[cod]
 *.so
+*.egg-info/
 
 # Virtual environment
 .venv/
 
-# VS Code
-.vscode/
+# Build artifacts
+dist/
+build/
+/target
+Cargo.lock
 
-# JetBrains
+# IDE
+.vscode/
 .idea/
 
-# Ruff
+# Tools
 .ruff_cache/
-
-# Pytest
 .pytest_cache/
 
 # Coverage
 .coverage
 htmlcov/
 
-# Build
-dist/
-build/
-*.egg-info/
+# Logs & data (keep .gitkeep)
+/data/*
+/logs/*
+/memory/*
+!/data/.gitkeep
+!/logs/.gitkeep
+!/memory/.gitkeep
 
-# Logs
-*.log
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
 
 # Environment
 .env
 
-# Python bytecode
-*.pyc
+# OS
+.DS_Store
