@@ -13,15 +13,16 @@ pub struct ContextEngine {
 }
 
 impl ContextEngine {
-    pub fn new(bus: Arc<EventBus>) -> Self {
-        Self {
-            memory: MemoryManager::new(),
+    pub fn new(bus: Arc<EventBus>, data_dir: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            memory: MemoryManager::new(data_dir)?,
             bus,
-        }
+        })
     }
 
     pub async fn process_event(&mut self, event: Event) -> Result<()> {
-        // Every event lands in working memory first.
+        self.maybe_persist(&event).await;
+
         {
             let mut wm = self.memory.working.write().await;
             wm.push_event(event.clone());
@@ -34,7 +35,7 @@ impl ContextEngine {
             }
 
             EventType::UserIntent => {
-                info!("ContextEngine: UserIntent received — routing to AI worker");
+                info!("ContextEngine: UserIntent received — updating working memory");
                 let intent = event
                     .payload
                     .get("intent")
@@ -45,29 +46,7 @@ impl ContextEngine {
                     let mut wm = self.memory.working.write().await;
                     wm.set_intent(intent.to_string());
                 }
-
-                // Gather context for the worker
-                let context = {
-                    let wm = self.memory.working.read().await;
-                    serde_json::json!({
-                        "recent_events": wm.recent_context(10),
-                        "current_intent": wm.current_intent,
-                        "ui_state": wm.ui_state,
-                    })
-                };
-
-                let worker_req = Event {
-                    id: uuid::Uuid::new_v4(),
-                    timestamp: chrono::Utc::now(),
-                    source: "context_engine".to_string(),
-                    event_type: EventType::WorkerRequest,
-                    payload: serde_json::json!({
-                        "type": "intent_analysis",
-                        "intent": intent,
-                        "context": context,
-                    }),
-                };
-                self.bus.publish(worker_req);
+                // Planner will pick this up and generate a PlanReady event.
             }
 
             EventType::WorkerResponse => {
@@ -77,7 +56,6 @@ impl ContextEngine {
 
             EventType::ContextUpdate => {
                 info!("ContextEngine: ContextUpdate merged into working memory");
-                // Already recorded above; deeper semantic merging goes here later.
             }
 
             EventType::PlanReady => {
@@ -86,7 +64,6 @@ impl ContextEngine {
                     let mut wm = self.memory.working.write().await;
                     wm.set_active_plan(plan.clone());
                 }
-                // Re-publish so Executor (and UI) can react.
                 self.bus.publish(event);
             }
 
@@ -109,7 +86,6 @@ impl ContextEngine {
             }
 
             EventType::WorkerRequest => {
-                // Another subsystem published a direct worker request; observe only.
                 info!("ContextEngine: observed WorkerRequest from {}", event.source);
             }
         }
@@ -117,25 +93,11 @@ impl ContextEngine {
         Ok(())
     }
 
-    /// Parse a WorkerResponse and emit the appropriate downstream event.
     async fn route_worker_response(&self, event: Event) -> Result<()> {
         let payload = &event.payload;
         let response_type = payload.get("type").and_then(|v| v.as_str());
 
         match response_type {
-            Some("plan") => {
-                let plan_event = Event {
-                    id: uuid::Uuid::new_v4(),
-                    timestamp: chrono::Utc::now(),
-                    source: "context_engine".to_string(),
-                    event_type: EventType::PlanReady,
-                    payload: serde_json::json!({
-                        "plan": payload.get("plan"),
-                        "metadata": payload.get("metadata"),
-                    }),
-                };
-                self.bus.publish(plan_event);
-            }
             Some("context") => {
                 let ctx_event = Event {
                     id: uuid::Uuid::new_v4(),
@@ -147,7 +109,8 @@ impl ContextEngine {
                 self.bus.publish(ctx_event);
             }
             Some(other) => {
-                warn!("ContextEngine: unknown worker response type '{}'", other);
+                // Planner handles "plan" type responses.
+                info!("ContextEngine: passing WorkerResponse type '{}' to Planner", other);
             }
             None => {
                 warn!("ContextEngine: WorkerResponse missing 'type' field");
@@ -157,7 +120,18 @@ impl ContextEngine {
         Ok(())
     }
 
-    /// Diagnostics / UI snapshot accessor.
+    async fn maybe_persist(&self, event: &Event) {
+        match event.event_type {
+            EventType::UserIntent | EventType::ActionComplete | EventType::PlanReady => {
+                let store = self.memory.episodic.lock().await;
+                if let Err(e) = store.record(event) {
+                    warn!("Failed to persist event to episodic memory: {}", e);
+                }
+            }
+            _ => {}
+        }
+    }
+
     pub async fn working_memory_snapshot(&self) -> crate::memory::working::WorkingMemory {
         self.memory.working.read().await.clone()
     }

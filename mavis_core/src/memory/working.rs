@@ -1,7 +1,4 @@
-// Working Memory: session-scoped context window.
-// Holds recent events, current intent, active plan, and UI state.
-
-use crate::models::event::{Event, EventType};
+use crate::models::event::Event;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
@@ -20,7 +17,6 @@ impl WorkingMemory {
         Self::default()
     }
 
-    /// Push an event into the window, dropping the oldest if over capacity.
     pub fn push_event(&mut self, event: Event) {
         self.events.push_back(event);
         if self.events.len() > MAX_EVENTS {
@@ -44,13 +40,11 @@ impl WorkingMemory {
         self.active_plan = None;
     }
 
-    /// Borrow the most recent n events in chronological order.
     pub fn recent_events(&self, n: usize) -> Vec<&Event> {
         let skip = self.events.len().saturating_sub(n);
         self.events.iter().skip(skip).collect()
     }
 
-    /// Clone the most recent n events in chronological order.
     pub fn recent_context(&self, n: usize) -> Vec<Event> {
         let skip = self.events.len().saturating_sub(n);
         self.events.iter().skip(skip).cloned().collect()

@@ -27,9 +27,10 @@ async fn main() -> Result<()> {
     let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     // Context Engine
+    let data_dir = std::path::Path::new("../memory");
     let bus_pub = Arc::clone(&bus);
     let bus_sub = Arc::clone(&bus);
-    let mut ctx_engine = context_engine::ContextEngine::new(bus_pub);
+    let mut ctx_engine = context_engine::ContextEngine::new(bus_pub, data_dir)?;
     let ctx_handle = tokio::spawn(async move {
         let mut rx = bus_sub.subscribe();
         info!("ContextEngine: listening for events");
@@ -47,6 +48,13 @@ async fn main() -> Result<()> {
             }
         }
         info!("ContextEngine: shutting down");
+    });
+
+    // Planner
+    let bus_clone = Arc::clone(&bus);
+    let mut planner = planner::Planner::new(bus_clone);
+    let planner_handle = tokio::spawn(async move {
+        planner.run().await;
     });
 
     // Executor
@@ -86,13 +94,42 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Orb UI (stub)
-    let _orb_handle = tokio::spawn(async move {
-        let _orb = ui::Orb::new();
-        info!("Orb: initialized (stub)");
+    // Orb UI
+    let bus_clone = Arc::clone(&bus);
+    let orb_handle = tokio::spawn(async move {
+        let orb = ui::Orb::new();
+        info!("Orb: initialized");
+
+        let mut rx = bus_clone.subscribe();
         loop {
-            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+            match rx.recv().await {
+                Ok(event) => {
+                    if let EventType::UiStateChange = event.event_type {
+                        if let Some(state_str) =
+                            event.payload.get("state").and_then(|v| v.as_str())
+                        {
+                            let state = match state_str {
+                                "idle" => ui::OrbState::Idle,
+                                "listening" => ui::OrbState::Listening,
+                                "thinking" => ui::OrbState::Thinking,
+                                "speaking" => ui::OrbState::Speaking,
+                                "working" => ui::OrbState::Working,
+                                "error" => ui::OrbState::Error,
+                                "asleep" => ui::OrbState::Asleep,
+                                _ => ui::OrbState::Idle,
+                            };
+                            orb.set_state(state);
+                        }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    warn!("Orb lagged by {} events", n);
+                }
+            }
         }
+        orb.shutdown();
+        info!("Orb: shutting down");
     });
 
     // Startup event
@@ -118,8 +155,10 @@ async fn main() -> Result<()> {
     drop(bus);
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), ctx_handle).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), planner_handle).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), exec_handle).await;
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), bridge_handle).await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), orb_handle).await;
 
     info!("MAVIS shutdown complete.");
     Ok(())
