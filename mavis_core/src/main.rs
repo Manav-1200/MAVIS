@@ -64,6 +64,27 @@ async fn main() -> Result<()> {
         executor.run().await;
     });
 
+    // DBus Integration
+    let bus_clone = Arc::clone(&bus);
+    let mut dbus = system::dbus::DbusIntegration::new(bus_clone);
+    let dbus_handle = tokio::spawn(async move {
+        dbus.run().await;
+    });
+
+    // Hotkey Manager
+    let bus_clone = Arc::clone(&bus);
+    let mut hotkeys = system::hotkeys::HotkeyManager::new(bus_clone);
+    let hotkeys_handle = tokio::spawn(async move {
+        hotkeys.run().await;
+    });
+
+    // File Watcher
+    let bus_clone = Arc::clone(&bus);
+    let mut watcher = system::watcher::FileWatcher::new(bus_clone);
+    let watcher_handle = tokio::spawn(async move {
+        watcher.run().await;
+    });
+
     // Worker Bridge
     let (worker_event_tx, mut worker_event_rx) = mpsc::channel(64);
     let bus_clone = Arc::clone(&bus);
@@ -140,13 +161,22 @@ async fn main() -> Result<()> {
         }
     }
 
-    drop(bus);
+    // CRITICAL: close the bus first. This wakes up every rx.recv().await immediately.
+    bus.close();
+    info!("EventBus closed — signaling all subsystems to shut down");
 
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), ctx_handle).await;
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), planner_handle).await;
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), exec_handle).await;
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), bridge_handle).await;
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), orb_handle).await;
+    // Join everything concurrently so total shutdown is capped at 5s, not 5s × N.
+    let timeout = std::time::Duration::from_secs(5);
+    let _ = tokio::join!(
+        tokio::time::timeout(timeout, ctx_handle),
+        tokio::time::timeout(timeout, planner_handle),
+        tokio::time::timeout(timeout, exec_handle),
+        tokio::time::timeout(timeout, dbus_handle),
+        tokio::time::timeout(timeout, hotkeys_handle),
+        tokio::time::timeout(timeout, watcher_handle),
+        tokio::time::timeout(timeout, bridge_handle),
+        tokio::time::timeout(timeout, orb_handle),
+    );
 
     info!("MAVIS shutdown complete.");
     Ok(())

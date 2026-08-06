@@ -88,6 +88,10 @@ impl ContextEngine {
             EventType::WorkerRequest => {
                 info!("ContextEngine: observed WorkerRequest from {}", event.source);
             }
+
+            EventType::SystemAction => {
+                info!("ContextEngine: SystemAction observed — {}", event.payload);
+            }
         }
 
         Ok(())

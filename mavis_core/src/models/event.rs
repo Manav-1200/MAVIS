@@ -24,6 +24,7 @@ pub enum EventType {
     WorkerRequest,
     WorkerResponse,
     UiStateChange,
+    SystemAction,
 }
 
 #[cfg(test)]

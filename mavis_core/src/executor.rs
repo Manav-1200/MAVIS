@@ -160,8 +160,15 @@ impl Executor {
             }
             "system" => {
                 let op = action.get("op").and_then(|v| v.as_str()).unwrap_or("unknown");
-                warn!("Executor: system action '{}' is stubbed (DBus not ready)", op);
-                Err(anyhow::anyhow!("system action '{}' not implemented", op))
+                let system_event = Event {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    source: "executor".to_string(),
+                    event_type: EventType::SystemAction,
+                    payload: action.clone(),
+                };
+                self.bus.publish(system_event);
+                Ok(format!("Delegated system action '{}' to DBus subsystem", op))
             }
             other => {
                 warn!("Executor: unknown action type '{}'", other);
