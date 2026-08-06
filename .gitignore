@@ -42,4 +42,6 @@ htmlcov/
 .env
 
 # OS
-.DS_Store
+.DS_Storetarget/
+**/*.rs.bk
+Cargo.lock
