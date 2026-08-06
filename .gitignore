@@ -1,31 +1,33 @@
-# Python
+# ─── Python ──────────────────────────────────────
 __pycache__/
 *.py[cod]
 *.so
 *.egg-info/
-
-# Virtual environment
 .venv/
-
-# Build artifacts
 dist/
 build/
-/target
-Cargo.lock
-
-# IDE
-.vscode/
-.idea/
-
-# Tools
 .ruff_cache/
 .pytest_cache/
-
-# Coverage
 .coverage
 htmlcov/
 
-# Logs & data (keep .gitkeep)
+# ─── Rust ────────────────────────────────────────
+# Build output (matches target/ ANYWHERE in repo, e.g. mavis_core/target/)
+target/
+**/*.rs.bk
+
+# ─── IDE / Editor ────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ─── Environment & Secrets ───────────────────────
+.env
+.envrc
+
+# ─── Data / Logs / Memory (keep .gitkeep) ───────
 /data/*
 /logs/*
 /memory/*
@@ -33,15 +35,16 @@ htmlcov/
 !/logs/.gitkeep
 !/memory/.gitkeep
 
-# SQLite databases
+# ─── SQLite ──────────────────────────────────────
 *.db
 *.sqlite
 *.sqlite3
 
-# Environment
-.env
+# ─── OS ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
 
-# OS
-.DS_Storetarget/
-**/*.rs.bk
+# ─── Cargo.lock ──────────────────────────────────
+# For a binary crate like mavis_core, Cargo recommends committing Cargo.lock
+# for reproducible builds. Remove this line if you want it tracked.
 Cargo.lock
