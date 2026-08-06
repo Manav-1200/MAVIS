@@ -59,21 +59,9 @@ async fn main() -> Result<()> {
 
     // Executor
     let bus_clone = Arc::clone(&bus);
+    let mut executor = executor::Executor::new(bus_clone);
     let exec_handle = tokio::spawn(async move {
-        let mut rx = bus_clone.subscribe();
-        info!("Executor: listening for events");
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    info!("Executor received: {:?}", event.event_type);
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("Executor lagged by {} events", n);
-                }
-            }
-        }
-        info!("Executor: shutting down");
+        executor.run().await;
     });
 
     // Worker Bridge

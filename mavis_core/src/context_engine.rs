@@ -59,12 +59,12 @@ impl ContextEngine {
             }
 
             EventType::PlanReady => {
-                info!("ContextEngine: PlanReady — forwarding to executor");
+                info!("ContextEngine: PlanReady — updating working memory");
                 if let Some(plan) = event.payload.get("plan") {
                     let mut wm = self.memory.working.write().await;
                     wm.set_active_plan(plan.clone());
                 }
-                self.bus.publish(event);
+                // Do NOT re-publish; Executor listens directly on the bus.
             }
 
             EventType::ActionComplete => {
