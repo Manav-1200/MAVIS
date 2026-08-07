@@ -22,3 +22,12 @@ enabled = true
 
 [ai]
 provider = "local"
+
+[model]
+path = "~/.local/share/mavis/models/Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+n_ctx = 4096
+n_gpu_layers = -1        # -1 = offload all layers to GPU
+verbose = false
+
+[worker]
+idle_timeout = 300

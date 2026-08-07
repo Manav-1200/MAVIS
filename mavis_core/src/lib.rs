@@ -9,4 +9,4 @@ pub mod models;
 pub mod planner;
 pub mod system;
 pub mod ui;
-pub mod worker_bridge;
+pub mod bridge;

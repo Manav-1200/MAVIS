@@ -6,9 +6,10 @@ Loads, validates, and provides access to the MAVIS configuration.
 
 from __future__ import annotations
 
-import tomllib
 from pathlib import Path
 from typing import Any
+
+import tomllib
 
 from mavis.core.constants import DEFAULT_CONFIG_FILE
 from mavis.core.paths import CONFIG_DIR
@@ -64,6 +65,15 @@ class AppConfig:
         return {
             "application": {"debug": False},
             "logging": {"level": "INFO"},
+            "model": {
+                "path": "~/.local/share/mavis/models/Llama-3.1-8B-Instruct-Q4_K_M.gguf",
+                "n_ctx": 4096,
+                "n_gpu_layers": -1,
+                "verbose": False,
+            },
+            "worker": {
+                "idle_timeout": 300,
+            },
         }
 
     def _validate(self) -> None:

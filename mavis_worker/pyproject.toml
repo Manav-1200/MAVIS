@@ -1,14 +1,10 @@
 [project]
 name = "mavis-worker"
-version = "0.1.0"
+version = "0.3.0"
 description = "MAVIS AI inference worker"
 requires-python = ">=3.10"
 dependencies = [
-    "torch",
-    "transformers",
-    "numpy",
-    "fastapi",
-    "uvicorn",
+    "llama-cpp-python>=0.2.90",
 ]
 
 [build-system]
@@ -17,3 +13,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/mavis"]
+
+[tool.ruff]
+line-length = 100

@@ -5,6 +5,7 @@ use log::{info, warn};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+mod bridge;
 mod context_engine;
 mod event_bus;
 mod executor;
@@ -13,7 +14,6 @@ mod models;
 mod planner;
 mod system;
 mod ui;
-mod worker_bridge;
 
 use event_bus::EventBus;
 use models::event::{Event, EventType};
@@ -86,20 +86,11 @@ async fn main() -> Result<()> {
     });
 
     // Worker Bridge
-    let (worker_event_tx, mut worker_event_rx) = mpsc::channel(64);
     let bus_clone = Arc::clone(&bus);
-    let mut bridge = worker_bridge::WorkerBridge::new(worker_event_tx);
     let bridge_handle = tokio::spawn(async move {
+        let bridge = bridge::worker_bridge::WorkerBridge::new();
         if let Err(e) = bridge.run(bus_clone).await {
             warn!("WorkerBridge error: {}", e);
-        }
-    });
-
-    // Forward worker events back to bus
-    let bus_clone = Arc::clone(&bus);
-    let _forward_handle = tokio::spawn(async move {
-        while let Some(event) = worker_event_rx.recv().await {
-            bus_clone.publish(event);
         }
     });
 
