@@ -1,214 +1,286 @@
-"""MAVIS AI Worker — UDS server with inference, health checks, and idle unload."""
-
 import asyncio
+import gc
 import json
-import logging
 import os
 import signal
-import sys
+import struct
+import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from mavis.core.config import load_config
-from mavis.core.logger import setup_logging
-from mavis.inference.engine import LlamaEngine
-from mavis.inference.prompts import build_chat_messages
-
-logger = logging.getLogger(__name__)
-
-SOCKET_PATH = "/tmp/mavis_worker.sock"
-IDLE_TIMEOUT = 300  # 5 minutes
+from mavis.inference import SYSTEM_PROMPT, LlamaEngine, build_chat_messages
 
 
-class MavisWorker:
-    def __init__(self):
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _make_event(payload: dict, event_type: str = "WorkerResponse") -> dict:
+    return {
+        "id": str(uuid.uuid4()),
+        "timestamp": _now_iso(),
+        "source": "mavis_worker",
+        "event_type": event_type,
+        "payload": payload,
+    }
+
+
+class WorkerServer:
+    def __init__(self, socket_path: str = "/tmp/mavis_worker.sock"):
+        self.socket_path = socket_path
+        self.engine = LlamaEngine()
         self.config = load_config()
-        setup_logging()
-        self.engine = LlamaEngine(self.config.data)
+        self.executor = ThreadPoolExecutor(max_workers=1)
         self.last_activity = time.time()
-        self._shutdown = asyncio.Event()
-        self._idle_task: asyncio.Task | None = None
-        self._start_time = time.time()
+        self.idle_timeout = self.config.get("worker", {}).get("idle_timeout", 300)
+        self.lock = threading.Lock()
+        self.running = True
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
-        """Handle one UDS connection with length-prefixed JSON."""
-        self.last_activity = time.time()
         try:
-            while True:
-                len_bytes = await reader.readexactly(4)
-                length = int.from_bytes(len_bytes, "little")
-                data = await reader.readexactly(length)
-                request = json.loads(data.decode("utf-8"))
+            while self.running:
+                raw_len = await reader.read(4)
+                if len(raw_len) < 4:
+                    break
+                length = struct.unpack("<I", raw_len)[0]
+                if length > 10_000_000:
+                    break
 
+                data = await reader.read(length)
+                if len(data) < length:
+                    break
+
+                request = json.loads(data.decode("utf-8"))
                 response = await self.process_request(request)
+                self.last_activity = time.time()
 
                 resp_bytes = json.dumps(response).encode("utf-8")
-                writer.write(len(resp_bytes).to_bytes(4, "little"))
-                writer.write(resp_bytes)
+                writer.write(struct.pack("<I", len(resp_bytes)) + resp_bytes)
                 await writer.drain()
-                self.last_activity = time.time()
-        except asyncio.IncompleteReadError:
-            logger.debug("Client disconnected")
-        except ConnectionResetError:
-            logger.debug("Client connection reset")
-        except OSError as e:
-            logger.error(f"Client handler OS error: {e}")
+        except asyncio.CancelledError:
+            pass
+        except (ConnectionResetError, BrokenPipeError, json.JSONDecodeError, struct.error) as e:
+            print(f"[worker] Client handler error: {e}")
         finally:
             writer.close()
             await writer.wait_closed()
 
+    def _extract_request(self, request: dict) -> tuple[str, dict]:
+        """
+        Normalize request format.
+        Returns (request_type, payload_dict).
+        Accepts:
+          - {"type": "chat", "payload": {...}}
+          - {"type": "WorkerRequest", "payload": {"request_type": "chat", ...}}
+          - {"type": "health"}  (payload empty)
+        """
+        event_type = request.get("type", "")
+        payload = request.get("payload", {}) or {}
+
+        if event_type == "WorkerRequest":
+            inner_type = payload.get("request_type") or payload.get("type", "unknown")
+            return inner_type, payload
+        else:
+            return event_type, payload
+
     async def process_request(self, request: dict) -> dict:
-        """Route incoming requests. Accepts full MAVIS Event dicts or direct requests."""
-        event_type = request.get("event_type", request.get("type", "unknown"))
-        payload = request.get("payload", request)
+        req_type, payload = self._extract_request(request)
 
-        if event_type == "health" or (
-            isinstance(payload, dict) and payload.get("type") == "health"
-        ):
-            return self._make_event(
-                "WorkerResponse",
+        if req_type == "health":
+            return await self._health()
+        elif req_type == "chat":
+            return await self._chat(payload)
+        elif req_type == "generate":
+            return await self._generate(payload)
+        elif req_type == "unload":
+            return await self._unload()
+        elif req_type == "memory":
+            return await self._memory()
+        else:
+            return _make_event(
                 {
-                    "type": "health",
-                    "status": "ok",
-                    "model_loaded": self.engine.is_loaded,
-                    "uptime": time.time() - self._start_time,
-                },
+                    "type": "error",
+                    "error": f"Unknown request type: {req_type}",
+                }
             )
 
-        if event_type == "WorkerRequest" or event_type == "chat":
-            msg = payload.get("message", payload.get("prompt", ""))
-            if not msg:
-                return self._error_response("Empty message/prompt")
+    async def _health(self) -> dict:
+        return _make_event(
+            {
+                "type": "health",
+                "status": "ok",
+                "model_loaded": self.engine.is_loaded,
+                "uptime": time.time() - getattr(self, "_start_time", time.time()),
+            }
+        )
 
-            await self._ensure_model()
+    async def _chat(self, payload: dict) -> dict:
+        messages = payload.get("messages", [])
+        max_tokens = payload.get("max_tokens", 256)
+        temperature = payload.get("temperature", 0.7)
+        working_memory = payload.get("working_memory", []) or []
+
+        if not messages:
+            return _make_event(
+                {
+                    "type": "error",
+                    "error": "Empty message/prompt",
+                }
+            )
+
+        chat_messages = build_chat_messages(
+            user_messages=messages,
+            working_memory=working_memory,
+            system_prompt=SYSTEM_PROMPT,
+        )
+
+        try:
             loop = asyncio.get_event_loop()
-            messages = build_chat_messages(msg)
             result = await loop.run_in_executor(
-                None,
+                self.executor,
                 lambda: self.engine.chat(
-                    messages,
-                    max_tokens=payload.get("max_tokens", 512),
-                    temperature=payload.get("temperature", 0.7),
+                    messages=chat_messages,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
                 ),
             )
-            return self._ok_response(result)
 
-        if event_type == "generate":
-            prompt = payload.get("prompt", "")
-            if not prompt:
-                return self._error_response("Empty prompt")
+            content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            finish_reason = result.get("choices", [{}])[0].get("finish_reason", "")
+            usage = result.get("usage", {})
 
-            await self._ensure_model()
+            return _make_event(
+                {
+                    "type": "response",
+                    "result": {
+                        "content": content,
+                        "finish_reason": finish_reason,
+                        "usage": usage,
+                    },
+                }
+            )
+        except (RuntimeError, OSError, ValueError) as e:
+            return _make_event(
+                {
+                    "type": "error",
+                    "error": f"Inference failed: {e!s}",
+                }
+            )
+
+    async def _generate(self, payload: dict) -> dict:
+        prompt = payload.get("prompt", "")
+        max_tokens = payload.get("max_tokens", 256)
+        temperature = payload.get("temperature", 0.7)
+
+        if not prompt:
+            return _make_event(
+                {
+                    "type": "error",
+                    "error": "Empty message/prompt",
+                }
+            )
+
+        try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
-                None,
+                self.executor,
                 lambda: self.engine.generate(
-                    prompt,
-                    max_tokens=payload.get("max_tokens", 512),
-                    temperature=payload.get("temperature", 0.7),
+                    prompt=prompt,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
                 ),
             )
-            return self._ok_response(result)
 
-        if event_type == "unload" or (
-            isinstance(payload, dict) and payload.get("type") == "unload"
-        ):
-            self.engine.unload()
-            return self._ok_response({"status": "unloaded"})
+            content = result.get("choices", [{}])[0].get("text", "")
+            finish_reason = result.get("choices", [{}])[0].get("finish_reason", "")
+            usage = result.get("usage", {})
 
-        if event_type == "memory" or (
-            isinstance(payload, dict) and payload.get("type") == "memory"
-        ):
-            return self._ok_response(self.engine.get_memory_usage())
+            return _make_event(
+                {
+                    "type": "response",
+                    "result": {
+                        "content": content,
+                        "finish_reason": finish_reason,
+                        "usage": usage,
+                    },
+                }
+            )
+        except (RuntimeError, OSError, ValueError) as e:
+            return _make_event(
+                {
+                    "type": "error",
+                    "error": f"Inference failed: {e!s}",
+                }
+            )
 
-        return self._error_response(f"Unknown request type: {event_type}")
-
-    def _make_event(self, event_type: str, payload: dict) -> dict:
-        return {
-            "id": str(uuid.uuid4()),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "source": "mavis_worker",
-            "event_type": event_type,
-            "payload": payload,
-        }
-
-    def _ok_response(self, result: dict) -> dict:
-        return self._make_event(
-            "WorkerResponse",
+    async def _unload(self) -> dict:
+        self.engine.unload()
+        gc.collect()
+        return _make_event(
             {
                 "type": "response",
-                "result": result,
-            },
+                "result": {"status": "unloaded"},
+            }
         )
 
-    def _error_response(self, error: str) -> dict:
-        return self._make_event(
-            "WorkerResponse",
+    async def _memory(self) -> dict:
+        mem = self.engine.get_memory_usage()
+        return _make_event(
             {
-                "type": "error",
-                "error": error,
-            },
+                "type": "response",
+                "result": mem,
+            }
         )
-
-    async def _ensure_model(self):
-        """Lazy-load model in thread pool."""
-        if not self.engine.is_loaded:
-            logger.info("Lazy-loading model...")
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, self.engine.load_model)
 
     async def idle_monitor(self):
-        """Unload model after idle timeout to reclaim VRAM."""
-        while not self._shutdown.is_set():
-            try:
-                await asyncio.wait_for(self._shutdown.wait(), timeout=60)
-                return
-            except asyncio.TimeoutError:
-                idle = time.time() - self.last_activity
-                if idle > IDLE_TIMEOUT and self.engine.is_loaded:
-                    logger.info(f"Idle for {idle:.0f}s — unloading model")
+        while self.running:
+            await asyncio.sleep(30)
+            with self.lock:
+                if self.engine.is_loaded and (time.time() - self.last_activity) > self.idle_timeout:
+                    print("[worker] Idle timeout reached. Unloading model.")
                     self.engine.unload()
+                    gc.collect()
 
     async def run(self):
-        """Start UDS server."""
-        if os.path.exists(SOCKET_PATH):
-            os.remove(SOCKET_PATH)
+        self._start_time = time.time()
+        if os.path.exists(self.socket_path):
+            os.remove(self.socket_path)
 
-        server = await asyncio.start_unix_server(self.handle_client, path=SOCKET_PATH)
-        os.chmod(SOCKET_PATH, 0o666)
-        logger.info(f"MAVIS worker listening on {SOCKET_PATH}")
+        server = await asyncio.start_unix_server(self.handle_client, path=self.socket_path)
+        os.chmod(self.socket_path, 0o666)
 
-        self._idle_task = asyncio.create_task(self.idle_monitor())
+        print(f"[worker] Listening on {self.socket_path}")
 
+        idle_task = asyncio.create_task(self.idle_monitor())
+
+        loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
-            asyncio.get_event_loop().add_signal_handler(sig, self._shutdown.set)
+            loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
 
-        await self._shutdown.wait()
+        async with server:
+            await server.serve_forever()
 
-        logger.info("Worker shutting down...")
-        server.close()
-        await server.wait_closed()
+        idle_task.cancel()
+        try:
+            await idle_task
+        except asyncio.CancelledError:
+            pass
 
-        if self._idle_task:
-            self._idle_task.cancel()
-            try:
-                await self._idle_task
-            except asyncio.CancelledError:
-                pass
-
+    async def shutdown(self):
+        print("[worker] Shutting down...")
+        self.running = False
         self.engine.unload()
-        if os.path.exists(SOCKET_PATH):
-            os.remove(SOCKET_PATH)
-        logger.info("Worker shutdown complete.")
+        gc.collect()
+        if os.path.exists(self.socket_path):
+            os.remove(self.socket_path)
 
 
 def main():
-    worker = MavisWorker()
-    asyncio.run(worker.run())
+    server = WorkerServer()
+    asyncio.run(server.run())
 
 
 if __name__ == "__main__":

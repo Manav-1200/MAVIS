@@ -1,149 +1,168 @@
-"""Local LLM inference engine using llama-cpp-python."""
-
 import gc
-import logging
-import time
+import subprocess
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
+try:
+    from llama_cpp import Llama
+except ImportError as e:
+    raise ImportError(
+        "llama-cpp-python not installed. Run:\n"
+        "  CMAKE_ARGS='-DGGML_CUDA=on' pip install llama-cpp-python --force-reinstall --no-cache-dir"
+    ) from e
 
 
 class LlamaEngine:
-    """Manages model loading and inference."""
-
-    def __init__(self, config: dict[str, Any]):
-        self.config = config
-        self.model_path: str | None = None
-        self._llm = None
-        self._loaded = False
-        self._load_time = 0.0
+    def __init__(self, model_path: str | None = None, n_gpu_layers: int = -1):
+        self._model_path = model_path
+        self._n_gpu_layers = n_gpu_layers
+        self._llm: Llama | None = None
+        self._model_name_hint: str = ""
 
     def _resolve_model_path(self) -> str:
-        """Resolve model path from config or well-known locations."""
-        model_path = self.config.get("model", {}).get("path")
-        if model_path:
-            expanded = Path(model_path).expanduser()
-            if expanded.exists():
-                return str(expanded)
+        if self._model_path:
+            return self._model_path
 
         candidates = [
-            Path.home() / ".local/share/mavis/models/Llama-3.1-8B-Instruct-Q4_K_M.gguf",
             Path.home() / ".local/share/mavis/models/Phi-3-mini-4k-instruct-Q4_K_M.gguf",
+            Path.home() / ".local/share/mavis/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
         ]
+
         for candidate in candidates:
             if candidate.exists():
                 return str(candidate)
 
         raise FileNotFoundError("No GGUF model found. Download one to ~/.local/share/mavis/models/")
 
-    def load_model(self) -> None:
-        """Lazy-load the model. Idempotent."""
-        if self._loaded:
+    def _detect_model_type(self, path: str) -> str:
+        p = path.lower()
+        if "tinyllama" in p:
+            return "tinyllama"
+        if "phi-3" in p or "phi3" in p:
+            return "phi3"
+        if "llama-3" in p or "llama3" in p:
+            return "llama3"
+        return "unknown"
+
+    def load_model(self):
+        if self._llm is not None:
             return
 
-        from llama_cpp import Llama
+        path = self._resolve_model_path()
+        self._model_name_hint = self._detect_model_type(path)
+        print(f"[engine] Loading model: {path} (type={self._model_name_hint})")
 
-        self.model_path = self._resolve_model_path()
-        logger.info(f"Loading model from {self.model_path}")
-
-        n_ctx = self.config.get("model", {}).get("n_ctx", 4096)
-        n_gpu_layers = self.config.get("model", {}).get("n_gpu_layers", -1)
-        verbose = self.config.get("model", {}).get("verbose", False)
-
-        start = time.time()
         self._llm = Llama(
-            model_path=self.model_path,
-            n_ctx=n_ctx,
-            n_gpu_layers=n_gpu_layers,
-            verbose=verbose,
+            model_path=path,
+            n_ctx=4096,
+            n_gpu_layers=self._n_gpu_layers,
+            verbose=False,
         )
-        self._load_time = time.time() - start
-        self._loaded = True
-        logger.info(f"Model loaded in {self._load_time:.2f}s")
+        print("[engine] Model loaded.")
 
-    def unload(self) -> None:
-        """Unload model and free VRAM."""
-        if not self._loaded:
-            return
-        logger.info("Unloading model...")
-        del self._llm
-        self._llm = None
-        self._loaded = False
-        gc.collect()
-        logger.info("Model unloaded.")
+    def unload(self):
+        if self._llm is not None:
+            print("[engine] Unloading model...")
+            del self._llm
+            self._llm = None
+            gc.collect()
 
     @property
     def is_loaded(self) -> bool:
-        return self._loaded
+        return self._llm is not None
 
-    def get_memory_usage(self) -> dict[str, Any]:
-        """Return VRAM usage if available."""
+    def get_memory_usage(self) -> dict[str, float]:
+        if not self.is_loaded:
+            return {"gpu_total_mb": 0.0, "gpu_used_mb": 0.0}
+
         try:
-            from llama_cpp import cuda_get_device_memory
-
-            free, total = cuda_get_device_memory()
-            used = total - free
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=memory.total,memory.used",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+                timeout=5,
+            )
+            total_str, used_str = result.stdout.strip().split(", ")
             return {
-                "gpu_total_mb": round(total / 1024**2, 1),
-                "gpu_used_mb": round(used / 1024**2, 1),
+                "gpu_total_mb": float(total_str),
+                "gpu_used_mb": float(used_str),
             }
-        except ImportError:
-            return {"gpu_total_mb": 0, "gpu_used_mb": 0}
+        except (subprocess.SubprocessError, OSError, ValueError) as e:
+            print(f"[engine] GPU memory query failed: {e}")
+            return {"gpu_total_mb": 0.0, "gpu_used_mb": 0.0}
+
+    def _format_chat_prompt(self, messages: list[dict[str, str]]) -> str | None:
+        """
+        Manually format chat prompt for models whose GGUF lacks proper chat template.
+        Returns None if native create_chat_completion should be used.
+        """
+        if self._model_name_hint == "tinyllama":
+            parts = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    parts.append(f"<|system|>\n{content}")
+                elif role == "user":
+                    parts.append(f"<|user|>\n{content}")
+                elif role == "assistant":
+                    parts.append(f"<|assistant|>\n{content}")
+            parts.append("<|assistant|>\n")
+            return "\n".join(parts)
+
+        # For Phi-3, Llama-3, and other modern models, let llama-cpp handle it
+        return None
 
     def generate(
         self,
         prompt: str,
-        max_tokens: int = 512,
+        max_tokens: int = 256,
         temperature: float = 0.7,
         stop: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Raw completion. Loads model if needed."""
         self.load_model()
-        stop = stop or ["<|eot_id|>", "<|endoftext|>"]
-
-        start = time.time()
-        output = self._llm(
-            prompt,
+        return self._llm(
+            prompt=prompt,
             max_tokens=max_tokens,
             temperature=temperature,
-            stop=stop,
+            stop=stop or [],
         )
-        inference_time = time.time() - start
-
-        text = output["choices"][0]["text"]
-        tokens = output["usage"]["completion_tokens"]
-
-        return {
-            "text": text,
-            "tokens": tokens,
-            "inference_time": round(inference_time, 3),
-            "tokens_per_sec": round(tokens / inference_time, 2) if inference_time > 0 else 0,
-        }
 
     def chat(
         self,
         messages: list[dict[str, str]],
-        max_tokens: int = 512,
+        max_tokens: int = 256,
         temperature: float = 0.7,
     ) -> dict[str, Any]:
-        """Chat completion using the model's built-in chat template."""
         self.load_model()
 
-        start = time.time()
-        output = self._llm.create_chat_completion(
+        manual_prompt = self._format_chat_prompt(messages)
+        if manual_prompt is not None:
+            result = self._llm(
+                prompt=manual_prompt,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stop=["<|user|>", "<|system|>", "<|assistant|>"],
+            )
+            text = result.get("choices", [{}])[0].get("text", "")
+            return {
+                "choices": [
+                    {
+                        "message": {"content": text, "role": "assistant"},
+                        "finish_reason": result.get("choices", [{}])[0].get("finish_reason", ""),
+                    }
+                ],
+                "usage": result.get("usage", {}),
+            }
+
+        # Native chat completion for models with proper templates
+        return self._llm.create_chat_completion(
             messages=messages,
             max_tokens=max_tokens,
             temperature=temperature,
         )
-        inference_time = time.time() - start
-
-        text = output["choices"][0]["message"]["content"]
-        tokens = output["usage"]["completion_tokens"]
-
-        return {
-            "text": text,
-            "tokens": tokens,
-            "inference_time": round(inference_time, 3),
-            "tokens_per_sec": round(tokens / inference_time, 2) if inference_time > 0 else 0,
-        }

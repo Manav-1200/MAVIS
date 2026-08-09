@@ -1,5 +1,3 @@
-"""MAVIS local inference package."""
-
 from .engine import LlamaEngine
 from .prompts import SYSTEM_PROMPT, build_chat_messages
 

@@ -1,7 +1,4 @@
-"""Prompt templates and context injection."""
-
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any
 
 
@@ -11,37 +8,38 @@ class Message:
     content: str
 
 
-SYSTEM_PROMPT = """You are MAVIS, a persistent desktop-native AI companion. You are helpful, concise, and proactive. You run entirely locally on the user's machine. You have access to the desktop environment and can perform actions like opening apps, running shell commands, sending notifications, and controlling media.
+SYSTEM_PROMPT = """You are MAVIS, a persistent desktop AI companion. You are always present but never intrusive. You help the user with tasks, provide context-aware assistance, and maintain a warm, efficient personality.
 
 Rules:
-- Keep responses brief and actionable unless asked for detail.
-- When the user asks you to do something, respond with a plan in JSON format when appropriate.
-- Be friendly but professional. You are a companion, not a servant.
-- If you don't know something, say so. Do not hallucinate facts.
-- Current date: {current_date}"""
+- Be concise. The user values brevity.
+- If you don't know something, say so.
+- Use the provided Working Memory to ground your responses.
+- Do not hallucinate facts not present in the context."""
 
 
 def build_chat_messages(
-    user_message: str,
-    history: list[Message] | None = None,
-    context_items: list[dict[str, Any]] | None = None,
+    user_messages: list[dict[str, str]],
+    working_memory: list[dict[str, Any]] | None = None,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> list[dict[str, str]]:
-    """Build an OpenAI-style message list for llama-cpp chat completion."""
-    history = history or []
-    context_items = context_items or []
+    messages = [{"role": "system", "content": system_prompt}]
 
-    system_content = SYSTEM_PROMPT.format(current_date=datetime.now(tz=timezone.utc).isoformat())
+    if working_memory:
+        context_lines = []
+        for item in working_memory:
+            content = item.get("content", "")
+            source = item.get("source", "memory")
+            if content:
+                context_lines.append(f"- [{source}] {content}")
 
-    if context_items:
-        ctx_lines = "\n".join(
-            f"- {item.get('key', 'unknown')}: {item.get('value', '')}" for item in context_items
-        )
-        system_content += f"\n\nRelevant context:\n{ctx_lines}"
+        if context_lines:
+            context_block = "Working Memory:\n" + "\n".join(context_lines)
+            messages.append({"role": "system", "content": context_block})
 
-    messages: list[dict[str, str]] = [{"role": "system", "content": system_content}]
+    for msg in user_messages:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        if content:
+            messages.append({"role": role, "content": content})
 
-    for msg in history:
-        messages.append({"role": msg.role, "content": msg.content})
-
-    messages.append({"role": "user", "content": user_message})
     return messages
