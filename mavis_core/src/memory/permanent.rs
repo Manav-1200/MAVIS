@@ -1,5 +1,10 @@
-use rusqlite::{Connection, params};
+// mavis_core/src/memory/permanent.rs
+// Permanent key-value store for durable facts and preferences.
+
+#![allow(dead_code)]
+
 use anyhow::Result;
+use rusqlite::{params, Connection};
 use std::path::Path;
 
 pub struct PermanentStore {
@@ -22,7 +27,9 @@ impl PermanentStore {
     }
 
     pub fn get(&self, key: &str) -> Result<Option<String>> {
-        let mut stmt = self.conn.prepare("SELECT value FROM permanent WHERE key = ?1")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT value FROM permanent WHERE key = ?1")?;
         let mut rows = stmt.query(params![key])?;
         if let Some(row) = rows.next()? {
             Ok(Some(row.get(0)?))
@@ -42,12 +49,15 @@ impl PermanentStore {
     }
 
     pub fn delete(&self, key: &str) -> Result<()> {
-        self.conn.execute("DELETE FROM permanent WHERE key = ?1", params![key])?;
+        self.conn
+            .execute("DELETE FROM permanent WHERE key = ?1", params![key])?;
         Ok(())
     }
 
     pub fn list(&self) -> Result<Vec<(String, String)>> {
-        let mut stmt = self.conn.prepare("SELECT key, value FROM permanent ORDER BY key")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM permanent ORDER BY key")?;
         let rows = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;

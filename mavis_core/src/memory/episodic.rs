@@ -1,7 +1,12 @@
-use rusqlite::{Connection, params};
-use anyhow::Result;
-use std::path::Path;
+// mavis_core/src/memory/episodic.rs
+// Episodic memory: time-ordered record of events.
+
+#![allow(dead_code)]
+
 use crate::models::event::Event;
+use anyhow::Result;
+use rusqlite::{params, Connection};
+use std::path::Path;
 
 pub struct EpisodicStore {
     conn: Connection,
@@ -45,7 +50,9 @@ impl EpisodicStore {
     }
 
     pub fn record(&self, event: &Event) -> Result<()> {
-        let summary = event.payload.get("summary")
+        let summary = event
+            .payload
+            .get("summary")
             .and_then(|v| v.as_str())
             .unwrap_or("");
         self.conn.execute(
@@ -66,7 +73,7 @@ impl EpisodicStore {
     pub fn recent(&self, n: usize) -> Result<Vec<Episode>> {
         let mut stmt = self.conn.prepare(
             "SELECT id, event_id, event_type, source, payload, timestamp, summary
-             FROM episodes ORDER BY timestamp DESC LIMIT ?1"
+             FROM episodes ORDER BY timestamp DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![n as i64], |row| {
             Ok(Episode {
@@ -88,7 +95,7 @@ impl EpisodicStore {
             "SELECT id, event_id, event_type, source, payload, timestamp, summary
              FROM episodes
              WHERE summary LIKE ?1 OR payload LIKE ?1 OR event_type LIKE ?1
-             ORDER BY timestamp DESC LIMIT ?2"
+             ORDER BY timestamp DESC LIMIT ?2",
         )?;
         let rows = stmt.query_map(params![pattern, n as i64], |row| {
             Ok(Episode {

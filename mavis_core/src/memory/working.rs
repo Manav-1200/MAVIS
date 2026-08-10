@@ -1,3 +1,8 @@
+// mavis_core/src/memory/working.rs
+// Working memory: transient, fast-access context for the current session.
+
+#![allow(dead_code)]
+
 use crate::models::event::Event;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;

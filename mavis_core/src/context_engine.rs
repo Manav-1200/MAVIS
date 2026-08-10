@@ -86,7 +86,17 @@ impl ContextEngine {
             }
 
             EventType::WorkerRequest => {
-                info!("ContextEngine: observed WorkerRequest from {}", event.source);
+                info!(
+                    "ContextEngine: observed WorkerRequest from {}",
+                    event.source
+                );
+                let snapshot = self.working_memory_snapshot().await;
+                info!(
+                    "ContextEngine: working memory — intent={:?}, has_plan={}, events={}",
+                    snapshot.current_intent,
+                    snapshot.active_plan.is_some(),
+                    snapshot.events.len()
+                );
             }
 
             EventType::SystemAction => {
@@ -108,13 +118,19 @@ impl ContextEngine {
                     timestamp: chrono::Utc::now(),
                     source: "context_engine".to_string(),
                     event_type: EventType::ContextUpdate,
-                    payload: payload.get("data").cloned().unwrap_or_else(|| payload.clone()),
+                    payload: payload
+                        .get("data")
+                        .cloned()
+                        .unwrap_or_else(|| payload.clone()),
                 };
                 self.bus.publish(ctx_event);
             }
             Some(other) => {
                 // Planner handles "plan" type responses.
-                info!("ContextEngine: passing WorkerResponse type '{}' to Planner", other);
+                info!(
+                    "ContextEngine: passing WorkerResponse type '{}' to Planner",
+                    other
+                );
             }
             None => {
                 warn!("ContextEngine: WorkerResponse missing 'type' field");
