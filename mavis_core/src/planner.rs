@@ -53,17 +53,20 @@ impl Planner {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
-        // TODO: local intent registry for simple plans (open app, screenshot, etc.)
-        // For now, delegate all planning to the AI worker.
+        // Delegate to AI worker for intent analysis / chat response
         let worker_req = Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
             source: "planner".to_string(),
             event_type: EventType::WorkerRequest,
             payload: serde_json::json!({
-                "type": "intent_analysis",
-                "intent": intent,
-                "original_event": event,
+                "request_type": "chat",
+                "messages": [
+                    {"role": "system", "content": "You are MAVIS, a helpful desktop AI companion. Keep responses concise and actionable."},
+                    {"role": "user", "content": intent}
+                ],
+                "max_tokens": 256,
+                "temperature": 0.7
             }),
         };
         self.bus.publish(worker_req);
@@ -72,21 +75,49 @@ impl Planner {
 
     async fn handle_worker_response(&self, event: Event) -> anyhow::Result<()> {
         let payload = &event.payload;
-        
-        if let Some("plan") = payload.get("type").and_then(|v| v.as_str()) {
-            let plan_event = Event {
-                id: uuid::Uuid::new_v4(),
-                timestamp: chrono::Utc::now(),
-                source: "planner".to_string(),
-                event_type: EventType::PlanReady,
-                payload: serde_json::json!({
-                    "plan": payload.get("plan"),
-                    "metadata": payload.get("metadata"),
-                }),
-            };
-            self.bus.publish(plan_event);
+        let response_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+        match response_type {
+            "response" => {
+                let content = payload
+                    .get("result")
+                    .and_then(|r| r.get("content"))
+                    .and_then(|c| c.as_str())
+                    .unwrap_or("I didn't understand that.");
+
+                let plan_event = Event {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    source: "planner".to_string(),
+                    event_type: EventType::PlanReady,
+                    payload: serde_json::json!({
+                        "plan": {"type": "say", "text": content}
+                    }),
+                };
+                self.bus.publish(plan_event);
+            }
+            "error" => {
+                let error_msg = payload
+                    .get("error")
+                    .and_then(|e| e.as_str())
+                    .unwrap_or("Unknown worker error");
+
+                let plan_event = Event {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    source: "planner".to_string(),
+                    event_type: EventType::PlanReady,
+                    payload: serde_json::json!({
+                        "plan": {"type": "say", "text": format!("Sorry, I encountered an error: {}", error_msg)}
+                    }),
+                };
+                self.bus.publish(plan_event);
+            }
+            other => {
+                info!("Planner: unhandled WorkerResponse type '{}'", other);
+            }
         }
-        
+
         Ok(())
     }
 }

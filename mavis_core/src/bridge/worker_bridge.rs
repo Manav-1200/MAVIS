@@ -1,5 +1,5 @@
 //! Bridges WorkerRequest events to the Python worker over UDS.
-//! Protocol: full Event JSON, length-prefixed, both directions.
+//! Protocol: length-prefixed JSON, both directions.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -89,7 +89,13 @@ impl WorkerBridge {
     }
 
     async fn handle_event(&mut self, event: &Event, bus: &Arc<EventBus>) -> Result<()> {
-        let request_json = serde_json::to_string(event)?;
+        // Worker expects {"type":"WorkerRequest","payload":{...}} not a full Event
+        let request_json = serde_json::json!({
+            "type": "WorkerRequest",
+            "payload": event.payload
+        })
+        .to_string();
+
         let response_str = self.lifecycle.send_request(&request_json).await?;
 
         let resp_event: Event = serde_json::from_str(&response_str).unwrap_or_else(|_| Event {

@@ -161,7 +161,22 @@ impl WorkerLifecycle {
 
     pub async fn health_check(&mut self) -> bool {
         match self.send_request(r#"{"type":"health"}"#).await {
-            Ok(resp) => resp.contains("\"status\":\"ok\""),
+            Ok(resp) => {
+                // Parse JSON properly — status is nested inside payload
+                let ok = serde_json::from_str::<serde_json::Value>(&resp)
+                    .ok()
+                    .and_then(|v| {
+                        v.get("payload")
+                            .and_then(|p| p.get("status"))
+                            .and_then(|s| s.as_str())
+                            .map(|s| s == "ok")
+                    })
+                    .unwrap_or(false);
+                if !ok {
+                    warn!("Health check unexpected response: {}", resp);
+                }
+                ok
+            }
             Err(e) => {
                 warn!("Health check failed: {}", e);
                 false
