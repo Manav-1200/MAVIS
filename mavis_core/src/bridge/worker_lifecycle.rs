@@ -45,8 +45,19 @@ impl WorkerLifecycle {
     }
 
     pub async fn ensure_running(&mut self) -> Result<()> {
-        if self.is_running() {
-            return Ok(());
+        // If we have a child handle, verify it's actually still alive
+        if let Some(ref mut child) = self.child {
+            match child.try_wait() {
+                Ok(None) => return Ok(()), // Still running
+                Ok(Some(status)) => {
+                    warn!("Worker process exited with status: {:?}", status);
+                    self.record_crash();
+                }
+                Err(e) => {
+                    warn!("Failed to poll worker status: {}", e);
+                    self.record_crash();
+                }
+            }
         }
 
         if !self.available {
@@ -116,53 +127,67 @@ impl WorkerLifecycle {
     }
 
     pub async fn send_request(&mut self, request: &str) -> Result<String> {
-        self.ensure_running().await?;
+        for attempt in 1..=2 {
+            self.ensure_running().await?;
 
-        let stream = UnixStream::connect(SOCKET_PATH)
-            .await
-            .context("Failed to connect to worker socket")?;
+            let stream = match UnixStream::connect(SOCKET_PATH).await {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!("Worker socket connection failed (attempt {}): {}", attempt, e);
+                    self.record_crash();
+                    if attempt == 2 {
+                        return Err(anyhow::anyhow!("Failed to connect to worker socket: {}", e));
+                    }
+                    continue;
+                }
+            };
 
-        let (mut reader, mut writer) = stream.into_split();
+            let (mut reader, mut writer) = stream.into_split();
 
-        // Length-prefixed write
-        let req_bytes = request.as_bytes();
-        writer
-            .write_all(&(req_bytes.len() as u32).to_le_bytes())
-            .await?;
-        writer.write_all(req_bytes).await?;
-        writer.flush().await?;
+            // Length-prefixed write
+            let req_bytes = request.as_bytes();
+            writer
+                .write_all(&(req_bytes.len() as u32).to_le_bytes())
+                .await?;
+            writer.write_all(req_bytes).await?;
+            writer.flush().await?;
 
-        self.last_request = Instant::now();
+            self.last_request = Instant::now();
 
-        // Length-prefixed read
-        let read_fut = async {
-            let mut len_bytes = [0u8; 4];
-            reader.read_exact(&mut len_bytes).await?;
-            let resp_len = u32::from_le_bytes(len_bytes) as usize;
-            let mut buf = vec![0u8; resp_len];
-            reader.read_exact(&mut buf).await?;
-            Ok::<_, std::io::Error>(String::from_utf8_lossy(&buf).to_string())
-        };
+            // Length-prefixed read
+            let read_fut = async {
+                let mut len_bytes = [0u8; 4];
+                reader.read_exact(&mut len_bytes).await?;
+                let resp_len = u32::from_le_bytes(len_bytes) as usize;
+                let mut buf = vec![0u8; resp_len];
+                reader.read_exact(&mut buf).await?;
+                Ok::<_, std::io::Error>(String::from_utf8_lossy(&buf).to_string())
+            };
 
-        match timeout(REQUEST_TIMEOUT, read_fut).await {
-            Ok(Ok(resp)) => Ok(resp),
-            Ok(Err(e)) => {
-                error!("IO error reading worker response: {}", e);
-                self.record_crash();
-                Err(e.into())
-            }
-            Err(_) => {
-                error!("Worker request timed out ({:?})", REQUEST_TIMEOUT);
-                self.record_crash();
-                anyhow::bail!("Worker request timed out")
+            match timeout(REQUEST_TIMEOUT, read_fut).await {
+                Ok(Ok(resp)) => return Ok(resp),
+                Ok(Err(e)) => {
+                    error!("IO error reading worker response (attempt {}): {}", attempt, e);
+                    self.record_crash();
+                    if attempt == 2 {
+                        return Err(e.into());
+                    }
+                }
+                Err(_) => {
+                    error!("Worker request timed out (attempt {})", attempt);
+                    self.record_crash();
+                    if attempt == 2 {
+                        anyhow::bail!("Worker request timed out");
+                    }
+                }
             }
         }
+        anyhow::bail!("Worker request failed after retries")
     }
 
     pub async fn health_check(&mut self) -> bool {
         match self.send_request(r#"{"type":"health"}"#).await {
             Ok(resp) => {
-                // Parse JSON properly — status is nested inside payload
                 let ok = serde_json::from_str::<serde_json::Value>(&resp)
                     .ok()
                     .and_then(|v| {
