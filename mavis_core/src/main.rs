@@ -14,6 +14,7 @@ mod models;
 mod planner;
 mod system;
 mod ui;
+mod tts;
 
 use event_bus::EventBus;
 use models::event::{Event, EventType};

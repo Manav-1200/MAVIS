@@ -2,6 +2,7 @@
 // Executes plans: shell commands, app launching, notifications, TTS.
 // Listens for PlanReady, emits ActionComplete + UiStateChange.
 
+use crate::tts::TtsEngine;
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
 use anyhow::Result;
@@ -11,11 +12,15 @@ use tokio::process::Command;
 
 pub struct Executor {
     bus: Arc<EventBus>,
+    tts: TtsEngine,
 }
 
 impl Executor {
     pub fn new(bus: Arc<EventBus>) -> Self {
-        Self { bus }
+        Self {
+            bus,
+            tts: TtsEngine::new(),
+        }
     }
 
     pub async fn run(&mut self) {
@@ -264,20 +269,8 @@ impl Executor {
 
     async fn run_say(&self, text: &str) -> Result<String> {
         info!("Executor: say: {}", text);
-        // Try speech-dispatcher first, then espeak, then log-only
-        for tts in ["spd-say", "espeak"] {
-            let mut cmd = Command::new(tts);
-            cmd.arg(text);
-            cmd.stdin(std::process::Stdio::null());
-            cmd.stdout(std::process::Stdio::null());
-            cmd.stderr(std::process::Stdio::null());
-            if let Ok(child) = cmd.spawn() {
-                let pid = child.id().map_or("?".to_string(), |p| p.to_string());
-                return Ok(format!("TTS via {} (pid: {}): {}", tts, pid, text));
-            }
-        }
-        info!("Executor: no TTS binary found, logging only");
-        Ok(format!("(say) {}", text))
+        self.tts.say(text);
+        Ok(format!("TTS: {}", text))
     }
 
     async fn emit_ui_state(&self, state: &str) {
