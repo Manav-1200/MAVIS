@@ -1,10 +1,8 @@
 import asyncio
-import gc
 import json
 import os
 import signal
 import struct
-import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -36,7 +34,7 @@ class WorkerServer:
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.last_activity = time.time()
         self.idle_timeout = self.config.get("worker", {}).get("idle_timeout", 300)
-        self.lock = threading.Lock()
+        self.lock = asyncio.Lock()
         self.running = True
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
@@ -54,8 +52,12 @@ class WorkerServer:
                     break
 
                 request = json.loads(data.decode("utf-8"))
+                req_type, _ = self._extract_request(request)
                 response = await self.process_request(request)
-                self.last_activity = time.time()
+
+                # Only bump activity for actual work, not health pings
+                if req_type not in ("health",):
+                    self.last_activity = time.time()
 
                 resp_bytes = json.dumps(response).encode("utf-8")
                 writer.write(struct.pack("<I", len(resp_bytes)) + resp_bytes)
@@ -69,14 +71,6 @@ class WorkerServer:
             await writer.wait_closed()
 
     def _extract_request(self, request: dict) -> tuple[str, dict]:
-        """
-        Normalize request format.
-        Returns (request_type, payload_dict).
-        Accepts:
-          - {"type": "chat", "payload": {...}}
-          - {"type": "WorkerRequest", "payload": {"request_type": "chat", ...}}
-          - {"type": "health"}  (payload empty)
-        """
         event_type = request.get("type", "")
         payload = request.get("payload", {}) or {}
 
@@ -218,7 +212,6 @@ class WorkerServer:
 
     async def _unload(self) -> dict:
         self.engine.unload()
-        gc.collect()
         return _make_event(
             {
                 "type": "response",
@@ -236,13 +229,17 @@ class WorkerServer:
         )
 
     async def idle_monitor(self):
+        print(f"[worker] Idle monitor started (timeout={self.idle_timeout}s)")
         while self.running:
             await asyncio.sleep(30)
-            with self.lock:
-                if self.engine.is_loaded and (time.time() - self.last_activity) > self.idle_timeout:
-                    print("[worker] Idle timeout reached. Unloading model.")
+            async with self.lock:
+                idle_for = time.time() - self.last_activity
+                if self.engine.is_loaded and idle_for > self.idle_timeout:
+                    print(f"[worker] Idle timeout reached ({idle_for:.0f}s). Unloading model.")
                     self.engine.unload()
-                    gc.collect()
+                else:
+                    if self.engine.is_loaded:
+                        print(f"[worker] Idle check: loaded, idle={idle_for:.0f}s")
 
     async def run(self):
         self._start_time = time.time()
@@ -273,7 +270,6 @@ class WorkerServer:
         print("[worker] Shutting down...")
         self.running = False
         self.engine.unload()
-        gc.collect()
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
 

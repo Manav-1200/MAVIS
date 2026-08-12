@@ -22,8 +22,11 @@ pub struct WorkerBridge {
 
 impl WorkerBridge {
     pub fn new() -> Self {
+        let python_path = std::env::var("MAVIS_PYTHON_PATH")
+            .unwrap_or_else(|_| "python3".to_string());
+        info!("WorkerBridge using Python interpreter: {}", python_path);
         Self {
-            lifecycle: WorkerLifecycle::new("python3", "mavis.worker"),
+            lifecycle: WorkerLifecycle::new(&python_path, "mavis.worker"),
         }
     }
 
@@ -89,7 +92,6 @@ impl WorkerBridge {
     }
 
     async fn handle_event(&mut self, event: &Event, bus: &Arc<EventBus>) -> Result<()> {
-        // Worker expects {"type":"WorkerRequest","payload":{...}} not a full Event
         let request_json = serde_json::json!({
             "type": "WorkerRequest",
             "payload": event.payload

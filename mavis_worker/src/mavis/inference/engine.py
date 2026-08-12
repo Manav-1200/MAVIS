@@ -63,9 +63,22 @@ class LlamaEngine:
     def unload(self):
         if self._llm is not None:
             print("[engine] Unloading model...")
+            if hasattr(self._llm, "cache"):
+                self._llm.cache = None
+            if hasattr(self._llm, "_cache"):
+                self._llm._cache = None
             del self._llm
             self._llm = None
-            gc.collect()
+            for _ in range(3):
+                gc.collect()
+            try:
+                import torch
+
+                torch.cuda.empty_cache()
+                print("[engine] CUDA cache cleared.")
+            except ImportError:
+                pass
+            print("[engine] Model unloaded.")
 
     @property
     def is_loaded(self) -> bool:
@@ -97,10 +110,6 @@ class LlamaEngine:
             return {"gpu_total_mb": 0.0, "gpu_used_mb": 0.0}
 
     def _format_chat_prompt(self, messages: list[dict[str, str]]) -> str | None:
-        """
-        Manually format chat prompt for models whose GGUF lacks proper chat template.
-        Returns None if native create_chat_completion should be used.
-        """
         if self._model_name_hint == "tinyllama":
             parts = []
             for msg in messages:
@@ -115,7 +124,6 @@ class LlamaEngine:
             parts.append("<|assistant|>\n")
             return "\n".join(parts)
 
-        # For Phi-3, Llama-3, and other modern models, let llama-cpp handle it
         return None
 
     def generate(
@@ -160,7 +168,6 @@ class LlamaEngine:
                 "usage": result.get("usage", {}),
             }
 
-        # Native chat completion for models with proper templates
         return self._llm.create_chat_completion(
             messages=messages,
             max_tokens=max_tokens,
