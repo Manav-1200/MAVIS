@@ -1,119 +1,99 @@
-//! Neural TTS via Piper (local, offline, CPU-fast).
-//! Falls back to spd-say if Piper or its voice model is missing.
-
-use std::path::Path;
 use std::process::{Command, Stdio};
-use log::{debug, error, info, warn};
+use std::io::Write;
+use log::{info, warn, error, debug};
 
+/// Neural TTS engine using Piper (local, offline).
+/// Falls back to speech-dispatcher (spd-say) if Piper is unavailable.
 pub struct TtsEngine {
-    model_path: String,
-    config_path: String,
-    use_piper: bool,
+    piper_available: bool,
+    voice_model_path: String,
 }
 
 impl TtsEngine {
     pub fn new() -> Self {
-        let model_path = std::env::var("HOME")
-            .map(|h| format!("{}/.local/share/piper-voices/en_US-lessac-medium.onnx", h))
-            .unwrap_or_default();
+        let voice_model_path = format!(
+            "{}/.local/share/piper-voices/en_US-amy-medium.onnx",
+            std::env::var("HOME").unwrap_or_default()
+        );
 
-        let config_path = format!("{}.json", model_path);
-
-        let piper_in_path = Command::new("sh")
-            .args(["-c", "command -v piper"])
-            .stdout(Stdio::null())
-            .status()
-            .map(|s| s.success())
+        let piper_available = Command::new("which")
+            .arg("piper")
+            .output()
+            .map(|o| o.status.success())
             .unwrap_or(false);
 
-        let model_exists = Path::new(&model_path).exists();
-        let config_exists = Path::new(&config_path).exists();
-
-        let use_piper = piper_in_path && model_exists && config_exists;
-
-        if use_piper {
-            info!("TTS: Piper ready ({})", model_path);
+        if piper_available {
+            if std::path::Path::new(&voice_model_path).exists() {
+                info!("TTS: Piper ready with voice {}", voice_model_path);
+            } else {
+                warn!(
+                    "Piper binary found but voice model missing at {}",
+                    voice_model_path
+                );
+            }
         } else {
-            warn!(
-                "TTS: Piper unavailable (binary={}, model={}, config={}). Falling back to spd-say.",
-                piper_in_path, model_exists, config_exists
-            );
+            info!("TTS: Piper not found, using spd-say fallback");
         }
 
         Self {
-            model_path,
-            config_path,
-            use_piper,
+            piper_available,
+            voice_model_path,
         }
     }
 
-    /// Speak the given text. Non-blocking; returns immediately.
+    /// Speak the given text. Fire-and-forget: non-blocking, returns immediately.
+    /// Text is truncated to 500 chars to avoid engine overload.
     pub fn say(&self, text: &str) {
-        let trimmed = text.trim();
-        if trimmed.is_empty() {
-            warn!("TTS received empty text, skipping");
-            return;
-        }
-
-        const MAX_LEN: usize = 500;
-        let text = if trimmed.len() > MAX_LEN {
-            warn!("TTS text too long ({} chars), truncating", trimmed.len());
-            &trimmed[..MAX_LEN]
+        let text = if text.len() > 500 {
+            &text[..500]
         } else {
-            trimmed
+            text
         };
 
-        if self.use_piper {
-            self.say_piper(text);
-        } else {
-            self.say_spd(text);
-        }
-    }
+        if self.piper_available && std::path::Path::new(&self.voice_model_path).exists() {
+            debug!("TTS (Piper): {}", text);
 
-    fn say_piper(&self, text: &str) {
-        debug!("TTS (Piper): {}", text);
+            let mut piper = match Command::new("piper")
+                .args(&["--model", &self.voice_model_path, "--output_file", "-"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(e) => {
+                    error!("TTS: Failed to spawn Piper: {}", e);
+                    self.fallback_say(text);
+                    return;
+                }
+            };
 
-        // Piper outputs raw 22050Hz mono S16LE PCM on stdout when --output_file is -
-        // Pipe directly to aplay with correct format flags.
-        let safe_text = text.replace("'", "'\\''");
-
-        let cmd = format!(
-            "printf '%s' '{}' | piper --model '{}' --config '{}' --output_file - | aplay -r 22050 -f S16_LE -c 1 -t raw -",
-            safe_text, self.model_path, self.config_path
-        );
-
-        match Command::new("sh")
-            .arg("-c")
-            .arg(&cmd)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(_) => info!("TTS spawned (Piper)"),
-            Err(e) => {
-                error!("Piper TTS failed ({}), falling back to spd-say", e);
-                self.say_spd(text);
+            if let Some(mut stdin) = piper.stdin.take() {
+                if let Err(e) = stdin.write_all(text.as_bytes()) {
+                    error!("TTS: Failed to write to Piper stdin: {}", e);
+                    self.fallback_say(text);
+                    return;
+                }
+                // stdin drops here, closing the pipe so Piper processes the text
             }
+
+            let _ = Command::new("aplay")
+                .args(&["-r", "22050", "-f", "S16_LE", "-c", "1", "-t", "raw", "-"])
+                .stdin(piper.stdout.take().unwrap())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+        } else {
+            self.fallback_say(text);
         }
     }
 
-    fn say_spd(&self, text: &str) {
-        debug!("TTS (spd-say fallback): {}", text);
-
-        match Command::new("spd-say")
+    fn fallback_say(&self, text: &str) {
+        warn!("TTS: spd-say fallback for: {}", text);
+        let _ = Command::new("spd-say")
             .arg(text)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .spawn()
-        {
-            Ok(_) => info!("TTS spawned (spd-say fallback)"),
-            Err(e) => error!("spd-say also failed: {}", e),
-        }
-    }
-}
-
-impl Default for TtsEngine {
-    fn default() -> Self {
-        Self::new()
+            .spawn();
     }
 }
