@@ -1,0 +1,296 @@
+//! MAVIS STT Manager — Rust runtime side
+
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{SampleFormat, SampleRate, SupportedStreamConfig};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+use log::{error, info};
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+pub struct SttConfig {
+    pub sample_rate: u32,
+    pub energy_threshold: f32,
+    pub silence_duration_ms: u64,
+    pub min_speech_duration_ms: u64,
+    pub frame_duration_ms: u64,
+    pub max_utterance_duration_ms: u64,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        Self {
+            sample_rate: 16000,
+            energy_threshold: 0.05,
+            silence_duration_ms: 500,
+            min_speech_duration_ms: 150,
+            frame_duration_ms: 30,
+            max_utterance_duration_ms: 8000,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VAD
+// ---------------------------------------------------------------------------
+
+struct EnergyVad {
+    frame_size: usize,
+    silence_threshold_frames: usize,
+    min_speech_threshold_frames: usize,
+    max_speech_frames: usize,
+    energy_threshold: f32,
+    buffer: VecDeque<f32>,
+    speech_frames: usize,
+    silence_frames: usize,
+    is_speaking: bool,
+    max_energy_seen: f32,
+}
+
+impl EnergyVad {
+    fn new(cfg: &SttConfig) -> Self {
+        let frame_size = (cfg.sample_rate as usize * cfg.frame_duration_ms as usize) / 1000;
+        Self {
+            frame_size,
+            silence_threshold_frames: ((cfg.silence_duration_ms / cfg.frame_duration_ms).max(1))
+                as usize,
+            min_speech_threshold_frames: ((cfg.min_speech_duration_ms / cfg.frame_duration_ms)
+                .max(1)) as usize,
+            max_speech_frames: ((cfg.max_utterance_duration_ms / cfg.frame_duration_ms).max(1))
+                as usize,
+            energy_threshold: cfg.energy_threshold,
+            buffer: VecDeque::new(),
+            speech_frames: 0,
+            silence_frames: 0,
+            is_speaking: false,
+            max_energy_seen: 0.0,
+        }
+    }
+
+    fn process(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
+        for chunk in samples.chunks(self.frame_size) {
+            if chunk.len() < self.frame_size {
+                self.buffer.extend(chunk);
+                continue;
+            }
+
+            let energy =
+                (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
+            self.max_energy_seen = self.max_energy_seen.max(energy);
+
+            self.buffer.extend(chunk);
+
+            if energy > self.energy_threshold {
+                self.speech_frames += 1;
+                self.silence_frames = 0;
+                if self.speech_frames >= self.min_speech_threshold_frames {
+                    if !self.is_speaking {
+                        info!("VAD: SPEECH START (energy={}, threshold={})", energy, self.energy_threshold);
+                    }
+                    self.is_speaking = true;
+                }
+            } else {
+                if self.is_speaking {
+                    self.silence_frames += 1;
+                    if self.silence_frames >= self.silence_threshold_frames {
+                        let utterance: Vec<f32> = self.buffer.drain(..).collect();
+                        info!(
+                            "VAD: SPEECH END ({} samples, {} frames, max_energy={})",
+                            utterance.len(),
+                            self.speech_frames,
+                            self.max_energy_seen
+                        );
+                        self.reset();
+                        return Some(utterance);
+                    }
+                } else {
+                    while self.buffer.len() > self.silence_threshold_frames * self.frame_size {
+                        self.buffer.pop_front();
+                    }
+                    self.speech_frames = self.speech_frames.saturating_sub(1);
+                }
+            }
+
+            if self.is_speaking && self.speech_frames >= self.max_speech_frames {
+                let utterance: Vec<f32> = self.buffer.drain(..).collect();
+                info!(
+                    "VAD: FORCED END ({} samples, {} frames, max_energy={})",
+                    utterance.len(),
+                    self.speech_frames,
+                    self.max_energy_seen
+                );
+                self.reset();
+                return Some(utterance);
+            }
+        }
+        None
+    }
+
+    fn reset(&mut self) {
+        self.buffer.clear();
+        self.speech_frames = 0;
+        self.silence_frames = 0;
+        self.is_speaking = false;
+        self.max_energy_seen = 0.0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Handle
+// ---------------------------------------------------------------------------
+
+pub struct SttHandle {
+    running: Arc<AtomicBool>,
+    _stream: cpal::Stream,
+}
+
+impl SttHandle {
+    pub fn stop(&self) {
+        self.running.store(false, Ordering::SeqCst);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Manager
+// ---------------------------------------------------------------------------
+
+pub struct SttManager {
+    config: SttConfig,
+}
+
+impl SttManager {
+    pub fn new(config: SttConfig) -> Self {
+        Self { config }
+    }
+
+    pub fn start(self) -> (SttHandle, mpsc::Receiver<Vec<f32>>) {
+        let running = Arc::new(AtomicBool::new(true));
+        let running_stream = running.clone();
+
+        let (tx, rx) = mpsc::channel::<Vec<f32>>(4);
+        let vad = Arc::new(Mutex::new(EnergyVad::new(&self.config)));
+        let config = self.config.clone();
+
+        let host = cpal::default_host();
+
+        info!("=== CPAL Input Devices ===");
+        match host.input_devices() {
+            Ok(devices) => {
+                for (idx, device) in devices.enumerate() {
+                    let name = device.name().unwrap_or_else(|_| "unknown".into());
+                    info!("  [{}] {}", idx, name);
+                }
+            }
+            Err(e) => log::warn!("Failed to enumerate input devices: {}", e),
+        }
+        info!("==========================");
+
+        let device = host
+            .default_input_device()
+            .expect("No input device available");
+        info!(
+            "STT selected device: {}",
+            device.name().unwrap_or_else(|_| "unknown".into())
+        );
+
+        let mut supported_configs = device
+            .supported_input_configs()
+            .expect("Error querying input configs");
+
+        let stream_config: SupportedStreamConfig = supported_configs
+            .find(|c| {
+                c.sample_format() == SampleFormat::F32
+                    && c.min_sample_rate() <= SampleRate(16000)
+                    && c.max_sample_rate() >= SampleRate(16000)
+            })
+            .map(|c| c.with_sample_rate(SampleRate(16000)))
+            .or_else(|| {
+                let mut configs = device.supported_input_configs().ok()?;
+                configs
+                    .find(|c| c.sample_format() == SampleFormat::F32)
+                    .map(|c| c.with_max_sample_rate())
+            })
+            .or_else(|| {
+                let mut configs = device.supported_input_configs().ok()?;
+                configs.next().map(|c| c.with_max_sample_rate())
+            })
+            .expect("No supported input config");
+
+        info!("STT stream config: {:?}", stream_config);
+
+        let sample_rate = stream_config.sample_rate().0;
+        let channels = stream_config.channels() as usize;
+        let sample_format = stream_config.sample_format();
+
+        let err_fn = |err| error!("STT stream error: {}", err);
+
+        let stream = match sample_format {
+            SampleFormat::F32 => {
+                let vad = vad.clone();
+                let tx = tx.clone();
+                device
+                    .build_input_stream(
+                        &stream_config.into(),
+                        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                            if !running_stream.load(Ordering::Relaxed) {
+                                return;
+                            }
+
+                            let mono: Vec<f32> = if channels == 1 {
+                                data.to_vec()
+                            } else {
+                                data.chunks(channels)
+                                    .map(|c| c.iter().sum::<f32>() / channels as f32)
+                                    .collect()
+                            };
+
+                            let target = config.sample_rate as usize;
+                            let resampled = if sample_rate as usize == target {
+                                mono
+                            } else {
+                                resample_linear(&mono, sample_rate, target as u32)
+                            };
+
+                            if let Some(utterance) = vad.lock().unwrap().process(&resampled) {
+                                info!("STT: shipping utterance ({} samples)", utterance.len());
+                                let _ = tx.try_send(utterance);
+                            }
+                        },
+                        err_fn,
+                        None,
+                    )
+                    .expect("Failed to build input stream")
+            }
+            _ => panic!("Unsupported sample format: {:?}", sample_format),
+        };
+
+        stream.play().expect("Failed to start audio stream");
+        info!("STT listening active. Speak for 1-2 seconds, then pause.");
+
+        let handle = SttHandle { running, _stream: stream };
+        (handle, rx)
+    }
+}
+
+fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> {
+    if from_rate == to_rate {
+        return input.to_vec();
+    }
+    let ratio = from_rate as f32 / to_rate as f32;
+    let out_len = (input.len() as f32 / ratio) as usize;
+    (0..out_len)
+        .map(|i| {
+            let src_idx = i as f32 * ratio;
+            let src_floor = src_idx.floor() as usize;
+            let frac = src_idx - src_idx.floor();
+            let a = input.get(src_floor).copied().unwrap_or(0.0);
+            let b = input.get(src_floor + 1).copied().unwrap_or(a);
+            a + frac * (b - a)
+        })
+        .collect()
+}

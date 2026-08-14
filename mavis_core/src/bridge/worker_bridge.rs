@@ -32,6 +32,13 @@ impl WorkerBridge {
 
     pub async fn run(mut self, bus: Arc<EventBus>) -> Result<()> {
         info!("WorkerBridge starting");
+
+        // Eagerly spawn the worker so the socket is ready before any requests
+        if let Err(e) = self.lifecycle.ensure_running().await {
+            error!("Failed to spawn worker at startup: {}", e);
+            // Continue anyway — health check will retry
+        }
+
         let mut rx = bus.subscribe();
         let mut health_tick = interval(HEALTH_INTERVAL);
 
@@ -80,6 +87,11 @@ impl WorkerBridge {
                             let _ = self.lifecycle
                                 .send_request(r#"{"type":"unload"}"#)
                                 .await;
+                        }
+                    } else {
+                        // Try to respawn if not running
+                        if let Err(e) = self.lifecycle.ensure_running().await {
+                            warn!("Worker respawn failed: {}", e);
                         }
                     }
                 }

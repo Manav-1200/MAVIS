@@ -20,6 +20,10 @@ thiserror = "1.0"
 minifb = "0.25"
 notify = "6"
 
+# STT — audio capture (cpal) and base64 encoding for audio over UDS
+cpal = "0.15"
+base64 = "0.22"
+
 [profile.release]
 opt-level = 3
 lto = true

@@ -12,12 +12,15 @@ mod executor;
 mod memory;
 mod models;
 mod planner;
+mod stt;
 mod system;
 mod ui;
 mod tts;
 
 use event_bus::EventBus;
 use models::event::{Event, EventType};
+
+const WORKER_SOCKET: &str = "/tmp/mavis_worker.sock";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -95,6 +98,117 @@ async fn main() -> Result<()> {
         }
     });
 
+    // STT Pipeline
+    let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default()).start();
+    let bus_for_stt = Arc::clone(&bus);
+
+    let stt_task = tokio::spawn(async move {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+        use tokio::time::{sleep, timeout, Duration};
+
+        while let Some(audio) = utterance_rx.recv().await {
+            // Wait for worker socket to exist (up to 30s)
+            let socket_ready = timeout(Duration::from_secs(30), async {
+                while !std::path::Path::new(WORKER_SOCKET).exists() {
+                    info!("STT: waiting for worker socket...");
+                    sleep(Duration::from_millis(500)).await;
+                }
+            }).await;
+
+            if socket_ready.is_err() {
+                warn!("STT: worker socket never appeared — dropping utterance");
+                continue;
+            }
+
+            let bytes: Vec<u8> = audio.iter().flat_map(|s| s.to_le_bytes()).collect();
+            let audio_b64 = B64.encode(&bytes);
+
+            let request = serde_json::json!({
+                "type": "WorkerRequest",
+                "payload": {
+                    "request_type": "stt",
+                    "audio": audio_b64,
+                }
+            });
+            let req_str = request.to_string();
+            let req_bytes = req_str.as_bytes();
+
+            // Try to connect and send with 60s timeout per attempt (model load can be slow)
+            let mut response_text: Option<String> = None;
+            for attempt in 1..=5 {
+                let result = timeout(Duration::from_secs(60), async {
+                    let mut stream = UnixStream::connect(WORKER_SOCKET).await?;
+                    let len = req_bytes.len() as u32;
+                    stream.write_all(&len.to_le_bytes()).await?;
+                    stream.write_all(req_bytes).await?;
+                    stream.flush().await?;
+
+                    let mut len_buf = [0u8; 4];
+                    stream.read_exact(&mut len_buf).await?;
+                    let resp_len = u32::from_le_bytes(len_buf) as usize;
+                    let mut resp_buf = vec![0u8; resp_len];
+                    stream.read_exact(&mut resp_buf).await?;
+
+                    let resp_str = String::from_utf8_lossy(&resp_buf);
+                    if let Ok(resp_json) = serde_json::from_str::<serde_json::Value>(&resp_str) {
+                        if let Some(text) = resp_json
+                            .get("payload")
+                            .and_then(|p| p.get("result"))
+                            .and_then(|r| r.get("text"))
+                            .and_then(|t| t.as_str())
+                        {
+                            return Ok::<_, std::io::Error>(Some(text.to_string()));
+                        }
+                    }
+                    Ok(None)
+                }).await;
+
+                match result {
+                    Ok(Ok(Some(text))) => {
+                        response_text = Some(text);
+                        break;
+                    }
+                    Ok(Ok(None)) => {
+                        warn!("STT: empty response (attempt {}/5)", attempt);
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                    Ok(Err(e)) => {
+                        warn!("STT: I/O error (attempt {}/5): {}", attempt, e);
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                    Err(_) => {
+                        warn!("STT: timeout (attempt {}/5) — model may still be loading", attempt);
+                        sleep(Duration::from_millis(500)).await;
+                    }
+                }
+            }
+
+            if let Some(text) = response_text {
+                if !text.is_empty() {
+                    info!("STT transcription: {}", text);
+                    let event = Event {
+                        id: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now(),
+                        source: "stt".to_string(),
+                        event_type: EventType::UserIntent,
+                        payload: serde_json::json!({
+                            "source": "voice",
+                            "text": text,
+                        }),
+                    };
+                    let _ = bus_for_stt.publish(event);
+                } else {
+                    info!("STT: empty transcription (silence or no speech)");
+                }
+            } else {
+                warn!("STT: failed to get transcription after retries");
+            }
+        }
+        info!("STT pipeline shut down");
+    });
+
     // Orb UI
     let bus_clone = Arc::clone(&bus);
     let orb_handle = tokio::spawn(async move {
@@ -157,6 +271,9 @@ async fn main() -> Result<()> {
     bus.close();
     info!("EventBus closed — signaling all subsystems to shut down");
 
+    // Stop STT first so the audio thread exits cleanly
+    stt_handle.stop();
+
     // Join everything concurrently so total shutdown is capped at 5s, not 5s × N.
     let timeout = std::time::Duration::from_secs(5);
     let _ = tokio::join!(
@@ -167,6 +284,7 @@ async fn main() -> Result<()> {
         tokio::time::timeout(timeout, hotkeys_handle),
         tokio::time::timeout(timeout, watcher_handle),
         tokio::time::timeout(timeout, bridge_handle),
+        tokio::time::timeout(timeout, stt_task),
         tokio::time::timeout(timeout, orb_handle),
     );
 

@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import os
 import signal
@@ -10,6 +11,7 @@ from datetime import datetime, timezone
 
 from mavis.core.config import load_config
 from mavis.inference import SYSTEM_PROMPT, LlamaEngine, build_chat_messages
+from mavis.stt.engine import STTEngine
 
 
 def _now_iso() -> str:
@@ -30,6 +32,11 @@ class WorkerServer:
     def __init__(self, socket_path: str = "/tmp/mavis_worker.sock"):
         self.socket_path = socket_path
         self.engine = LlamaEngine()
+        self.stt_engine = STTEngine(
+            model_size="base",
+            device="cpu",
+            compute_type="int8",
+        )
         self.config = load_config()
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.last_activity = time.time()
@@ -62,10 +69,12 @@ class WorkerServer:
                 resp_bytes = json.dumps(response).encode("utf-8")
                 writer.write(struct.pack("<I", len(resp_bytes)) + resp_bytes)
                 await writer.drain()
-        except asyncio.CancelledError:
+        except asyncio.IncompleteReadError:
             pass
-        except (ConnectionResetError, BrokenPipeError, json.JSONDecodeError, struct.error) as e:
-            print(f"[worker] Client handler error: {e}")
+        except Exception:  # noqa: BLE001
+            import traceback
+
+            traceback.print_exc()
         finally:
             writer.close()
             await writer.wait_closed()
@@ -89,6 +98,8 @@ class WorkerServer:
             return await self._chat(payload)
         elif req_type == "generate":
             return await self._generate(payload)
+        elif req_type == "stt":
+            return await self._stt(payload)
         elif req_type == "unload":
             return await self._unload()
         elif req_type == "memory":
@@ -107,6 +118,7 @@ class WorkerServer:
                 "type": "health",
                 "status": "ok",
                 "model_loaded": self.engine.is_loaded,
+                "stt_loaded": self.stt_engine.is_loaded(),
                 "uptime": time.time() - getattr(self, "_start_time", time.time()),
             }
         )
@@ -210,8 +222,40 @@ class WorkerServer:
                 }
             )
 
+    async def _stt(self, payload: dict) -> dict:
+        audio_b64 = payload.get("audio", "")
+        if not audio_b64:
+            return _make_event(
+                {
+                    "type": "error",
+                    "error": "Missing audio field",
+                }
+            )
+
+        try:
+            audio_bytes = base64.b64decode(audio_b64)
+            loop = asyncio.get_event_loop()
+            text = await loop.run_in_executor(
+                self.executor,
+                lambda: self.stt_engine.transcribe(audio_bytes, sample_rate=16000),
+            )
+            return _make_event(
+                {
+                    "type": "response",
+                    "result": {"text": text},
+                }
+            )
+        except (RuntimeError, OSError, ValueError) as e:
+            return _make_event(
+                {
+                    "type": "error",
+                    "error": f"STT failed: {e!s}",
+                }
+            )
+
     async def _unload(self) -> dict:
         self.engine.unload()
+        self.stt_engine.unload()
         return _make_event(
             {
                 "type": "response",
@@ -233,13 +277,19 @@ class WorkerServer:
         while self.running:
             await asyncio.sleep(30)
             async with self.lock:
-                idle_for = time.time() - self.last_activity
-                if self.engine.is_loaded and idle_for > self.idle_timeout:
-                    print(f"[worker] Idle timeout reached ({idle_for:.0f}s). Unloading model.")
+                now = time.time()
+                llm_idle = now - self.last_activity > self.idle_timeout
+                stt_idle = now - self.stt_engine.last_activity > self.idle_timeout
+
+                if self.engine.is_loaded and llm_idle and stt_idle:
+                    print("[worker] Idle timeout reached. Unloading models.")
                     self.engine.unload()
+                    self.stt_engine.unload()
                 else:
-                    if self.engine.is_loaded:
-                        print(f"[worker] Idle check: loaded, idle={idle_for:.0f}s")
+                    if self.engine.is_loaded or self.stt_engine.is_loaded():
+                        print(
+                            f"[worker] Idle check: loaded, llm_idle={llm_idle}, stt_idle={stt_idle}"
+                        )
 
     async def run(self):
         self._start_time = time.time()
@@ -270,6 +320,7 @@ class WorkerServer:
         print("[worker] Shutting down...")
         self.running = False
         self.engine.unload()
+        self.stt_engine.unload()
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
 
