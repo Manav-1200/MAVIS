@@ -35,9 +35,9 @@ class STTEngine:
         self._model: object | None = None
         self._last_activity = time.time()
 
-    # ------------------------------------------------------------------ #
+    # --------------------------------------------------------------------- #
     # Lifecycle
-    # ------------------------------------------------------------------ #
+    # --------------------------------------------------------------------- #
     def _load(self) -> None:
         """Lazy-load the faster-whisper model."""
         if self._model is not None:
@@ -84,9 +84,9 @@ class STTEngine:
 
         logger.info("STT model unloaded.")
 
-    # ------------------------------------------------------------------ #
+    # --------------------------------------------------------------------- #
     # Inference
-    # ------------------------------------------------------------------ #
+    # --------------------------------------------------------------------- #
     def transcribe(self, audio_bytes: bytes, sample_rate: int = 16000) -> str:
         """
         Transcribe raw PCM audio (float32, mono, 16 kHz).
@@ -105,12 +105,22 @@ class STTEngine:
         if audio.size == 0:
             return ""
 
+        # Diagnostics: log what the model actually receives
+        logger.info(
+            "STT input: samples=%d duration=%.2fs min=%.4f max=%.4f mean=%.4f",
+            audio.size,
+            audio.size / sample_rate,
+            float(audio.min()),
+            float(audio.max()),
+            float(audio.mean()),
+        )
+
         segments, info = self._model.transcribe(
             audio,
             beam_size=5,
             language="en",
             condition_on_previous_text=False,
-            vad_filter=True,  # faster-whisper built-in VAD as safety net
+            vad_filter=False,  # Rust VAD already segmented; don't double-filter
         )
 
         text = " ".join(seg.text for seg in segments).strip()
@@ -122,9 +132,9 @@ class STTEngine:
         )
         return text
 
-    # ------------------------------------------------------------------ #
+    # --------------------------------------------------------------------- #
     # Idle monitoring
-    # ------------------------------------------------------------------ #
+    # --------------------------------------------------------------------- #
     @property
     def last_activity(self) -> float:
         return self._last_activity

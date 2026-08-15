@@ -1,12 +1,12 @@
 //! MAVIS STT Manager — Rust runtime side
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleFormat, SampleRate, SupportedStreamConfig};
+use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
-use log::{error, info};
+use log::{error, info, warn};
 
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
@@ -31,7 +31,7 @@ impl Default for SttConfig {
             sample_rate: 16000,
             energy_threshold: 0.05,
             silence_duration_ms: 500,
-            min_speech_duration_ms: 150,
+            min_speech_duration_ms: 500,
             frame_duration_ms: 30,
             max_utterance_duration_ms: 8000,
         }
@@ -159,6 +159,53 @@ impl SttHandle {
 }
 
 // ---------------------------------------------------------------------------
+// Device selection
+// ---------------------------------------------------------------------------
+
+fn select_input_device(host: &cpal::Host) -> Option<Device> {
+    let devices: Vec<(Device, String)> = match host.input_devices() {
+        Ok(devs) => devs.filter_map(|d| d.name().ok().map(|n| (d, n))).collect(),
+        Err(e) => {
+            warn!("Failed to enumerate input devices: {}", e);
+            return host.default_input_device();
+        }
+    };
+
+    info!("=== CPAL Input Devices ===");
+    for (idx, (_, name)) in devices.iter().enumerate() {
+        info!("  [{}] {}", idx, name);
+    }
+    info!("==========================");
+
+    // Preference order: built-in analog > sysdefault > anything non-bluetooth > default
+    let score = |name: &str| {
+        let lower = name.to_lowercase();
+        if lower.contains("front") && lower.contains("generic") { return 100; }
+        if lower.contains("sysdefault") && lower.contains("generic") { return 90; }
+        if lower.contains("analog") && !lower.contains("hdmi") { return 80; }
+        if !lower.contains("bluez") && !lower.contains("hdmi") && !lower.contains("monitor") { return 70; }
+        if lower == "default" { return 60; }
+        0
+    };
+
+    let mut best: Option<(Device, String)> = None;
+    let mut best_score = -1;
+    for (device, name) in devices {
+        let s = score(&name) as i32;
+        if s > best_score {
+            best_score = s;
+            best = Some((device, name));
+        }
+    }
+
+    if let Some((_, ref name)) = best {
+        info!("STT selected device: {} (score={})", name, best_score);
+    }
+
+    best.map(|(d, _)| d).or_else(|| host.default_input_device())
+}
+
+// ---------------------------------------------------------------------------
 // Manager
 // ---------------------------------------------------------------------------
 
@@ -181,25 +228,8 @@ impl SttManager {
 
         let host = cpal::default_host();
 
-        info!("=== CPAL Input Devices ===");
-        match host.input_devices() {
-            Ok(devices) => {
-                for (idx, device) in devices.enumerate() {
-                    let name = device.name().unwrap_or_else(|_| "unknown".into());
-                    info!("  [{}] {}", idx, name);
-                }
-            }
-            Err(e) => log::warn!("Failed to enumerate input devices: {}", e),
-        }
-        info!("==========================");
-
-        let device = host
-            .default_input_device()
+        let device = select_input_device(&host)
             .expect("No input device available");
-        info!(
-            "STT selected device: {}",
-            device.name().unwrap_or_else(|_| "unknown".into())
-        );
 
         let mut supported_configs = device
             .supported_input_configs()
@@ -266,9 +296,6 @@ impl SttManager {
                             let now_speaking = vad_guard.is_speaking;
                             drop(vad_guard);
 
-                            // Emit UI state transitions from the audio callback thread.
-                            // EventBus::publish is synchronous (std::sync::Mutex + broadcast),
-                            // so this is safe.
                             if let Some(utterance) = result {
                                 info!("STT: shipping utterance ({} samples)", utterance.len());
                                 let _ = tx.try_send(utterance);
