@@ -47,16 +47,12 @@ class WorkerServer:
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
             while self.running:
-                raw_len = await reader.read(4)
-                if len(raw_len) < 4:
-                    break
+                raw_len = await reader.readexactly(4)
                 length = struct.unpack("<I", raw_len)[0]
                 if length > 10_000_000:
                     break
 
-                data = await reader.read(length)
-                if len(data) < length:
-                    break
+                data = await reader.readexactly(length)
 
                 request = json.loads(data.decode("utf-8"))
                 req_type, _ = self._extract_request(request)
@@ -70,7 +66,10 @@ class WorkerServer:
                 writer.write(struct.pack("<I", len(resp_bytes)) + resp_bytes)
                 await writer.drain()
         except asyncio.IncompleteReadError:
+            # Client disconnected normally
             pass
+        except asyncio.CancelledError:
+            raise
         except Exception:  # noqa: BLE001
             import traceback
 
