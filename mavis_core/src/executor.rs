@@ -105,7 +105,8 @@ impl Executor {
 
             if !success {
                 self.emit_ui_state("error").await;
-                // Stop plan execution on first failure (safer default)
+                // Ensure STT is unmuted even on failure
+                self.emit_ui_state("idle").await;
                 return Ok(());
             }
         }
@@ -269,7 +270,8 @@ impl Executor {
 
     async fn run_say(&self, text: &str) -> Result<String> {
         info!("Executor: say: {}", text);
-        self.tts.say(text);
+        self.emit_ui_state("speaking").await;
+        self.tts.say(text).await?;
         Ok(format!("TTS: {}", text))
     }
 

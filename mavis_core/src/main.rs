@@ -2,6 +2,7 @@
 
 use anyhow::Result;
 use log::{info, warn};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -103,6 +104,26 @@ async fn main() -> Result<()> {
     let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default()).start(bus_for_stt_start);
     let bus_for_stt = Arc::clone(&bus);
 
+    // STT mute controller — mutes mic while TTS is speaking to prevent feedback loop
+    let tts_active_clone = stt_handle.tts_active.clone();
+    let bus_for_mute = Arc::clone(&bus);
+    let mute_handle = tokio::spawn(async move {
+        let mut rx = bus_for_mute.subscribe();
+        while let Ok(event) = rx.recv().await {
+            if let EventType::UiStateChange = event.event_type {
+                if let Some(state) = event.payload.get("state").and_then(|v| v.as_str()) {
+                    match state {
+                        "speaking" => tts_active_clone.store(true, Ordering::SeqCst),
+                        "idle" | "error" | "listening" | "thinking" | "working" => {
+                            tts_active_clone.store(false, Ordering::SeqCst);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    });
+
     let stt_task = tokio::spawn(async move {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -202,7 +223,6 @@ async fn main() -> Result<()> {
                     let _ = bus_for_stt.publish(event);
                 } else {
                     info!("STT: empty transcription (silence or no speech)");
-                    // Return to idle since nothing happened
                     let _ = bus_for_stt.publish(Event {
                         id: uuid::Uuid::new_v4(),
                         timestamp: chrono::Utc::now(),
@@ -301,6 +321,7 @@ async fn main() -> Result<()> {
         tokio::time::timeout(timeout, watcher_handle),
         tokio::time::timeout(timeout, bridge_handle),
         tokio::time::timeout(timeout, stt_task),
+        tokio::time::timeout(timeout, mute_handle),
         tokio::time::timeout(timeout, orb_handle),
     );
 

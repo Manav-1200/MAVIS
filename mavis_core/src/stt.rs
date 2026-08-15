@@ -149,6 +149,7 @@ impl EnergyVad {
 
 pub struct SttHandle {
     running: Arc<AtomicBool>,
+    pub tts_active: Arc<AtomicBool>,
     _stream: cpal::Stream,
 }
 
@@ -177,7 +178,6 @@ fn select_input_device(host: &cpal::Host) -> Option<Device> {
     }
     info!("==========================");
 
-    // Preference order: built-in analog > sysdefault > anything non-bluetooth > default
     let score = |name: &str| {
         let lower = name.to_lowercase();
         if lower.contains("front") && lower.contains("generic") { return 100; }
@@ -221,6 +221,8 @@ impl SttManager {
     pub fn start(self, bus: Arc<EventBus>) -> (SttHandle, mpsc::Receiver<Vec<f32>>) {
         let running = Arc::new(AtomicBool::new(true));
         let running_stream = running.clone();
+        let tts_active = Arc::new(AtomicBool::new(false));
+        let tts_active_stream = tts_active.clone();
 
         let (tx, rx) = mpsc::channel::<Vec<f32>>(4);
         let vad = Arc::new(Mutex::new(EnergyVad::new(&self.config)));
@@ -272,6 +274,10 @@ impl SttManager {
                         &stream_config.into(),
                         move |data: &[f32], _: &cpal::InputCallbackInfo| {
                             if !running_stream.load(Ordering::Relaxed) {
+                                return;
+                            }
+                            // Mute STT while TTS is speaking to prevent feedback loop
+                            if tts_active_stream.load(Ordering::Relaxed) {
                                 return;
                             }
 
@@ -327,7 +333,7 @@ impl SttManager {
         stream.play().expect("Failed to start audio stream");
         info!("STT listening active. Speak for 1-2 seconds, then pause.");
 
-        let handle = SttHandle { running, _stream: stream };
+        let handle = SttHandle { running, tts_active, _stream: stream };
         (handle, rx)
     }
 }

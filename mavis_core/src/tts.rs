@@ -1,6 +1,7 @@
-use std::process::{Command, Stdio};
-use std::io::Write;
+use std::process::Stdio;
 use log::{info, warn, error, debug};
+use tokio::process::Command;
+use tokio::io::AsyncWriteExt;
 
 /// Neural TTS engine using Piper (local, offline).
 /// Falls back to speech-dispatcher (spd-say) if Piper is unavailable.
@@ -16,7 +17,7 @@ impl TtsEngine {
             std::env::var("HOME").unwrap_or_default()
         );
 
-        let piper_available = Command::new("which")
+        let piper_available = std::process::Command::new("which")
             .arg("piper")
             .output()
             .map(|o| o.status.success())
@@ -41,9 +42,9 @@ impl TtsEngine {
         }
     }
 
-    /// Speak the given text. Fire-and-forget: non-blocking, returns immediately.
+    /// Speak the given text. Blocks until audio playback finishes.
     /// Text is truncated to 500 chars to avoid engine overload.
-    pub fn say(&self, text: &str) {
+    pub async fn say(&self, text: &str) -> Result<(), anyhow::Error> {
         let text = if text.len() > 500 {
             &text[..500]
         } else {
@@ -63,32 +64,58 @@ impl TtsEngine {
                 Ok(child) => child,
                 Err(e) => {
                     error!("TTS: Failed to spawn Piper: {}", e);
-                    self.fallback_say(text);
-                    return;
+                    self.fallback_say(text).await;
+                    return Ok(());
                 }
             };
 
             if let Some(mut stdin) = piper.stdin.take() {
-                if let Err(e) = stdin.write_all(text.as_bytes()) {
+                if let Err(e) = stdin.write_all(text.as_bytes()).await {
                     error!("TTS: Failed to write to Piper stdin: {}", e);
-                    self.fallback_say(text);
-                    return;
+                    self.fallback_say(text).await;
+                    return Ok(());
                 }
                 // stdin drops here, closing the pipe so Piper processes the text
             }
 
-            let _ = Command::new("aplay")
+            let mut aplay = match Command::new("aplay")
                 .args(&["-r", "22050", "-f", "S16_LE", "-c", "1", "-t", "raw", "-"])
-                .stdin(piper.stdout.take().unwrap())
+                .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
-                .spawn();
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(e) => {
+                    error!("TTS: Failed to spawn aplay: {}", e);
+                    return Ok(());
+                }
+            };
+
+            // Pipe piper stdout -> aplay stdin asynchronously
+            let copy_handle = if let (Some(mut piper_out), Some(mut aplay_in)) =
+                (piper.stdout.take(), aplay.stdin.take())
+            {
+                Some(tokio::spawn(async move {
+                    let _ = tokio::io::copy(&mut piper_out, &mut aplay_in).await;
+                }))
+            } else {
+                None
+            };
+
+            let _ = piper.wait().await;
+            if let Some(h) = copy_handle {
+                let _ = h.await;
+            }
+            let _ = aplay.wait().await;
+
         } else {
-            self.fallback_say(text);
+            self.fallback_say(text).await;
         }
+        Ok(())
     }
 
-    fn fallback_say(&self, text: &str) {
+    async fn fallback_say(&self, text: &str) {
         warn!("TTS: spd-say fallback for: {}", text);
         let _ = Command::new("spd-say")
             .arg(text)
