@@ -36,10 +36,12 @@ impl ContextEngine {
 
             EventType::UserIntent => {
                 info!("ContextEngine: UserIntent received — updating working memory");
+                // STT pipeline sends transcribed text in "text"; other sources use "intent".
                 let intent = event
                     .payload
-                    .get("intent")
+                    .get("text")
                     .and_then(|v| v.as_str())
+                    .or_else(|| event.payload.get("intent").and_then(|v| v.as_str()))
                     .unwrap_or("unknown");
 
                 {

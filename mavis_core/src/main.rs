@@ -99,7 +99,8 @@ async fn main() -> Result<()> {
     });
 
     // STT Pipeline
-    let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default()).start();
+    let bus_for_stt_start = Arc::clone(&bus);
+    let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default()).start(bus_for_stt_start);
     let bus_for_stt = Arc::clone(&bus);
 
     let stt_task = tokio::spawn(async move {
@@ -201,9 +202,24 @@ async fn main() -> Result<()> {
                     let _ = bus_for_stt.publish(event);
                 } else {
                     info!("STT: empty transcription (silence or no speech)");
+                    // Return to idle since nothing happened
+                    let _ = bus_for_stt.publish(Event {
+                        id: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now(),
+                        source: "stt".to_string(),
+                        event_type: EventType::UiStateChange,
+                        payload: serde_json::json!({ "state": "idle" }),
+                    });
                 }
             } else {
                 warn!("STT: failed to get transcription after retries");
+                let _ = bus_for_stt.publish(Event {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    source: "stt".to_string(),
+                    event_type: EventType::UiStateChange,
+                    payload: serde_json::json!({ "state": "error" }),
+                });
             }
         }
         info!("STT pipeline shut down");

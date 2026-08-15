@@ -47,13 +47,30 @@ impl Planner {
     }
 
     async fn plan_intent(&self, event: Event) -> anyhow::Result<()> {
+        // Voice input (STT) puts transcribed text in "text".
+        // Other intent sources may use "intent".
         let intent = event
             .payload
-            .get("intent")
+            .get("text")
+            .and_then(|v| v.as_str())
+            .or_else(|| event.payload.get("intent").and_then(|v| v.as_str()))
+            .unwrap_or("unknown");
+
+        let source = event
+            .payload
+            .get("source")
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
-        // Delegate to AI worker for intent analysis / chat response
+        // Tag voice input so the LLM knows it came from speech
+        let user_message = if source == "voice" {
+            format!("[Voice] {}", intent)
+        } else {
+            intent.to_string()
+        };
+
+        // TODO: inject working_memory snapshot from ContextEngine.
+        // For now we send an empty slice so the worker API contract is satisfied.
         let worker_req = Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
@@ -63,10 +80,11 @@ impl Planner {
                 "request_type": "chat",
                 "messages": [
                     {"role": "system", "content": "You are MAVIS, a helpful desktop AI companion. Keep responses concise and actionable."},
-                    {"role": "user", "content": intent}
+                    {"role": "user", "content": user_message}
                 ],
                 "max_tokens": 256,
-                "temperature": 0.7
+                "temperature": 0.7,
+                "working_memory": []
             }),
         };
         self.bus.publish(worker_req);

@@ -8,6 +8,9 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use log::{error, info};
 
+use crate::event_bus::EventBus;
+use crate::models::event::{Event, EventType};
+
 // ---------------------------------------------------------------------------
 // Config
 // ---------------------------------------------------------------------------
@@ -48,7 +51,7 @@ struct EnergyVad {
     buffer: VecDeque<f32>,
     speech_frames: usize,
     silence_frames: usize,
-    is_speaking: bool,
+    pub is_speaking: bool,
     max_energy_seen: f32,
 }
 
@@ -168,7 +171,7 @@ impl SttManager {
         Self { config }
     }
 
-    pub fn start(self) -> (SttHandle, mpsc::Receiver<Vec<f32>>) {
+    pub fn start(self, bus: Arc<EventBus>) -> (SttHandle, mpsc::Receiver<Vec<f32>>) {
         let running = Arc::new(AtomicBool::new(true));
         let running_stream = running.clone();
 
@@ -233,6 +236,7 @@ impl SttManager {
             SampleFormat::F32 => {
                 let vad = vad.clone();
                 let tx = tx.clone();
+                let bus_for_ui = bus.clone();
                 device
                     .build_input_stream(
                         &stream_config.into(),
@@ -256,9 +260,33 @@ impl SttManager {
                                 resample_linear(&mono, sample_rate, target as u32)
                             };
 
-                            if let Some(utterance) = vad.lock().unwrap().process(&resampled) {
+                            let mut vad_guard = vad.lock().unwrap();
+                            let was_speaking = vad_guard.is_speaking;
+                            let result = vad_guard.process(&resampled);
+                            let now_speaking = vad_guard.is_speaking;
+                            drop(vad_guard);
+
+                            // Emit UI state transitions from the audio callback thread.
+                            // EventBus::publish is synchronous (std::sync::Mutex + broadcast),
+                            // so this is safe.
+                            if let Some(utterance) = result {
                                 info!("STT: shipping utterance ({} samples)", utterance.len());
                                 let _ = tx.try_send(utterance);
+                                let _ = bus_for_ui.publish(Event {
+                                    id: uuid::Uuid::new_v4(),
+                                    timestamp: chrono::Utc::now(),
+                                    source: "stt".to_string(),
+                                    event_type: EventType::UiStateChange,
+                                    payload: serde_json::json!({ "state": "thinking" }),
+                                });
+                            } else if !was_speaking && now_speaking {
+                                let _ = bus_for_ui.publish(Event {
+                                    id: uuid::Uuid::new_v4(),
+                                    timestamp: chrono::Utc::now(),
+                                    source: "stt".to_string(),
+                                    event_type: EventType::UiStateChange,
+                                    payload: serde_json::json!({ "state": "listening" }),
+                                });
                             }
                         },
                         err_fn,
