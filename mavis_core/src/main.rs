@@ -31,11 +31,15 @@ async fn main() -> Result<()> {
     let bus = Arc::new(EventBus::new());
     let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
-    // Context Engine
+    // Memory Manager — shared between ContextEngine and Planner
     let data_dir = std::path::Path::new("../memory");
+    let memory = memory::manager::MemoryManager::new(data_dir)?;
+    let working_memory = memory.working.clone();
+
+    // Context Engine
     let bus_pub = Arc::clone(&bus);
     let bus_sub = Arc::clone(&bus);
-    let mut ctx_engine = context_engine::ContextEngine::new(bus_pub, data_dir)?;
+    let mut ctx_engine = context_engine::ContextEngine::new(bus_pub, memory)?;
     let ctx_handle = tokio::spawn(async move {
         let mut rx = bus_sub.subscribe();
         info!("ContextEngine: listening for events");
@@ -57,7 +61,7 @@ async fn main() -> Result<()> {
 
     // Planner
     let bus_clone = Arc::clone(&bus);
-    let mut planner = planner::Planner::new(bus_clone);
+    let mut planner = planner::Planner::new(bus_clone, working_memory);
     let planner_handle = tokio::spawn(async move {
         planner.run().await;
     });

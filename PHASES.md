@@ -1,12 +1,12 @@
 # MAVIS — Project Phases
 
-&gt; **Tagline:** A persistent desktop-native AI companion. Not a chatbot.
-&gt;
-&gt; **Project goal:** Build a local-first, privacy-first desktop AI companion. Rust owns the runtime (~50 MB, always on). Python owns the AI (spawned on demand, killed when idle).
-&gt;
-&gt; **Repo:** `github.com/Manav-1200/MAVIS`
-&gt;
-&gt; **Stack:** Rust (tokio, minifb, serde, rusqlite, notify), Python 3.10+ (transformers, llama-cpp-python)
+> **Tagline:** A persistent desktop-native AI companion. Not a chatbot.
+>
+> **Project goal:** Build a local-first, privacy-first desktop AI companion. Rust owns the runtime (~50 MB, always on). Python owns the AI (spawned on demand, killed when idle).
+>
+> **Repo:** `github.com/Manav-1200/MAVIS`
+>
+> **Stack:** Rust (tokio, minifb, serde, rusqlite, notify), Python 3.10+ (llama-cpp-python, faster-whisper, piper)
 
 ---
 
@@ -16,10 +16,43 @@
 |-------|------|-----------------|-----------------|--------|
 | 1 | Foundation | Rust runtime compiles. Async event bus. Orb window appears. Python worker reorganized. | Rust desktop app | ✅ Complete |
 | 2 | Core Runtime | Context engine. Layered memory (SQLite). System integration. Orb states. Graceful shutdown. | Event-driven runtime | ✅ Complete |
-| 3 | AI Worker | Rust ↔ Python bridge. Local LLM loads. First inference. Worker lifecycle. | Local AI pipeline | 🚧 Next |
-| 4 | Integration | Voice wake → STT → LLM → TTS. Intent system. First automations. | Full voice companion | Not started |
+| 3 | AI Worker | Rust ↔ Python bridge. Local LLM loads. First inference. Worker lifecycle. | Local AI pipeline | ✅ Complete |
+| 4 | Integration | Voice wake → STT → LLM → TTS. Intent system. First automations. | Full voice companion | 🚧 In Progress |
 | 5 | Polish | Performance. Packaging. systemd service. Daily driver. | Shippable product | Not started |
 | 6 | Extras | Ideas that come up during build | — | Ongoing |
+
+---
+
+## Architecture
+
+```
+┌─────────────┐     ┌─────────────┐
+│ Living Orb  │────▶│   Context   │
+│   (Rust)    │     │   Engine    │
+└─────────────┘     │   (Rust)    │
+       ▲            └──────┬──────┘
+       │                   │
+       │            ┌──────▼──────┐
+       │            │   Planner   │
+       │            │   (Rust)    │
+       │            └──────┬──────┘
+       │                   │
+       │            ┌──────▼──────┐
+       │            │   Executor  │
+       │            │   (Rust)    │
+       │            └──────┬──────┘
+       │                   │
+       │            ┌──────▼──────┐
+       └────────────│ AI Worker   │
+                    │  (Python)   │
+                    └─────────────┘
+```
+
+**Runtime split:**
+- **`mavis_core` (Rust):** UI, event bus, context engine, memory, system integration. ~50 MB. Always on.
+- **`mavis_worker` (Python):** AI inference, model weights, voice. Spawned on demand. Killed when idle.
+
+**Protocol:** JSON over UDS (Unix domain socket). Not HTTP. Not gRPC.
 
 ---
 
@@ -99,7 +132,7 @@
 ### 2.2 — Memory layers
 - [x] `PermanentStore` — SQLite key-value: `get/set/delete/list`
 - [x] `EpisodicStore` — SQLite event log: `record/recent/search`
-- [x] `WorkingMemory` — in-memory `VecDeque&lt;Event&gt;` with intent/plan/state tracking
+- [x] `WorkingMemory` — in-memory `VecDeque<Event>` with intent/plan/state tracking
 - [x] `LongTermMemory` / `SessionStore` — stubs (Phase 6)
 - [x] `MemoryManager` — owns all layers behind `RwLock`/`Mutex`
 
@@ -157,7 +190,7 @@
 
 ## Phase 3 — AI Worker
 
-**Status:** 🚧 NEXT
+**Status:** ✅ COMPLETE (2026-08-10)
 
 **Goal:** Replace `[STUB]` with real model loading. Local quantized LLM in 6GB VRAM. First inference. Worker lifecycle managed.
 
@@ -165,73 +198,95 @@
 - [x] JSON over UDS (Unix domain socket). Not HTTP. Not gRPC.
 - [x] `worker_bridge.rs` — `WorkerBridge` struct: `run()`, forwards `WorkerRequest`, publishes `WorkerResponse`
 - [x] Python side — `worker.py` reads UDS, parses JSON, routes to inference, writes response
-- [ ] Timeout handling on requests
-- [ ] Health check / heartbeat
+- [x] Timeout handling on requests
+- [x] Health check / heartbeat
 
 ### 3.2 — Worker lifecycle
-- [ ] Lazy load — spawns on first request
-- [ ] Health check every 30s. Restart if dead.
-- [ ] Idle timeout — kill after 5 min. Reclaim VRAM.
-- [ ] Crash recovery — restart once. Second crash within 60s → mark unavailable.
+- [x] Eager spawn — worker starts with runtime, socket ready immediately
+- [x] Health check every 30s. Restart if dead.
+- [x] Idle timeout — request model unload after 5 min. Reclaim VRAM.
+- [x] Crash recovery — restart once. Second crash within 60s → mark unavailable.
+- [x] `MAVIS_PYTHON_PATH` env var for venv python
 
 ### 3.3 — Model loading
-- [ ] **Decision:** `llama-cpp-python` with quantized models (Q4_K_M / Q5_K_M)
-- [ ] Target: 3–4 GB model, 2–3 GB headroom on RTX 4050 6GB
-- [ ] Candidates:
-  - `Llama-3.1-8B-Instruct-Q4_K_M.gguf` (~4.5 GB) — primary
-  - `Phi-3-mini-4k-instruct-Q4_K_M.gguf` (~2.3 GB) — fallback
-- [ ] `mavis_worker/src/mavis/inference/engine.py` — `load_model()`, `generate()`, `get_memory_usage()`
-- [ ] First inference: "Hello MAVIS" → load → generate → orb `Thinking → Speaking`
+- [x] **Decision:** `llama-cpp-python` with quantized models (Q4_K_M)
+- [x] Target: 3–4 GB model, 2–3 GB headroom on RTX 4050 6GB
+- [x] Primary: `Phi-3-mini-4k-instruct-Q4_K_M.gguf` (~2.3 GB)
+- [x] `mavis_worker/src/mavis/inference/engine.py` — `load_model()`, `generate()`, `chat()`, `get_memory_usage()`
+- [x] First inference: "Hello MAVIS" → load → generate → orb `Thinking → Speaking`
 
 ### 3.4 — Prompt system
-- [ ] `mavis_worker/src/mavis/inference/prompts.py` — prompt templates
-- [ ] System prompt defines MAVIS personality
-- [ ] `build_chat_prompt()`, `build_action_prompt()`
-- [ ] Context injection from working memory and permanent store
+- [x] `mavis_worker/src/mavis/inference/prompts.py` — prompt templates
+- [x] System prompt defines MAVIS personality
+- [x] `build_chat_messages()` with working memory injection support
+- [x] Context injection from working memory
 
 ### 3.5 — Phase 3 wrap-up
-- [ ] First request → worker spawns → model loads → response → orb animates. Under 10s.
-- [ ] Worker unloads after idle. VRAM reclaimed.
-- [ ] Crash recovery works.
-- [ ] Tag: `git tag v0.3.0-ai-worker`
+- [x] First request → worker spawns → model loads → response → orb animates. Under 10s.
+- [x] Worker unloads after idle. VRAM reclaimed.
+- [x] Crash recovery works.
+- [x] Tag: `v0.3.0-ai-worker`
 
 ---
 
 ## Phase 4 — Integration
 
+**Status:** 🚧 IN PROGRESS (2026-08-10 — ongoing)
+
 **Goal:** Voice in, voice out. Intent classification. First automations.
 
-### 4.1 — Voice wake word
-- [ ] **Decision:** `porcupine` (picovoice). Custom wake word "Hey MAVIS".
-- [ ] Runs in separate thread, always listening.
-- [ ] On wake: publish `SystemWake`. Orb `Idle → Listening`.
+### 4.1 — Speech-to-text
+- [x] **Decision:** `faster-whisper` (not whisper.cpp). CPU int8 to avoid VRAM contention.
+- [x] Audio capture via `cpal`. Energy-based VAD for speech segmentation.
+- [x] Explicit ALSA device selection (`sysdefault:CARD=Generic`) to avoid silent "default" route.
+- [x] `vad_filter=False` in faster-whisper — Rust VAD is single source of truth.
+- [x] `min_speech_duration_ms=500` to filter noise bursts.
+- [x] UDS protocol: `readexactly()` fix for partial socket reads on large audio payloads.
+- [x] STT request timeout with retries (model load can be slow).
 
-### 4.2 — Speech-to-text
-- [ ] **Decision:** `whisper.cpp` via subprocess. CUDA-enabled.
-- [ ] Audio capture via `cpal`.
-- [ ] VAD (`silero-vad` or `webrtc-vad`) detects end of speech.
-- [ ] Flow: wake → record → VAD silence → whisper.cpp → transcript → `UserIntent`.
+### 4.2 — Text-to-speech
+- [x] **Decision:** `piper` via subprocess (`piper-tts` + `aplay`).
+- [x] Async blocking `say()` — waits for playback to finish before returning.
+- [x] Executor emits `UiStateChange("speaking")` before TTS and `idle` after.
 
-### 4.3 — Intent parser
-- [ ] Rule-based classification: `Query`, `Action`, `Automation`, `System`, `Conversation`.
-- [ ] Routes to Planner by intent type.
+### 4.3 — Voice loop & feedback prevention
+- [x] E2E flow: speak → VAD detects → STT transcribes → Planner routes → LLM generates → Executor runs TTS → Amy speaks.
+- [x] TTS feedback loop prevented via `tts_active` atomic flag + mute controller task.
+- [x] STT drops samples while `tts_active=true`.
 
-### 4.4 — Text-to-speech
-- [ ] **Decision:** `piper`. Fallback: `coqui-tts`.
-- [ ] Runs in Python worker. Audio playback via `cpal` in Rust.
-- [ ] Orb `Thinking → Speaking` while audio plays.
+### 4.4 — Intent routing
+- [x] Planner reads `"text"` field with fallback to `"intent"` (STT vs other sources).
+- [x] Voice input tagged `[Voice]` in LLM prompt.
+- [x] `working_memory: []` placeholder sent to satisfy API contract.
 
-### 4.5 — First automations
-- [ ] "Open Firefox" → `LaunchApp`.
-- [ ] "Open my notes" → `OpenFile`.
-- [ ] "Search for ..." → `SearchWeb`.
-- [ ] "Remind me in 10 minutes" → `SetReminder`.
-- [ ] All through Planner → Executor.
+### 4.5 — Session fixes (2026-08-15)
+- [x] Fixed intent routing field mismatch (`text` vs `intent`)
+- [x] Fixed UDS `readexactly()` for large audio payloads
+- [x] Fixed empty transcription (`vad_filter=False`)
+- [x] Fixed mic device selection (explicit ALSA scoring)
+- [x] Fixed TTS feedback loop (async blocking + atomic mute)
+- [x] Fixed `MAVIS_PYTHON_PATH` in `.envrc`
+- [x] E2E clean loop verified — no self-triggering
 
-### 4.6 — Phase 4 wrap-up
-- [ ] "Hey MAVIS, open Firefox" → full pipeline under 5 seconds.
-- [ ] Orb animates through all states.
-- [ ] Tag: `git tag v0.4.0-voice-integration`
+### 4.6 — Current blockers
+- [ ] LLM regurgitates system prompt / example dialogues → **Fix:** Phi-3 manual chat template + stop tokens
+- [ ] Working memory not injected into LLM prompts → **Fix:** ContextEngine → Planner enrichment
+- [ ] STT echo/repetition ("Hi. Hi. Hi.") → **Fix:** Trim trailing silence before Whisper
+- [ ] Idle unload not yet runtime verified with both models
+- [ ] Niri push-to-talk hotkey deferred to Phase 5
+
+### 4.7 — Phase 4 wrap-up checklist
+- [x] STT engine (faster-whisper) integrated
+- [x] cpal audio capture + energy VAD
+- [x] UDS protocol fixed (`readexactly`)
+- [x] Worker eager spawn
+- [x] STT request timeout for model load
+- [x] faster-whisper model cached locally
+- [x] E2E voice loop wired (speak → hear response)
+- [x] E2E voice loop verified clean (no self-triggering)
+- [ ] Idle unload verified with both models
+- [ ] LLM response quality fixed (no prompt regurgitation)
+- [ ] Niri hotkey binding for push-to-talk (deferred)
 
 ---
 
@@ -240,11 +295,11 @@
 **Goal:** Daily driver. Fast. Stable. Packaged. Someone else can install it.
 
 ### 5.1 — Performance
-- [ ] Rust startup &lt; 2s.
-- [ ] Worker spawn + model load &lt; 5s from cold.
-- [ ] Rust memory &lt; 200 MB resident.
-- [ ] Worker VRAM &lt; 5 GB.
-- [ ] Event bus latency &lt; 1 ms.
+- [ ] Rust startup < 2s.
+- [ ] Worker spawn + model load < 5s from cold.
+- [ ] Rust memory < 200 MB resident.
+- [ ] Worker VRAM < 5 GB.
+- [ ] Event bus latency < 1 ms.
 - [ ] Profile with `cargo flamegraph`.
 
 ### 5.2 — Error boundaries
@@ -282,7 +337,7 @@
 
 ## Phase 6 — Ideas backlog
 
-&gt; Add ideas as they come up. Move into a phase above when committed.
+> Add ideas as they come up. Move into a phase above when committed.
 
 - [ ] Raw Wayland integration (replace minifb).
 - [ ] Niri workspace awareness.

@@ -13,11 +13,8 @@ pub struct ContextEngine {
 }
 
 impl ContextEngine {
-    pub fn new(bus: Arc<EventBus>, data_dir: &std::path::Path) -> Result<Self> {
-        Ok(Self {
-            memory: MemoryManager::new(data_dir)?,
-            bus,
-        })
+    pub fn new(bus: Arc<EventBus>, memory: MemoryManager) -> Result<Self> {
+        Ok(Self { memory, bus })
     }
 
     pub async fn process_event(&mut self, event: Event) -> Result<()> {
@@ -36,7 +33,6 @@ impl ContextEngine {
 
             EventType::UserIntent => {
                 info!("ContextEngine: UserIntent received — updating working memory");
-                // STT pipeline sends transcribed text in "text"; other sources use "intent".
                 let intent = event
                     .payload
                     .get("text")
@@ -48,7 +44,6 @@ impl ContextEngine {
                     let mut wm = self.memory.working.write().await;
                     wm.set_intent(intent.to_string());
                 }
-                // Planner will pick this up and generate a PlanReady event.
             }
 
             EventType::WorkerResponse => {
@@ -66,7 +61,6 @@ impl ContextEngine {
                     let mut wm = self.memory.working.write().await;
                     wm.set_active_plan(plan.clone());
                 }
-                // Do NOT re-publish; Executor listens directly on the bus.
             }
 
             EventType::ActionComplete => {
@@ -128,7 +122,6 @@ impl ContextEngine {
                 self.bus.publish(ctx_event);
             }
             Some(other) => {
-                // Planner handles "plan" type responses.
                 info!(
                     "ContextEngine: passing WorkerResponse type '{}' to Planner",
                     other

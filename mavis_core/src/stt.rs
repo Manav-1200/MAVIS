@@ -30,7 +30,7 @@ impl Default for SttConfig {
         Self {
             sample_rate: 16000,
             energy_threshold: 0.05,
-            silence_duration_ms: 500,
+            silence_duration_ms: 800,
             min_speech_duration_ms: 500,
             frame_duration_ms: 30,
             max_utterance_duration_ms: 8000,

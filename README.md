@@ -12,6 +12,7 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 - A **Python AI worker** that loads only when needed, runs your local LLM, then unloads to reclaim VRAM
 - A **living orb** that communicates state through subtle animation
 - A system that **remembers**, **plans**, and **assists** without taking control
+- **Voice-enabled**: speak naturally, MAVIS listens, thinks, and speaks back
 
 ## What MAVIS Is Not
 
@@ -22,40 +23,43 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 
 ## Architecture
 
+```
 ┌─────────────┐     ┌─────────────┐
-│  Living Orb │────▶│   Context   │
+│ Living Orb  │────▶│   Context   │
 │   (Rust)    │     │   Engine    │
 └─────────────┘     │   (Rust)    │
-▲            └──────┬──────┘
-│                   │
-│            ┌──────▼──────┐
-│            │   Planner   │
-│            │   (Rust)    │
-│            └──────┬──────┘
-│                   │
-│            ┌──────▼──────┐
-│            │   Executor  │
-│            │   (Rust)    │
-│            └──────┬──────┘
-│                   │
-│            ┌──────▼──────┐
-└────────────│  AI Worker  │
-│  (Python)   │
-└─────────────┘
-
+       ▲            └──────┬──────┘
+       │                   │
+       │            ┌──────▼──────┐
+       │            │   Planner   │
+       │            │   (Rust)    │
+       │            └──────┬──────┘
+       │                   │
+       │            ┌──────▼──────┐
+       │            │   Executor  │
+       │            │   (Rust)    │
+       │            └──────┬──────┘
+       │                   │
+       │            ┌──────▼──────┐
+       └────────────│ AI Worker   │
+                    │  (Python)   │
+                    └─────────────┘
+```
 
 **Runtime split:**
 - **`mavis_core` (Rust):** UI, event bus, context engine, memory, system integration. ~50 MB. Always on.
 - **`mavis_worker` (Python):** AI inference, model weights, voice. Spawned on demand. Killed when idle.
 
+**Protocol:** JSON over UDS (Unix domain socket). No HTTP. No gRPC.
+
 ## Status
 
 | Phase | What | Status |
 |-------|------|--------|
-| 1 — Foundation | Rust runtime, event bus, orb window | 🚧 In progress |
-| 2 — Core Runtime | Context engine, memory, system integration | Not started |
-| 3 — AI Worker | Local LLM, Rust–Python bridge | Not started |
-| 4 — Integration | Voice pipeline, intent system, automations | Not started |
+| 1 — Foundation | Rust runtime, event bus, orb window | ✅ Complete |
+| 2 — Core Runtime | Context engine, memory, system integration | ✅ Complete |
+| 3 — AI Worker | Local LLM, Rust–Python bridge | ✅ Complete |
+| 4 — Integration | Voice pipeline, intent system, automations | 🚧 In Progress |
 | 5 — Polish | Performance, packaging, daily driver | Not started |
 
 Full roadmap in [`PHASES.md`](PHASES.md).
@@ -67,9 +71,11 @@ Full roadmap in [`PHASES.md`](PHASES.md).
 | Runtime | Rust, tokio, serde, rusqlite |
 | UI | winit → raw Wayland |
 | System | DBus, inotify, global hotkeys |
-| AI | Python, llama.cpp (Q4_K_M) |
-| Voice | porcupine, whisper.cpp, piper |
+| AI | Python, llama-cpp-python (Q4_K_M) |
+| STT | faster-whisper (CPU int8) |
+| TTS | piper |
 | Audio | cpal |
+| Bridge | UDS + length-prefixed JSON |
 
 ## Development
 
@@ -78,12 +84,20 @@ Full roadmap in [`PHASES.md`](PHASES.md).
 cd mavis_core
 cargo run
 
-# Python worker
+# Python worker (in separate terminal, or auto-spawned by bridge)
 cd mavis_worker
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
-python -m mavis
+python -m mavis.worker
+```
+
+## Requirements
+
+- Arch Linux (or any Linux with PipeWire/ALSA)
+- NVIDIA GPU with 6GB+ VRAM recommended (RTX 4050 tested)
+- Python 3.10+
+- Rust 1.80+
 
 ## License
 

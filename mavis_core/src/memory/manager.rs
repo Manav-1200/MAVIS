@@ -7,6 +7,7 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
+#[derive(Clone)]
 pub struct MemoryManager {
     pub working: Arc<RwLock<WorkingMemory>>,
     pub permanent: Arc<Mutex<PermanentStore>>,

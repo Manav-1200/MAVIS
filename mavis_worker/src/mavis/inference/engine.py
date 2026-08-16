@@ -8,7 +8,7 @@ try:
 except ImportError as e:
     raise ImportError(
         "llama-cpp-python not installed. Run:\n"
-        "  CMAKE_ARGS='-DGGML_CUDA=on' pip install llama-cpp-python --force-reinstall --no-cache-dir"
+        " CMAKE_ARGS='-DGGML_CUDA=on' pip install llama-cpp-python --force-reinstall --no-cache-dir"
     ) from e
 
 
@@ -110,6 +110,7 @@ class LlamaEngine:
             return {"gpu_total_mb": 0.0, "gpu_used_mb": 0.0}
 
     def _format_chat_prompt(self, messages: list[dict[str, str]]) -> str | None:
+        """Manually format chat prompt for models with known templates."""
         if self._model_name_hint == "tinyllama":
             parts = []
             for msg in messages:
@@ -124,7 +125,31 @@ class LlamaEngine:
             parts.append("<|assistant|>\n")
             return "\n".join(parts)
 
+        if self._model_name_hint == "phi3":
+            parts = []
+            for msg in messages:
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                if role == "system":
+                    parts.append(f"<|system|>\n{content}<|end|>")
+                elif role == "user":
+                    parts.append(f"<|user|>\n{content}<|end|>")
+                elif role == "assistant":
+                    parts.append(f"<|assistant|>\n{content}<|end|>")
+            parts.append("<|assistant|>\n")
+            return "\n".join(parts)
+
         return None
+
+    def _get_stop_tokens(self) -> list[str]:
+        """Return model-specific stop tokens to prevent runaway generation."""
+        if self._model_name_hint == "tinyllama":
+            return ["<|user|>", "<|system|>", "<|assistant|>", "</s>"]
+        if self._model_name_hint == "phi3":
+            # <|end|> ends the turn; \n<|assistant|> prevents multi-turn loops;
+            # </s> is the EOS token for the llama tokenizer backing Phi-3.
+            return ["<|end|>", "\n<|assistant|>", "<|user|>", "<|system|>", "</s>"]
+        return []
 
     def generate(
         self,
@@ -155,9 +180,15 @@ class LlamaEngine:
                 prompt=manual_prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                stop=["<|user|>", "<|system|>", "<|assistant|>"],
+                top_p=0.9,
+                repeat_penalty=1.15,
+                stop=self._get_stop_tokens(),
             )
             text = result.get("choices", [{}])[0].get("text", "")
+            # Safety strip: remove any leaked special tokens
+            for token in ["<|system|>", "<|user|>", "<|assistant|>", "<|end|>", "</s>"]:
+                text = text.replace(token, "")
+            text = text.strip()
             return {
                 "choices": [
                     {

@@ -1,15 +1,18 @@
 use crate::event_bus::EventBus;
+use crate::memory::working::WorkingMemory;
 use crate::models::event::{Event, EventType};
 use log::{info, warn};
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct Planner {
     bus: Arc<EventBus>,
+    working: Arc<RwLock<WorkingMemory>>,
 }
 
 impl Planner {
-    pub fn new(bus: Arc<EventBus>) -> Self {
-        Self { bus }
+    pub fn new(bus: Arc<EventBus>, working: Arc<RwLock<WorkingMemory>>) -> Self {
+        Self { bus, working }
     }
 
     pub async fn run(&mut self) {
@@ -47,8 +50,6 @@ impl Planner {
     }
 
     async fn plan_intent(&self, event: Event) -> anyhow::Result<()> {
-        // Voice input (STT) puts transcribed text in "text".
-        // Other intent sources may use "intent".
         let intent = event
             .payload
             .get("text")
@@ -62,15 +63,14 @@ impl Planner {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
-        // Tag voice input so the LLM knows it came from speech
         let user_message = if source == "voice" {
             format!("[Voice] {}", intent)
         } else {
             intent.to_string()
         };
 
-        // TODO: inject working_memory snapshot from ContextEngine.
-        // For now we send an empty slice so the worker API contract is satisfied.
+        let working_memory = self.build_working_memory().await;
+
         let worker_req = Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
@@ -84,11 +84,61 @@ impl Planner {
                 ],
                 "max_tokens": 256,
                 "temperature": 0.7,
-                "working_memory": []
+                "working_memory": working_memory
             }),
         };
         self.bus.publish(worker_req);
         Ok(())
+    }
+
+    async fn build_working_memory(&self) -> Vec<serde_json::Value> {
+        let snapshot = self.working.read().await;
+        let mut items = Vec::new();
+
+        if let Some(intent) = &snapshot.current_intent {
+            items.push(serde_json::json!({
+                "source": "current_intent",
+                "content": intent,
+            }));
+        }
+
+        for event in snapshot.recent_events(5) {
+            let (source, content) = match event.event_type {
+                EventType::UserIntent => (
+                    "user",
+                    event.payload.get("text")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                ),
+                EventType::WorkerResponse => (
+                    "mavis",
+                    event.payload.get("result")
+                        .and_then(|r| r.get("content"))
+                        .and_then(|c| c.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                ),
+                EventType::PlanReady => (
+                    "plan",
+                    event.payload.get("plan")
+                        .and_then(|p| p.get("text"))
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("")
+                        .to_string()
+                ),
+                _ => continue,
+            };
+
+            if !content.is_empty() {
+                items.push(serde_json::json!({
+                    "source": source,
+                    "content": content,
+                }));
+            }
+        }
+
+        items
     }
 
     async fn handle_worker_response(&self, event: Event) -> anyhow::Result<()> {

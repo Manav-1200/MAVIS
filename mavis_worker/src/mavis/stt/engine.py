@@ -35,9 +35,9 @@ class STTEngine:
         self._model: object | None = None
         self._last_activity = time.time()
 
-    # --------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
     # Lifecycle
-    # --------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
     def _load(self) -> None:
         """Lazy-load the faster-whisper model."""
         if self._model is not None:
@@ -84,9 +84,9 @@ class STTEngine:
 
         logger.info("STT model unloaded.")
 
-    # --------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
     # Inference
-    # --------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
     def transcribe(self, audio_bytes: bytes, sample_rate: int = 16000) -> str:
         """
         Transcribe raw PCM audio (float32, mono, 16 kHz).
@@ -105,6 +105,9 @@ class STTEngine:
         if audio.size == 0:
             return ""
 
+        # Trim trailing silence to prevent echo/repetition artifacts
+        audio = self._trim_trailing_silence(audio, sample_rate=sample_rate)
+
         # Diagnostics: log what the model actually receives
         logger.info(
             "STT input: samples=%d duration=%.2fs min=%.4f max=%.4f mean=%.4f",
@@ -117,7 +120,10 @@ class STTEngine:
 
         segments, info = self._model.transcribe(
             audio,
-            beam_size=5,
+            beam_size=1,
+            best_of=1,
+            patience=1,
+            temperature=0.0,
             language="en",
             condition_on_previous_text=False,
             vad_filter=False,  # Rust VAD already segmented; don't double-filter
@@ -132,9 +138,38 @@ class STTEngine:
         )
         return text
 
-    # --------------------------------------------------------------------- #
+    @staticmethod
+    def _trim_trailing_silence(
+        audio: np.ndarray,
+        sample_rate: int = 16000,
+        threshold: float = 0.01,
+        padding_ms: int = 50,
+    ) -> np.ndarray:
+        """Trim trailing silence from normalized float32 audio."""
+        if audio.size == 0:
+            return audio
+
+        above_threshold = np.abs(audio) > threshold
+        if not np.any(above_threshold):
+            return audio
+
+        last_speech_idx = int(np.where(above_threshold)[0][-1])
+        padding_samples = int(sample_rate * padding_ms / 1000)
+        end_idx = min(last_speech_idx + padding_samples, audio.size)
+        trimmed = audio[:end_idx]
+
+        logger.debug(
+            "Trimmed trailing silence: %d -> %d samples (%.2f s -> %.2f s)",
+            audio.size,
+            trimmed.size,
+            audio.size / sample_rate,
+            trimmed.size / sample_rate,
+        )
+        return trimmed
+
+    # ------------------------------------------------------------------ #
     # Idle monitoring
-    # --------------------------------------------------------------------- #
+    # ------------------------------------------------------------------ #
     @property
     def last_activity(self) -> float:
         return self._last_activity
