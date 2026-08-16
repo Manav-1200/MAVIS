@@ -23,17 +23,24 @@ pub struct SttConfig {
     pub min_speech_duration_ms: u64,
     pub frame_duration_ms: u64,
     pub max_utterance_duration_ms: u64,
+    /// Minimum peak energy for an utterance to be considered real speech.
+    /// Utterances with max energy below this are discarded as noise (e.g. fan).
+    pub min_max_energy: f32,
 }
 
 impl Default for SttConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
-            energy_threshold: 0.05,
+            // Lowered from 0.05 — quiet speech was being missed.
+            // Fan noise is filtered out by min_max_energy instead.
+            energy_threshold: 0.03,
             silence_duration_ms: 800,
             min_speech_duration_ms: 500,
             frame_duration_ms: 30,
             max_utterance_duration_ms: 8000,
+            // From logs: real speech peaks at 0.16–1.0, fan noise stays low.
+            min_max_energy: 0.12,
         }
     }
 }
@@ -53,6 +60,8 @@ struct EnergyVad {
     silence_frames: usize,
     pub is_speaking: bool,
     max_energy_seen: f32,
+    /// Peak energy of the most recently completed utterance.
+    pub last_max_energy: f32,
 }
 
 impl EnergyVad {
@@ -72,6 +81,7 @@ impl EnergyVad {
             silence_frames: 0,
             is_speaking: false,
             max_energy_seen: 0.0,
+            last_max_energy: 0.0,
         }
     }
 
@@ -102,6 +112,7 @@ impl EnergyVad {
                     self.silence_frames += 1;
                     if self.silence_frames >= self.silence_threshold_frames {
                         let utterance: Vec<f32> = self.buffer.drain(..).collect();
+                        self.last_max_energy = self.max_energy_seen;
                         info!(
                             "VAD: SPEECH END ({} samples, {} frames, max_energy={})",
                             utterance.len(),
@@ -121,6 +132,7 @@ impl EnergyVad {
 
             if self.is_speaking && self.speech_frames >= self.max_speech_frames {
                 let utterance: Vec<f32> = self.buffer.drain(..).collect();
+                self.last_max_energy = self.max_energy_seen;
                 info!(
                     "VAD: FORCED END ({} samples, {} frames, max_energy={})",
                     utterance.len(),
@@ -299,10 +311,28 @@ impl SttManager {
                             let mut vad_guard = vad.lock().unwrap();
                             let was_speaking = vad_guard.is_speaking;
                             let result = vad_guard.process(&resampled);
+                            let max_energy = vad_guard.last_max_energy;
                             let now_speaking = vad_guard.is_speaking;
                             drop(vad_guard);
 
                             if let Some(utterance) = result {
+                                // Drop noise utterances (fan, keyboard taps) that lack
+                                // sufficient peak energy even if they crossed threshold.
+                                if max_energy < config.min_max_energy {
+                                    info!(
+                                        "STT: dropping noise utterance (max_energy={:.3} < {:.3})",
+                                        max_energy, config.min_max_energy
+                                    );
+                                    let _ = bus_for_ui.publish(Event {
+                                        id: uuid::Uuid::new_v4(),
+                                        timestamp: chrono::Utc::now(),
+                                        source: "stt".to_string(),
+                                        event_type: EventType::UiStateChange,
+                                        payload: serde_json::json!({ "state": "idle" }),
+                                    });
+                                    return;
+                                }
+
                                 info!("STT: shipping utterance ({} samples)", utterance.len());
                                 let _ = tx.try_send(utterance);
                                 let _ = bus_for_ui.publish(Event {
