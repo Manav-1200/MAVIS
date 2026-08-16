@@ -18,13 +18,11 @@ use crate::models::event::{Event, EventType};
 #[derive(Clone, Debug)]
 pub struct SttConfig {
     pub sample_rate: u32,
-    pub energy_threshold: f32,
     pub silence_duration_ms: u64,
     pub min_speech_duration_ms: u64,
     pub frame_duration_ms: u64,
     pub max_utterance_duration_ms: u64,
     /// Minimum peak energy for an utterance to be considered real speech.
-    /// Utterances with max energy below this are discarded as noise (e.g. fan).
     pub min_max_energy: f32,
 }
 
@@ -32,21 +30,17 @@ impl Default for SttConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
-            // Lowered from 0.05 — quiet speech was being missed.
-            // Fan noise is filtered out by min_max_energy instead.
-            energy_threshold: 0.03,
             silence_duration_ms: 800,
             min_speech_duration_ms: 500,
             frame_duration_ms: 30,
             max_utterance_duration_ms: 8000,
-            // From logs: real speech peaks at 0.16–1.0, fan noise stays low.
             min_max_energy: 0.12,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// VAD
+// VAD — adaptive energy threshold with noise-floor tracking
 // ---------------------------------------------------------------------------
 
 struct EnergyVad {
@@ -54,13 +48,15 @@ struct EnergyVad {
     silence_threshold_frames: usize,
     min_speech_threshold_frames: usize,
     max_speech_frames: usize,
-    energy_threshold: f32,
+    /// Base threshold from config; effective threshold adapts to noise floor.
+    base_threshold: f32,
+    /// Exponential moving average of ambient (non-speech) energy.
+    noise_floor: f32,
     buffer: VecDeque<f32>,
     speech_frames: usize,
     silence_frames: usize,
     pub is_speaking: bool,
     max_energy_seen: f32,
-    /// Peak energy of the most recently completed utterance.
     pub last_max_energy: f32,
 }
 
@@ -75,7 +71,8 @@ impl EnergyVad {
                 .max(1)) as usize,
             max_speech_frames: ((cfg.max_utterance_duration_ms / cfg.frame_duration_ms).max(1))
                 as usize,
-            energy_threshold: cfg.energy_threshold,
+            base_threshold: 0.02,
+            noise_floor: 0.005,
             buffer: VecDeque::new(),
             speech_frames: 0,
             silence_frames: 0,
@@ -83,6 +80,12 @@ impl EnergyVad {
             max_energy_seen: 0.0,
             last_max_energy: 0.0,
         }
+    }
+
+    /// Current effective threshold = max(base, noise_floor * 3).
+    /// Caps at 0.07 so real speech always triggers.
+    fn effective_threshold(&self) -> f32 {
+        (self.base_threshold).max(self.noise_floor * 3.0).min(0.07)
     }
 
     fn process(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
@@ -95,34 +98,45 @@ impl EnergyVad {
             let energy =
                 (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
             self.max_energy_seen = self.max_energy_seen.max(energy);
+            let threshold = self.effective_threshold();
 
             self.buffer.extend(chunk);
 
-            if energy > self.energy_threshold {
+            if energy > threshold {
                 self.speech_frames += 1;
                 self.silence_frames = 0;
                 if self.speech_frames >= self.min_speech_threshold_frames {
                     if !self.is_speaking {
-                        info!("VAD: SPEECH START (energy={}, threshold={})", energy, self.energy_threshold);
+                        info!(
+                            "VAD: SPEECH START (energy={:.4}, threshold={:.4}, noise_floor={:.4})",
+                            energy, threshold, self.noise_floor
+                        );
+                        self.is_speaking = true;
                     }
-                    self.is_speaking = true;
                 }
             } else {
+                // Update noise floor only when we're sure it's not speech
+                if !self.is_speaking {
+                    self.noise_floor = self.noise_floor * 0.95 + energy * 0.05;
+                }
+
                 if self.is_speaking {
                     self.silence_frames += 1;
                     if self.silence_frames >= self.silence_threshold_frames {
                         let utterance: Vec<f32> = self.buffer.drain(..).collect();
                         self.last_max_energy = self.max_energy_seen;
                         info!(
-                            "VAD: SPEECH END ({} samples, {} frames, max_energy={})",
+                            "VAD: SPEECH END ({} samples, {} frames, max_energy={:.3}, noise_floor={:.4})",
                             utterance.len(),
                             self.speech_frames,
-                            self.max_energy_seen
+                            self.max_energy_seen,
+                            self.noise_floor
                         );
                         self.reset();
                         return Some(utterance);
                     }
                 } else {
+                    // Trim buffer to prevent unbounded growth during silence
                     while self.buffer.len() > self.silence_threshold_frames * self.frame_size {
                         self.buffer.pop_front();
                     }
@@ -134,10 +148,11 @@ impl EnergyVad {
                 let utterance: Vec<f32> = self.buffer.drain(..).collect();
                 self.last_max_energy = self.max_energy_seen;
                 info!(
-                    "VAD: FORCED END ({} samples, {} frames, max_energy={})",
+                    "VAD: FORCED END ({} samples, {} frames, max_energy={:.3}, noise_floor={:.4})",
                     utterance.len(),
                     self.speech_frames,
-                    self.max_energy_seen
+                    self.max_energy_seen,
+                    self.noise_floor
                 );
                 self.reset();
                 return Some(utterance);
@@ -288,7 +303,6 @@ impl SttManager {
                             if !running_stream.load(Ordering::Relaxed) {
                                 return;
                             }
-                            // Mute STT while TTS is speaking to prevent feedback loop
                             if tts_active_stream.load(Ordering::Relaxed) {
                                 return;
                             }
@@ -316,8 +330,6 @@ impl SttManager {
                             drop(vad_guard);
 
                             if let Some(utterance) = result {
-                                // Drop noise utterances (fan, keyboard taps) that lack
-                                // sufficient peak energy even if they crossed threshold.
                                 if max_energy < config.min_max_energy {
                                     info!(
                                         "STT: dropping noise utterance (max_energy={:.3} < {:.3})",

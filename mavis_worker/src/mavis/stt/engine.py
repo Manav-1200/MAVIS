@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import re
 import time
 
 import numpy as np
@@ -120,16 +121,21 @@ class STTEngine:
 
         segments, info = self._model.transcribe(
             audio,
-            beam_size=1,
-            best_of=1,
-            patience=1,
+            beam_size=5,
+            best_of=5,
+            patience=2.0,
             temperature=0.0,
             language="en",
             condition_on_previous_text=False,
             vad_filter=False,  # Rust VAD already segmented; don't double-filter
         )
 
-        text = " ".join(seg.text for seg in segments).strip()
+        raw_text = " ".join(seg.text for seg in segments).strip()
+        text = self._deduplicate_repetition(raw_text)
+
+        if text != raw_text:
+            logger.info("STT dedup: '%s' -> '%s'", raw_text[:80], text[:80])
+
         logger.info(
             "Transcribed (%s, prob=%.2f): %s",
             info.language,
@@ -166,6 +172,25 @@ class STTEngine:
             trimmed.size / sample_rate,
         )
         return trimmed
+
+    @staticmethod
+    def _deduplicate_repetition(text: str) -> str:
+        """Collapse repeated sentences like 'Hi. Hi. Hi.' into 'Hi.'"""
+        parts = re.split(r"([.!?]+(?:\s+|$))", text)
+        output = []
+        prev_phrase = None
+
+        for i in range(0, len(parts) - 1, 2):
+            phrase = parts[i].strip()
+            punct = parts[i + 1] if i + 1 < len(parts) else ""
+            if not phrase:
+                continue
+            if phrase.lower() == prev_phrase:
+                continue  # skip duplicate
+            output.append(phrase + punct)
+            prev_phrase = phrase.lower()
+
+        return " ".join(output)
 
     # ------------------------------------------------------------------ #
     # Idle monitoring

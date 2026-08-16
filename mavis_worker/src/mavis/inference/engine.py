@@ -146,9 +146,7 @@ class LlamaEngine:
         if self._model_name_hint == "tinyllama":
             return ["<|user|>", "<|system|>", "<|assistant|>", "</s>"]
         if self._model_name_hint == "phi3":
-            # <|end|> ends the turn; \n<|assistant|> prevents multi-turn loops;
-            # </s> is the EOS token for the llama tokenizer backing Phi-3.
-            return ["<|end|>", "\n<|assistant|>", "<|user|>", "<|system|>", "</s>"]
+            return ["<|end|>", "<|user|>", "<|system|>"]
         return []
 
     def generate(
@@ -176,19 +174,14 @@ class LlamaEngine:
 
         manual_prompt = self._format_chat_prompt(messages)
         if manual_prompt is not None:
+            print(f"[engine] Prompt ({self._model_name_hint}):\n{manual_prompt}\n")
             result = self._llm(
                 prompt=manual_prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
-                top_p=0.9,
-                repeat_penalty=1.15,
                 stop=self._get_stop_tokens(),
             )
             text = result.get("choices", [{}])[0].get("text", "")
-            # Safety strip: remove any leaked special tokens
-            for token in ["<|system|>", "<|user|>", "<|assistant|>", "<|end|>", "</s>"]:
-                text = text.replace(token, "")
-            text = text.strip()
             return {
                 "choices": [
                     {
