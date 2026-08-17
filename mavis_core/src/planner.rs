@@ -71,6 +71,7 @@ impl Planner {
 
         let working_memory = self.build_working_memory().await;
 
+        // Only send the user message — build_chat_messages() in Python owns the system prompt.
         let worker_req = Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
@@ -79,7 +80,6 @@ impl Planner {
             payload: serde_json::json!({
                 "request_type": "chat",
                 "messages": [
-                    {"role": "system", "content": "You are MAVIS, a helpful desktop AI companion. Keep responses concise and actionable."},
                     {"role": "user", "content": user_message}
                 ],
                 "max_tokens": 256,
@@ -106,26 +106,29 @@ impl Planner {
             let (source, content) = match event.event_type {
                 EventType::UserIntent => (
                     "user",
-                    event.payload.get("text")
+                    event.payload
+                        .get("text")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
-                        .to_string()
+                        .to_string(),
                 ),
                 EventType::WorkerResponse => (
                     "mavis",
-                    event.payload.get("result")
+                    event.payload
+                        .get("result")
                         .and_then(|r| r.get("content"))
                         .and_then(|c| c.as_str())
                         .unwrap_or("")
-                        .to_string()
+                        .to_string(),
                 ),
                 EventType::PlanReady => (
                     "plan",
-                    event.payload.get("plan")
+                    event.payload
+                        .get("plan")
                         .and_then(|p| p.get("text"))
                         .and_then(|t| t.as_str())
                         .unwrap_or("")
-                        .to_string()
+                        .to_string(),
                 ),
                 _ => continue,
             };

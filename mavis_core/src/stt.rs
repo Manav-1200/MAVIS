@@ -33,7 +33,7 @@ impl Default for SttConfig {
             silence_duration_ms: 800,
             min_speech_duration_ms: 500,
             frame_duration_ms: 30,
-            max_utterance_duration_ms: 8000,
+            max_utterance_duration_ms: 5000,
             min_max_energy: 0.12,
         }
     }
@@ -115,10 +115,11 @@ impl EnergyVad {
                     }
                 }
             } else {
-                // Update noise floor only when we're sure it's not speech
-                if !self.is_speaking {
-                    self.noise_floor = self.noise_floor * 0.95 + energy * 0.05;
-                }
+                // CRITICAL FIX: Update noise floor on ALL low-energy frames,
+                // regardless of is_speaking state. The EMA is slow (0.95/0.05)
+                // so brief inter-word pauses won't pollute it, but continuous
+                // fan noise will now be tracked and raise the threshold.
+                self.noise_floor = self.noise_floor * 0.95 + energy * 0.05;
 
                 if self.is_speaking {
                     self.silence_frames += 1;

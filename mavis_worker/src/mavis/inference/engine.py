@@ -1,4 +1,5 @@
 import gc
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -112,7 +113,7 @@ class LlamaEngine:
     def _format_chat_prompt(self, messages: list[dict[str, str]]) -> str | None:
         """Manually format chat prompt for models with known templates."""
         if self._model_name_hint == "tinyllama":
-            parts = []
+            parts: list[str] = []
             for msg in messages:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
@@ -126,7 +127,7 @@ class LlamaEngine:
             return "\n".join(parts)
 
         if self._model_name_hint == "phi3":
-            parts = []
+            parts: list[str] = []
             for msg in messages:
                 role = msg.get("role", "user")
                 content = msg.get("content", "")
@@ -146,8 +147,24 @@ class LlamaEngine:
         if self._model_name_hint == "tinyllama":
             return ["<|user|>", "<|system|>", "<|assistant|>", "</s>"]
         if self._model_name_hint == "phi3":
-            return ["<|end|>", "<|user|>", "<|system|>"]
+            return [
+                "<|end|>",
+                "<|user|>",
+                "<|system|>",
+                "<|assistant|>",
+                "<|endoftext|>",
+                "</s>",
+            ]
         return []
+
+    def _post_process(self, text: str) -> str:
+        """Cut generation at the first stop-token occurrence."""
+        for stop in self._get_stop_tokens():
+            if stop in text:
+                text = text[: text.index(stop)]
+        # Strip any trailing partial turn markers
+        text = re.sub(r"<\|[^>]*$", "", text)
+        return text.strip()
 
     def generate(
         self,
@@ -181,7 +198,13 @@ class LlamaEngine:
                 temperature=temperature,
                 stop=self._get_stop_tokens(),
             )
-            text = result.get("choices", [{}])[0].get("text", "")
+            raw_text = result.get("choices", [{}])[0].get("text", "")
+            text = self._post_process(raw_text)
+
+            # Safety fallback if the model emitted nothing but stop tokens
+            if not text:
+                text = "I'm here."
+
             return {
                 "choices": [
                     {
