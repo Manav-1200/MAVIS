@@ -82,10 +82,12 @@ impl EnergyVad {
         }
     }
 
-    /// Current effective threshold = max(base, noise_floor * 3).
-    /// Caps at 0.07 so real speech always triggers.
+    /// Effective threshold adapts to noise floor but is hard-capped so it
+    /// never rises above typical voice energy for this mic (~0.027).
     fn effective_threshold(&self) -> f32 {
-        (self.base_threshold).max(self.noise_floor * 3.0).min(0.07)
+        self.base_threshold
+            .max(self.noise_floor * 1.5)
+            .min(0.022)
     }
 
     fn process(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
@@ -115,11 +117,9 @@ impl EnergyVad {
                     }
                 }
             } else {
-                // CRITICAL FIX: Update noise floor on ALL low-energy frames,
-                // regardless of is_speaking state. The EMA is slow (0.95/0.05)
-                // so brief inter-word pauses won't pollute it, but continuous
-                // fan noise will now be tracked and raise the threshold.
-                self.noise_floor = self.noise_floor * 0.95 + energy * 0.05;
+                // Update noise floor on all low-energy frames, but cap it so
+                // fan noise can never raise the threshold above voice energy.
+                self.noise_floor = (self.noise_floor * 0.97 + energy * 0.03).min(0.015);
 
                 if self.is_speaking {
                     self.silence_frames += 1;
@@ -168,6 +168,9 @@ impl EnergyVad {
         self.silence_frames = 0;
         self.is_speaking = false;
         self.max_energy_seen = 0.0;
+        // Reset noise floor so the next utterance starts fresh. Without this,
+        // the floor accumulates across the session and eventually deafens the VAD.
+        self.noise_floor = 0.005;
     }
 }
 
