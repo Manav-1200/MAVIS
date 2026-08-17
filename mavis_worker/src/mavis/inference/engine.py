@@ -158,12 +158,40 @@ class LlamaEngine:
         return []
 
     def _post_process(self, text: str) -> str:
-        """Cut generation at the first stop-token occurrence."""
+        """Aggressively clean generation: cut stops, split separators, truncate."""
+        if not text:
+            return "I'm here."
+
+        # 1. Cut at first stop token
         for stop in self._get_stop_tokens():
             if stop in text:
                 text = text[: text.index(stop)]
-        # Strip any trailing partial turn markers
-        text = re.sub(r"<\|[^>]*$", "", text)
+
+        # 2. Split on structural separators and keep only the first segment
+        for sep in ["===", "---", "***", "___", "\n\n", "\n"]:
+            if sep in text:
+                text = text.split(sep, 1)[0]
+
+        # 3. Strip markdown artifacts (bullets, numbering, headers, links, code)
+        text = re.sub(r"^[-*•]\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^\d+\.\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"^#+\s+", "", text, flags=re.MULTILINE)
+        text = re.sub(r"\[.*?\]\(.*?\)", "", text)
+        text = re.sub(r"`.*?`", "", text)
+
+        # 4. Clean whitespace
+        text = re.sub(r"\s+", " ", text).strip()
+
+        # 5. Truncate to first 1-2 sentences
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        if len(sentences) > 2:
+            text = " ".join(sentences[:2])
+
+        # 6. Hard cap at 180 chars, ending at a sentence boundary if possible
+        if len(text) > 180:
+            match = re.search(r".{1,180}[.!?]", text)
+            text = match.group(0) if match else text[:180]
+
         return text.strip()
 
     def generate(
