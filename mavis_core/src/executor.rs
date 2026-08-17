@@ -2,7 +2,6 @@
 // Executes plans: shell commands, app launching, notifications, TTS.
 // Listens for PlanReady, emits ActionComplete + UiStateChange.
 
-use crate::tts::TtsEngine;
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
 use anyhow::Result;
@@ -12,15 +11,11 @@ use tokio::process::Command;
 
 pub struct Executor {
     bus: Arc<EventBus>,
-    tts: TtsEngine,
 }
 
 impl Executor {
     pub fn new(bus: Arc<EventBus>) -> Self {
-        Self {
-            bus,
-            tts: TtsEngine::new(),
-        }
+        Self { bus }
     }
 
     pub async fn run(&mut self) {
@@ -105,8 +100,7 @@ impl Executor {
 
             if !success {
                 self.emit_ui_state("error").await;
-                // Ensure STT is unmuted even on failure
-                self.emit_ui_state("idle").await;
+                // Stop plan execution on first failure (safer default)
                 return Ok(());
             }
         }
@@ -270,9 +264,65 @@ impl Executor {
 
     async fn run_say(&self, text: &str) -> Result<String> {
         info!("Executor: say: {}", text);
-        self.emit_ui_state("speaking").await;
-        self.tts.say(text).await?;
-        Ok(format!("TTS: {}", text))
+
+        // Try Piper first (best quality, most natural)
+        let home = std::env::var("HOME").unwrap_or_default();
+        let voice_model = std::env::var("MAVIS_VOICE_MODEL")
+            .unwrap_or_else(|_| format!("{}/.local/share/piper-voices/en_US-lessac-medium.onnx", home));
+
+        if std::path::Path::new(&voice_model).exists() {
+            use std::process::{Command as StdCommand, Stdio as StdStdio};
+            use std::io::Write;
+
+            let mut piper = match StdCommand::new("piper")
+                .args(&[
+                    "--model", &voice_model,
+                    "--output_file", "-",
+                    "--length-scale", "1.15",
+                    "--sentence-silence", "0.25",
+                ])
+                .stdin(StdStdio::piped())
+                .stdout(StdStdio::piped())
+                .stderr(StdStdio::null())
+                .spawn()
+            {
+                Ok(child) => child,
+                Err(_) => {
+                    return self.fallback_say(text).await;
+                }
+            };
+
+            if let Some(mut stdin) = piper.stdin.take() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+
+            let _ = StdCommand::new("aplay")
+                .args(&["-r", "22050", "-f", "S16_LE", "-c", "1", "-t", "raw", "-"])
+                .stdin(piper.stdout.take().unwrap())
+                .stdout(StdStdio::null())
+                .stderr(StdStdio::null())
+                .spawn();
+
+            return Ok(format!("TTS (Piper): {}", text));
+        }
+
+        self.fallback_say(text).await
+    }
+
+    async fn fallback_say(&self, text: &str) -> Result<String> {
+        for tts in ["spd-say", "espeak"] {
+            let mut cmd = Command::new(tts);
+            cmd.arg(text);
+            cmd.stdin(std::process::Stdio::null());
+            cmd.stdout(std::process::Stdio::null());
+            cmd.stderr(std::process::Stdio::null());
+            if let Ok(child) = cmd.spawn() {
+                let pid = child.id().map_or("?".to_string(), |p| p.to_string());
+                return Ok(format!("TTS via {} (pid: {}): {}", tts, pid, text));
+            }
+        }
+        info!("Executor: no TTS binary found, logging only");
+        Ok(format!("(say) {}", text))
     }
 
     async fn emit_ui_state(&self, state: &str) {
