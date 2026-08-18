@@ -262,51 +262,82 @@ impl Executor {
         Ok(format!("Notification: {} — {}", title, message))
     }
 
+    /// CRITICAL: TTS must block until playback finishes, and must emit
+    /// "speaking"/"idle" around it. The mute controller in main.rs watches
+    /// for these UiStateChange events to hold tts_active — without them,
+    /// the mic is never actually muted while MAVIS talks, and MAVIS can
+    /// hear (and re-transcribe) its own voice output.
     async fn run_say(&self, text: &str) -> Result<String> {
         info!("Executor: say: {}", text);
 
-        // Try Piper first (best quality, most natural)
         let home = std::env::var("HOME").unwrap_or_default();
         let voice_model = std::env::var("MAVIS_VOICE_MODEL")
             .unwrap_or_else(|_| format!("{}/.local/share/piper-voices/en_US-lessac-medium.onnx", home));
 
-        if std::path::Path::new(&voice_model).exists() {
-            use std::process::{Command as StdCommand, Stdio as StdStdio};
-            use std::io::Write;
+        // Emit "speaking" BEFORE audio starts so STT mutes immediately.
+        self.emit_ui_state("speaking").await;
 
-            let mut piper = match StdCommand::new("piper")
-                .args(&[
-                    "--model", &voice_model,
-                    "--output_file", "-",
-                    "--length-scale", "1.15",
-                    "--sentence-silence", "0.25",
-                ])
-                .stdin(StdStdio::piped())
-                .stdout(StdStdio::piped())
-                .stderr(StdStdio::null())
-                .spawn()
-            {
-                Ok(child) => child,
-                Err(_) => {
-                    return self.fallback_say(text).await;
-                }
-            };
+        let result = if std::path::Path::new(&voice_model).exists() {
+            self.run_piper_blocking(text, &voice_model).await
+        } else {
+            self.fallback_say(text).await
+        };
 
-            if let Some(mut stdin) = piper.stdin.take() {
-                let _ = stdin.write_all(text.as_bytes());
+        // Emit "idle" AFTER audio finishes so STT unmutes.
+        self.emit_ui_state("idle").await;
+
+        result
+    }
+
+    /// Spawn Piper + aplay and block until playback actually finishes.
+    /// Blocking here (not just spawning) is what keeps tts_active true for
+    /// the full duration MAVIS is speaking, not just until the pipeline starts.
+    async fn run_piper_blocking(&self, text: &str, voice_model: &str) -> Result<String> {
+        use std::process::{Command as StdCommand, Stdio as StdStdio};
+        use std::io::Write;
+
+        let mut piper = match StdCommand::new("piper")
+            .args(&[
+                "--model", voice_model,
+                "--output_file", "-",
+                "--length-scale", "1.15",
+                "--sentence-silence", "0.25",
+            ])
+            .stdin(StdStdio::piped())
+            .stdout(StdStdio::piped())
+            .stderr(StdStdio::null())
+            .spawn()
+        {
+            Ok(child) => child,
+            Err(_) => {
+                return self.fallback_say(text).await;
             }
+        };
 
-            let _ = StdCommand::new("aplay")
-                .args(&["-r", "22050", "-f", "S16_LE", "-c", "1", "-t", "raw", "-"])
-                .stdin(piper.stdout.take().unwrap())
-                .stdout(StdStdio::null())
-                .stderr(StdStdio::null())
-                .spawn();
-
-            return Ok(format!("TTS (Piper): {}", text));
+        if let Some(mut stdin) = piper.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
         }
 
-        self.fallback_say(text).await
+        let mut aplay = StdCommand::new("aplay")
+            .args(&["-r", "22050", "-f", "S16_LE", "-c", "1", "-t", "raw", "-"])
+            .stdin(piper.stdout.take().unwrap())
+            .stdout(StdStdio::null())
+            .stderr(StdStdio::null())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to spawn aplay: {}", e))?;
+
+        // BLOCK until audio finishes. This is the critical fix — the old
+        // code spawned aplay and immediately returned, so "idle" fired
+        // before MAVIS had actually finished speaking.
+        let status = aplay
+            .wait()
+            .map_err(|e| anyhow::anyhow!("aplay failed: {}", e))?;
+
+        if !status.success() {
+            return Err(anyhow::anyhow!("aplay exited with non-zero status"));
+        }
+
+        Ok(format!("TTS (Piper): {}", text))
     }
 
     async fn fallback_say(&self, text: &str) -> Result<String> {
