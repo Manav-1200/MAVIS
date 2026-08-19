@@ -18,8 +18,14 @@
 | 2 | Core Runtime | Context engine. Layered memory (SQLite). System integration. Orb states. Graceful shutdown. | Event-driven runtime | ✅ Complete |
 | 3 | AI Worker | Rust ↔ Python bridge. Local LLM loads. First inference. Worker lifecycle. | Local AI pipeline | ✅ Complete |
 | 4 | Integration | Voice wake → STT → LLM → TTS. Intent system. First automations. | Full voice companion | 🚧 In Progress |
-| 5 | Polish | Performance. Packaging. systemd service. Daily driver. | Shippable product | Not started |
-| 6 | Extras | Ideas that come up during build | — | Ongoing |
+| 5 | Interaction Polish | Push-to-talk, TTS interruption, session recovery, personality foundation. | Daily polish | Not started |
+| 6 | Context Awareness | Active window, clipboard, browser, IDE, terminal, calendar. | Companion senses | Not started |
+| 7 | Memory & Learning | Episodic → long-term pipeline, semantic recall, vector embeddings, routine detection. | Persistent memory | Not started |
+| 8 | Safety & Permissions | 5-tier permission model, risk scoring, audit log, dry-run, rollback. | Trust layer | Not started |
+| 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
+| 10 | Automation & Proactive Intelligence | Rule engine, predictive suggestions, workflow recording, wellness reminders, daily briefing. | Proactive assistant | Not started |
+| 11 | Vision & Advanced UX | OCR, screenshot understanding, UI element detection, secondary monitor dashboard, conversation history. | Sees the screen | Not started |
+| 12 | Multi-Model & Cross-Platform | Local model routing, benchmarking, Linux/Windows/macOS abstraction. | Runs everywhere | Not started |
 
 ---
 
@@ -268,12 +274,13 @@
 - [x] Fixed `MAVIS_PYTHON_PATH` in `.envrc`
 - [x] E2E clean loop verified — no self-triggering
 
-### 4.6 — Current blockers
-- [ ] LLM regurgitates system prompt / example dialogues → **Fix:** Phi-3 manual chat template + stop tokens
-- [ ] Working memory not injected into LLM prompts → **Fix:** ContextEngine → Planner enrichment
-- [ ] STT echo/repetition ("Hi. Hi. Hi.") → **Fix:** Trim trailing silence before Whisper
-- [ ] Idle unload not yet runtime verified with both models
-- [ ] Niri push-to-talk hotkey deferred to Phase 5
+### 4.6 — Session fixes (2026-08-17)
+- [x] Aggressive `_post_process()` — strips `===`, markdown, bullets, truncates to 1–2 sentences
+- [x] TTS prosody — `--length-scale 1.15`, `--sentence-silence 0.25`, auto-detect `lessac` > `ryan` > `amy`
+- [x] VAD noise floor fix — `reset()` resets floor to 0.005, capped at 0.015, multiplier 1.5 capped at 0.022
+- [x] Pre-emphasis regression fix — removed pre-emphasis filter that attenuated voice energy
+- [x] System prompt hardening — no markdown, no lists, no separators, no repetition
+- [x] Fan-noise robustness — `min_max_energy` gate rejects low-energy utterances
 
 ### 4.7 — Phase 4 wrap-up checklist
 - [x] STT engine (faster-whisper) integrated
@@ -284,74 +291,306 @@
 - [x] faster-whisper model cached locally
 - [x] E2E voice loop wired (speak → hear response)
 - [x] E2E voice loop verified clean (no self-triggering)
+- [x] Phi-3 manual chat template (no prompt regurgitation)
+- [x] Working memory injection into LLM prompt
+- [x] Adaptive VAD noise floor updating per-utterance
+- [x] LLM response quality (no `===`/markdown/repetition)
+- [x] TTS naturalness (prosody settings)
 - [ ] Idle unload verified with both models
-- [ ] LLM response quality fixed (no prompt regurgitation)
-- [ ] Niri hotkey binding for push-to-talk (deferred)
+- [ ] Fan noise robust filtering (may need silero-vad)
+- [ ] Niri hotkey binding for push-to-talk (deferred to Phase 5)
 
 ---
 
-## Phase 5 — Polish
+## Phase 5 — Interaction Polish & Personality Foundation
 
-**Goal:** Daily driver. Fast. Stable. Packaged. Someone else can install it.
+**Goal:** Close the gap between "it works" and "it feels good to use every day." Establish the emotional baseline.
 
-### 5.1 — Performance
-- [ ] Rust startup < 2s.
-- [ ] Worker spawn + model load < 5s from cold.
-- [ ] Rust memory < 200 MB resident.
-- [ ] Worker VRAM < 5 GB.
-- [ ] Event bus latency < 1 ms.
-- [ ] Profile with `cargo flamegraph`.
-
-### 5.2 — Error boundaries
-- [ ] Kill worker mid-inference → runtime recovers.
-- [ ] Kill STT mid-transcription → runtime recovers.
-- [ ] Kill TTS mid-speech → runtime recovers.
-- [ ] Orb stays alive. No crash kills the window.
-- [ ] AI unavailable → "I'm having trouble thinking right now."
-
-### 5.3 — Packaging
-- [ ] `scripts/install.sh` — dirs, permissions, systemd user service.
-- [ ] `scripts/uninstall.sh` — clean removal.
-- [ ] systemd service: `mavis.service`. Restart on failure. Logs to journal.
-- [ ] `.desktop` entry and orb icon.
-- [ ] Release profile: `opt-level = 3`, `lto = true`, `strip = true`.
-
-### 5.4 — CI and testing
-- [ ] `.github/workflows/test.yml` — `cargo test`, `pytest`, `cargo clippy`, `cargo fmt --check`.
-- [ ] Coverage targets: 70% Rust, 70% Python.
-- [ ] Integration test: spawn worker, send request, verify response.
-
-### 5.5 — Documentation
-- [ ] `README.md` — architecture diagram, install, demo GIF.
-- [ ] User guide in README — how to talk to MAVIS, customize `config.toml`.
-- [ ] Troubleshooting — worker won't load, orb missing, audio broken, hotkeys failing.
-
-### 5.6 — Phase 5 wrap-up
-- [ ] Auto-starts on login.
-- [ ] Survives full day without restart.
-- [ ] Memory under budget.
-- [ ] Tag: `git tag v1.0.0-daily-driver`
-- [ ] **Portfolio Project 1 — complete product.**
+- [ ] **STT confidence threshold** — Filter low-confidence transcriptions before Planner
+- [ ] **TTS queue / interruption** — Allow new user speech to interrupt ongoing TTS (polite cutoff)
+- [ ] **Voice activity LED** — Orb brightness pulses with VAD energy (subtle, non-distracting)
+- [ ] **Session state recovery** — If Rust crashes, resume working memory from last snapshot
+- [ ] **Audio device selection** — Respect `MAVIS_AUDIO_DEVICE` env var; fallback chain
+- [ ] **Emotional expression through orb** — Orb color / pulse / glow maps to companion state (listening, thinking, working, idle, concerned, celebrating). Never anthropomorphic face — abstract emotion only.
+- [ ] **Conversation style baseline** — Consistent tone: warm, concise, helpful, never obsequious. Defined in system prompt and enforced by post-processor.
 
 ---
 
-## Phase 6 — Ideas backlog
+## Phase 6 — Context Awareness Foundation
 
-> Add ideas as they come up. Move into a phase above when committed.
+**Goal:** The companion must know what the user is doing, not just what they are saying. All context sources are **opt-in per-tier** (see Phase 8).
 
-- [ ] Raw Wayland integration (replace minifb).
-- [ ] Niri workspace awareness.
-- [ ] Emotion system for orb animations.
-- [ ] Plugin system with permissions.
-- [ ] Skill registry (natural language matching).
-- [ ] Semantic search over long-term memory (vector embeddings).
-- [ ] Predictive context (time, calendar, activity based).
-- [ ] Multiple AI providers (Ollama, OpenAI, Anthropic fallback).
-- [ ] Companion display mode (secondary monitor dashboard).
-- [ ] Mobile companion app.
-- [ ] Self-improving workflow suggestions.
-- [ ] Model versioning and rollback.
-- [ ] Config profiles (`work.toml`, `gaming.toml`).
+| Source | Rust or Python | Implementation |
+|--------|---------------|----------------|
+| Active window | Rust | `zbus` + `org.gnome.Shell` / `niri` IPC / `wlr-foreign-toplevel-management` / `xdotool` |
+| Clipboard | Rust | `wl-clipboard` listener; read-only by default; hashed content |
+| Browser awareness | Rust + Python | Native messaging host or `xdotool` title polling; extract domain/title |
+| IDE awareness | Rust | Window title regex (`code`, `nvim`, `emacs`); project path from cwd |
+| Terminal awareness | Rust | Detect terminal window; capture last command via `PROMPT_COMMAND` hook (opt-in) |
+| Workspace / Project | Rust | Track current working directory of focused terminal/IDE |
+| Calendar / Time context | Python | Read local `.ics` or `calcurse` export; inject "next meeting in 15 min" into context |
+
+- [ ] **Context snapshot** — Compact JSON blob injected into `working_memory_snapshot` every 5 s
+- [ ] **Privacy gate** — Each source has a `ContextSource` permission tier; default = off
+- [ ] **Cross-platform abstraction** — `PlatformProvider` trait with Linux/Windows/macOS implementations
+
+---
+
+## Phase 7 — Memory & Learning Layer
+
+**Goal:** Move from session-scoped working memory to persistent, growing memory.
+
+### 7.1 Intelligent Memory Pipeline
+
+```
+Working Memory (session) ──► Episodic (sqlite, 30 days) ──► Long-Term (sqlite + embeddings)
+                                    │                              │
+                                    ▼                              ▼
+                            Importance scoring              Consolidation (nightly)
+                            (LLM rates 1–10)                (summarize, compress, embed)
+```
+
+- [ ] **Importance scoring** — After each interaction, lightweight LLM call rates memory importance
+- [ ] **Episodic store** — SQLite table: `(timestamp, role, content, importance, tags_json)`
+- [ ] **Forgetting / decay** — Episodic entries below threshold importance auto-purge after 30 days
+- [ ] **Automatic summaries** — Nightly cron-like task (Rust scheduler) compresses high-importance episodes into summaries
+- [ ] **Long-term consolidation** — Summaries promoted to Long-Term memory with vector embeddings
+- [ ] **Context compression** — When working memory grows too large, older entries are compressed into summary bullets before eviction
+- [ ] **Episodic replay** — Ability to reconstruct "what happened on Tuesday afternoon" from timestamped episodic chain
+
+### 7.2 Advanced Memory
+
+- [ ] **Vector embeddings** — `sentence-transformers` (all-MiniLM-L6-v2, local, CPU, ~80 MB)
+- [ ] **FAISS / hnswlib** — Local vector index for fast similarity search
+- [ ] **Semantic recall** — Before Planner generates a plan, search episodic + long-term for semantic matches to current intent + context
+- [ ] **Memory graph** — Lightweight entity extraction (spaCy or regex) linking people, projects, files, concepts in a navigable graph
+- [ ] **Relationship graph** — Track relationships between entities over time
+
+### 7.3 Learning Engine
+
+- [ ] **Routine detection** — Time-series pattern matching on user actions (e.g., opens Spotify at 9 AM)
+- [ ] **Preferred apps** — Track most-launched applications per context (work hours vs. evening)
+- [ ] **Learn coding schedule** — Detect when user typically codes; pre-warm context with relevant projects
+- [ ] **Learn workflows** — Recognize recurring sequences of actions
+- [ ] **Learn frequently used commands** — Build per-project command history; suggest completions
+- [ ] **Adapt suggestions over time** — If user consistently rejects a suggestion type, down-weight it in Planner scoring
+
+---
+
+## Phase 8 — Safety & Permission System
+
+**Goal:** Local-first does not mean reckless. Every capability is gated.
+
+### 8.1 Permission Tiers
+
+| Tier | Description | Examples |
+|------|-------------|----------|
+| `Read` | Observe only | Window title, clipboard hash, file listing |
+| `Notify` | Alert user | "You have a meeting in 5 min" |
+| `Ask` | Propose action, wait for confirmation | "Shall I open your daily notes?" |
+| `Execute` | Run command / modify file | `git commit`, `mv`, `rm` |
+| `Administrator` | Destructive or system-wide | `pacman -Syu`, partition ops, network changes |
+
+- [ ] **Per-plugin / per-skill permissions** — Each skill declares its required tier; user grants per-skill
+- [ ] **Per-skill permissions** — Granular control: `git` may have `Execute` while `browser` only has `Read`
+- [ ] **Dry-run mode** — `Execute` tier commands are echoed to user before running; user must voice-confirm
+- [ ] **Audit log** — Append-only SQLite log: `(timestamp, skill, action, args, user_confirmed, risk_score)`
+- [ ] **Confirmation prompts** — Visual + voice confirmation for any action above `Notify` tier
+
+### 8.2 Safety Layer
+
+- [ ] **Command validation** — Static regex / deny-list for dangerous commands (`rm -rf /`, `mkfs`, `dd if=/dev/zero`)
+- [ ] **Risk scoring** — Static analysis + heuristic scoring: file deletion = high risk; file creation = low; network call = medium
+- [ ] **LLM validation** — Second-pass LLM call rates risk 1–10 for any `Execute` action; blocks if ≥ 8 without `Administrator` tier
+- [ ] **Rollback where possible** — File operations create `.mavis-backup/` snapshots before destructive actions; allow undo within 5 minutes
+- [ ] **Confirmation for destructive actions** — Any action with risk ≥ 5 requires explicit user confirmation; no silent execution
+
+### 8.3 Confirmation Flow
+
+```
+Executor proposes action → Risk score computed
+    → If score < 3: execute silently (respects "Never intrusive")
+    → If score 3–7: TTS "Shall I <action>?" → wait 5 s for "yes" / orb tap
+    → If score ≥ 8: TTS "This requires administrator permission. Confirm?" → require explicit "yes, administrator"
+```
+
+---
+
+## Phase 9 — Skills Platform
+
+**Goal:** Modular capabilities. Each skill is a Rust crate or Python module with a manifest.
+
+### 9.1 Plugin API
+
+- [ ] **Manifest format** — `mavis-skill.toml`:
+  ```toml
+  [skill]
+  name = "git"
+  version = "0.1.0"
+  required_tier = "Execute"
+  capabilities = ["read_cwd", "exec_command"]
+  rust_entrypoint = "mavis_skill_git::register"
+  python_entrypoint = "mavis_skill_git_python::handler"
+  ```
+- [ ] **Lifecycle hooks** — `on_load`, `on_unload`, `on_intent`, `on_context_change`
+- [ ] **Capability declarations** — Skills request capabilities; runtime denies if user hasn't granted permission tier
+- [ ] **Version compatibility** — Semantic versioning for skills; runtime warns on incompatible API versions
+- [ ] **Sandboxing** — Python skills run in separate process (like AI worker); Rust skills are in-process but capability-gated
+
+### 9.2 Core Skills (shipped with MAVIS)
+
+| Skill | Tier | Description |
+|-------|------|-------------|
+| `filesystem` | Execute | Read, write, move, search files; respects `$HOME` boundaries |
+| `browser` | Read | Read active tab title/URL; open URLs; basic bookmark search |
+| `git` | Execute | Status, commit, branch, log; dry-run by default |
+| `vscode` | Read + Execute | Open files, read recent projects, run tasks |
+| `email` | Ask | Read local Maildir / notmuch; draft replies (never send without confirm) |
+| `calendar` | Read | Read local calendars; inject next-event into context |
+| `spotify` / `media` | Ask | MPRIS control; play/pause/next; respects DND |
+| `discord` | Ask | Read unread mentions; draft replies (never send without confirm) |
+
+### 9.3 Skill Discovery
+
+- [ ] Skills placed in `~/.config/mavis/skills/` or system path
+- [ ] Runtime scans manifests on startup; registers event handlers
+- [ ] Hot-reload in dev mode (`MAVIS_DEV=1`)
+
+---
+
+## Phase 10 — Automation, Proactive Intelligence & Wellness
+
+**Goal:** MAVIS should assist *before* being asked. And care for the human behind the keyboard.
+
+### 10.1 Rule Engine
+
+- [ ] **Trigger types** — Time, event (window changed, file created), voice intent, context match
+- [ ] **Condition language** — Simple JSON DSL: `{"and": [{"active_window": "code"}, {"time_after": "09:00"}]}`
+- [ ] **Actions** — Call any skill capability; chainable
+- [ ] **Scheduled automations** — Cron-like scheduling via Rust background task
+- [ ] **Trigger-based automations** — React to events from the event bus
+- [ ] **Conditional automations** — Complex boolean logic across context sources
+
+### 10.2 Predictive Suggestions
+
+- [ ] **Predict likely next action** — Markov chain / simple classifier on user action sequences
+- [ ] **Suggest files/projects** — "You often open `notes.md` after `daily_standup.ics`; shall I open it?"
+- [ ] **Offer automations** — "You've done this 5 times this week. Shall I create a shortcut?"
+- [ ] **Detect repetitive workflows** — Pattern match on action sequences; suggest macro recording
+
+### 10.3 Workflow Recording & Macro Execution
+
+- [ ] User says "MAVIS, record this"
+- [ ] Rust captures: window switches, clipboard changes, terminal commands (opt-in), file opens
+- [ ] User says "MAVIS, stop recording; name it 'deploy workflow'"
+- [ ] Saved as replayable automation script (Rust macro or shell script)
+- [ ] **Macro execution** — Replay recorded workflows with variable substitution
+
+### 10.4 Daily Intelligence
+
+- [ ] **Daily briefing** — Morning TTS summary: calendar, weather (if opted in), overdue tasks, anomalies
+- [ ] **End-of-day summary** — "Today you worked on X, committed Y, have Z unread emails. Good night."
+
+### 10.5 Wellness Reminders
+
+- [ ] **Water reminders** — Every 45 min of active computer use; gentle orb pulse + optional TTS
+- [ ] **Meal reminders** — Based on learned schedule; "It's usually lunch time. Don't forget to eat."
+- [ ] **Stretch reminders** — Every hour; "Your shoulders are probably tense. 30-second stretch?"
+- [ ] **Sleep reminders** — Based on learned bedtime; orb dims, gentle nudge after threshold
+- [ ] **Screen break reminders** — 20-20-20 rule prompt; optional screen dim
+- [ ] All wellness features respect DND mode and can be snoozed or disabled per-category
+
+---
+
+## Phase 11 — Vision & Advanced UX
+
+**Goal:** The orb sees the screen. Not to spy — to understand.
+
+### 11.1 Vision
+
+- [ ] **Screenshot pipeline** — Rust grabs frame (Wayland `screencopy` or `grim`); pipes to Python
+- [ ] **OCR** — `easyocr` or `tesseract` (local, CPU); extract text from screen regions
+- [ ] **Screenshot understanding** — Lightweight vision-language model (LLaVA / BakLLaVA, ~4 GB) for describing screen content
+- [ ] **Object detection** — Lightweight YOLO or DETR model (~50 MB) for UI elements, windows, notifications
+- [ ] **UI element detection** — Detect buttons, input fields, menus, dialogs for accessibility automation
+- [ ] **Screen context** — Compact description of "what's on screen" injected into working memory
+
+### 11.2 Advanced UX
+
+- [ ] **Secondary monitor dashboard** — Optional `mavis_dashboard` binary; shows memory graph, recent actions, skill status, wellness stats
+- [ ] **Rich notifications** — Orb expands briefly to show text + icon; auto-dismisses; never steals focus
+- [ ] **Conversation history browser** — GTK/Rust app for searching past interactions; local-only, encrypted at rest
+- [ ] **Mobile companion** — Optional lightweight Android/iOS app for remote status check and voice notes; syncs via local network only
+- [ ] **Companion mode** — MAVIS runs in reduced-resource mode on secondary device; mirrors core state
+
+---
+
+## Phase 12 — Multi-Model, Cross-Platform & Personality Maturity
+
+**Goal:** Future-proofing. Run anywhere, route intelligently. Become a consistent self.
+
+### 12.1 Multi-Model
+
+- [ ] **Local model registry** — `~/.config/mavis/models/` with manifests
+- [ ] **Capability-based routing** — Planner chooses model by task:
+  - Chat / reasoning → Phi-3 / Llama-3
+  - Code → CodeLlama / DeepSeek-Coder
+  - Vision → LLaVA / BakLLaVA
+  - Fast fallback → Phi-3-mini for low-latency intents
+- [ ] **Model benchmarking** — Automatic perplexity / latency benchmarks on user hardware; ranks models
+- [ ] **Automatic model selection** — Pick best model per task based on benchmark scores and current resource availability
+- [ ] **Cloud fallback** — Optional, opt-in, privacy-preserving (no conversation text sent; only anonymized embeddings if needed)
+
+### 12.2 Cross-Platform
+
+- [ ] **Linux** — Primary target; Wayland + Niri optimized; X11 fallback
+- [ ] **Windows** — `mavis_core` compiles with `windows` crate; Win32 API for window tracking, TTS via SAPI5, STT via Whisper.cpp
+- [ ] **macOS** — `objc` / `cocoa` bindings for accessibility API; TTS via `say`; STT via Whisper.cpp
+- [ ] **Platform traits** — `AudioCapture`, `WindowTracker`, `ClipboardReader`, `ScreenGrabber` — implemented per-platform
+
+### 12.3 Personality Maturity
+
+- [ ] **Consistent personality** — Personality is not a prompt hack; it's a persisted configuration (JSON) that shapes tone, humor level, verbosity, and boundaries. Survives model swaps.
+- [ ] **User preference adaptation** — Track user reactions (accepted suggestions, snoozed reminders, interrupted TTS) to refine personality parameters over weeks
+- [ ] **Conversation style evolution** — If user prefers brevity, MAVIS learns to default to 1-sentence responses; if user likes detail, expands naturally
+
+---
+
+## Appendices
+
+### A. Architecture Constraints (Preserved Across All Phases)
+
+1. **Rust primary runtime** — All system I/O, UI, audio, window tracking lives in Rust.
+2. **Python AI worker only** — LLM inference, STT, embeddings, vision. Spawned by Rust, not assumed running.
+3. **Context Engine is central** — All subsystems publish events; Context Engine maintains canonical state.
+4. **Planner never executes** — Planner generates plans; Executor carries them out. Separation of strategy and action.
+5. **Event bus** — UDS + JSON. No HTTP, no gRPC, no cloud APIs in core loop.
+6. **Local-first, privacy-first** — No telemetry. No cloud STT/TTS by default. All models local.
+7. **Voice is interface, not identity** — MAVIS does not "become" a voice. The orb is the identity.
+8. **Layered memory** — Permanent → Long-Term → Episodic → Session → Working. No single flat store.
+9. **AI-agnostic** — Prompts and context format must work with Phi-3, Llama, Mistral, etc.
+10. **"Always present. Never intrusive."** — Every feature must pass this test before shipping.
+
+### B. Definition of Done for Each Phase
+
+- [ ] All code passes `cargo check` / `cargo clippy` / `cargo test`
+- [ ] Python code passes `ruff` pre-commit
+- [ ] Feature documented in `docs/phase-N.md`
+- [ ] E2E test script exists and passes
+- [ ] No regression in prior phase features
+- [ ] Memory instruction updated if architecture changes
+
+### C. Resource Budget (Target Hardware: Ryzen 5, 16 GB RAM, RTX 4050 6 GB)
+
+| Component | Max RAM | Max VRAM | Notes |
+|-----------|---------|----------|-------|
+| LLM (Phi-3 / Llama-3 8B) | 6 GB | 4 GB | `int4` or `int8` quantization |
+| STT (faster-whisper base) | 1 GB | 0 GB | CPU-only, `int8` |
+| Embeddings (MiniLM) | 300 MB | 0 GB | CPU-only |
+| Vision (YOLO / small DETR) | 200 MB | 2 GB | Optional; unload when idle |
+| Rust runtime + UI | 200 MB | 0 GB | Orb, event bus, context engine |
+| **Total (all loaded)** | **~8 GB** | **~6 GB** | Leaves headroom for user apps |
+| **Idle (only Rust)** | **~200 MB** | **0 GB** | Models fully unloaded |
 
 ---
 
@@ -368,3 +607,7 @@
 - Never block the async runtime.
 - No circular dependencies.
 - Privacy is default.
+
+---
+
+*Last updated: 2026-08-19*

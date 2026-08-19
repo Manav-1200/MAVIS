@@ -13,6 +13,7 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 - A **living orb** that communicates state through subtle animation
 - A system that **remembers**, **plans**, and **assists** without taking control
 - **Voice-enabled**: speak naturally, MAVIS listens, thinks, and speaks back
+- **Cross-platform**: Linux (primary), Windows, macOS — same runtime, different backends
 
 ## What MAVIS Is Not
 
@@ -20,6 +21,7 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 - A cloud-dependent service
 - An autonomous agent that acts without permission
 - A memory-hungry process that slows your desktop
+- A chatbot in a window
 
 ## Architecture
 
@@ -52,6 +54,8 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 
 **Protocol:** JSON over UDS (Unix domain socket). No HTTP. No gRPC.
 
+**Platform layer:** Abstracted traits for window tracking, clipboard, screen capture, TTS. Linux (Wayland/X11) implemented. Windows and macOS stubbed.
+
 ## Status
 
 | Phase | What | Status |
@@ -60,7 +64,14 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 | 2 — Core Runtime | Context engine, memory, system integration | ✅ Complete |
 | 3 — AI Worker | Local LLM, Rust–Python bridge | ✅ Complete |
 | 4 — Integration | Voice pipeline, intent system, automations | 🚧 In Progress |
-| 5 — Polish | Performance, packaging, daily driver | Not started |
+| 5 — Interaction Polish | Push-to-talk, TTS interruption, personality | Not started |
+| 6 — Context Awareness | Active window, clipboard, browser, IDE | Not started |
+| 7 — Memory & Learning | Semantic recall, vector embeddings, routines | Not started |
+| 8 — Safety & Permissions | Permission tiers, risk scoring, audit log | Not started |
+| 9 — Skills Platform | Plugin API, manifest, sandboxing | Not started |
+| 10 — Automation & Wellness | Rule engine, proactive suggestions, wellness | Not started |
+| 11 — Vision & Advanced UX | OCR, screenshot understanding, dashboard | Not started |
+| 12 — Multi-Model & Cross-Platform | Model routing, Windows, macOS | Not started |
 
 Full roadmap in [`PHASES.md`](PHASES.md).
 
@@ -76,6 +87,7 @@ Full roadmap in [`PHASES.md`](PHASES.md).
 | TTS | piper |
 | Audio | cpal |
 | Bridge | UDS + length-prefixed JSON |
+| Platform | Traits for Linux/Windows/macOS |
 
 ## Development
 
@@ -94,7 +106,7 @@ python -m mavis.worker
 
 ## Requirements
 
-- Arch Linux (or any Linux with PipeWire/ALSA)
+- Linux (Wayland or X11), Windows, or macOS
 - NVIDIA GPU with 6GB+ VRAM recommended (RTX 4050 tested)
 - Python 3.10+
 - Rust 1.80+
