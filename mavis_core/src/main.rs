@@ -13,6 +13,7 @@ mod executor;
 mod memory;
 mod models;
 mod planner;
+mod platform;
 mod stt;
 mod system;
 mod ui;
@@ -30,6 +31,10 @@ async fn main() -> Result<()> {
 
     let bus = Arc::new(EventBus::new());
     let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
+
+    // Platform layer — Linux / Windows / macOS abstraction
+    let platform = Arc::new(platform::Platform::detect().build());
+    info!("Platform: initialized");
 
     // Memory Manager — shared between ContextEngine and Planner
     let data_dir = std::path::Path::new("../memory");
@@ -285,6 +290,22 @@ async fn main() -> Result<()> {
         }
         orb.shutdown();
         info!("Orb: shutting down");
+    });
+
+    // Platform context polling — Phase 6 (active window, clipboard, etc.)
+    let platform_ctx = Arc::clone(&platform);
+    let bus_ctx = Arc::clone(&bus);
+    let _ctx_poll_handle = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(2));
+        loop {
+            ticker.tick().await;
+            if let Some(tracker) = platform_ctx.windows() {
+                if let Ok((app, title, pid)) = tracker.active_window() {
+                    log::debug!("Window: {} | {} | {}", app, title, pid);
+                    // Phase 6: inject into ContextEngine working memory
+                }
+            }
+        }
     });
 
     // Startup event
