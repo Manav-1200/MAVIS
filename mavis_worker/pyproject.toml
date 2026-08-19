@@ -5,7 +5,17 @@ description = "MAVIS AI inference worker"
 requires-python = ">=3.10"
 dependencies = [
     "llama-cpp-python>=0.2.90",
+    "faster-whisper>=1.0.0",
+    "kokoro>=0.9.4",
+    "soundfile>=0.12.1",
+    # Pinned to stop pip's resolver wandering into spacy 4.0's dev line,
+    # which has no Python 3.14 wheels and fails building from source.
+    "spacy>=3.8.4,<4.0",
+    "thinc>=8.3.13,<8.4.0",
 ]
+# One-time manual step, not pip-installable as a normal dependency:
+#   python -m spacy download en_core_web_sm
+# Without this, first TTS call fetches it live and can time out.
 
 [build-system]
 requires = ["hatchling"]

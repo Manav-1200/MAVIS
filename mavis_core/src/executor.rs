@@ -262,36 +262,147 @@ impl Executor {
         Ok(format!("Notification: {} — {}", title, message))
     }
 
-    /// CRITICAL: TTS must block until playback finishes, and must emit
-    /// "speaking"/"idle" around it. The mute controller in main.rs watches
-    /// for these UiStateChange events to hold tts_active — without them,
-    /// the mic is never actually muted while MAVIS talks, and MAVIS can
-    /// hear (and re-transcribe) its own voice output.
+    // Blocks until playback finishes and emits speaking/idle around it —
+    // that's what lets main.rs mute the mic while MAVIS talks.
     async fn run_say(&self, text: &str) -> Result<String> {
         info!("Executor: say: {}", text);
 
-        let home = std::env::var("HOME").unwrap_or_default();
-        let voice_model = std::env::var("MAVIS_VOICE_MODEL")
-            .unwrap_or_else(|_| format!("{}/.local/share/piper-voices/en_US-lessac-medium.onnx", home));
-
-        // Emit "speaking" BEFORE audio starts so STT mutes immediately.
         self.emit_ui_state("speaking").await;
 
-        let result = if std::path::Path::new(&voice_model).exists() {
-            self.run_piper_blocking(text, &voice_model).await
+        // Kokoro via worker by default; MAVIS_TTS_ENGINE=piper to roll back.
+        // Falls back to Piper automatically on any Kokoro failure.
+        let use_kokoro = std::env::var("MAVIS_TTS_ENGINE")
+            .map(|v| !v.eq_ignore_ascii_case("piper"))
+            .unwrap_or(true);
+
+        let result = if use_kokoro {
+            match self.run_kokoro_via_worker(text).await {
+                Ok(msg) => Ok(msg),
+                Err(e) => {
+                    warn!("Kokoro TTS failed ({}); falling back to Piper", e);
+                    self.run_piper_or_fallback(text).await
+                }
+            }
         } else {
-            self.fallback_say(text).await
+            self.run_piper_or_fallback(text).await
         };
 
-        // Emit "idle" AFTER audio finishes so STT unmutes.
         self.emit_ui_state("idle").await;
 
         result
     }
 
-    /// Spawn Piper + aplay and block until playback actually finishes.
-    /// Blocking here (not just spawning) is what keeps tts_active true for
-    /// the full duration MAVIS is speaking, not just until the pipeline starts.
+    async fn run_piper_or_fallback(&self, text: &str) -> Result<String> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let voice_model = std::env::var("MAVIS_VOICE_MODEL")
+            .unwrap_or_else(|_| format!("{}/.local/share/piper-voices/en_US-lessac-medium.onnx", home));
+
+        if std::path::Path::new(&voice_model).exists() {
+            self.run_piper_blocking(text, &voice_model).await
+        } else {
+            self.fallback_say(text).await
+        }
+    }
+
+    // Talks to the worker's TTS request type directly over the socket
+    // (same pattern STT uses in main.rs) since this needs one response
+    // back synchronously, not the bus's fire-and-forget event flow.
+    async fn run_kokoro_via_worker(&self, text: &str) -> Result<String> {
+        let wav_bytes = self.synthesize_via_worker(text).await?;
+        self.play_wav_bytes(&wav_bytes).await?;
+        Ok(format!("TTS (Kokoro): {}", text))
+    }
+
+    async fn synthesize_via_worker(&self, text: &str) -> Result<Vec<u8>> {
+        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+        use tokio::time::{timeout, Duration};
+
+        const WORKER_SOCKET: &str = "/tmp/mavis_worker.sock";
+        let voice = std::env::var("MAVIS_KOKORO_VOICE").unwrap_or_else(|_| "af_heart".to_string());
+
+        let request = serde_json::json!({
+            "type": "WorkerRequest",
+            "payload": {
+                "request_type": "tts",
+                "text": text,
+                "voice": voice,
+            }
+        });
+        let req_str = request.to_string();
+        let req_bytes = req_str.as_bytes();
+
+        // Warm-up at worker startup should make this fast; 20s is slack
+        // for a loaded GPU, not an expected cold-load wait.
+        let response_str = timeout(Duration::from_secs(20), async {
+            let mut stream = UnixStream::connect(WORKER_SOCKET).await?;
+            stream.write_all(&(req_bytes.len() as u32).to_le_bytes()).await?;
+            stream.write_all(req_bytes).await?;
+            stream.flush().await?;
+
+            let mut len_buf = [0u8; 4];
+            stream.read_exact(&mut len_buf).await?;
+            let resp_len = u32::from_le_bytes(len_buf) as usize;
+            let mut resp_buf = vec![0u8; resp_len];
+            stream.read_exact(&mut resp_buf).await?;
+            Ok::<_, std::io::Error>(String::from_utf8_lossy(&resp_buf).to_string())
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("TTS worker request timed out"))??;
+
+        let resp_json: serde_json::Value = serde_json::from_str(&response_str)?;
+
+        if let Some(err) = resp_json.get("payload").and_then(|p| p.get("error")) {
+            anyhow::bail!("worker TTS error: {}", err);
+        }
+
+        let audio_b64 = resp_json
+            .get("payload")
+            .and_then(|p| p.get("result"))
+            .and_then(|r| r.get("audio"))
+            .and_then(|a| a.as_str())
+            .ok_or_else(|| anyhow::anyhow!("worker TTS response missing audio field"))?;
+
+        B64.decode(audio_b64)
+            .map_err(|e| anyhow::anyhow!("failed to decode TTS audio: {}", e))
+    }
+
+    // Plays WAV bytes via aplay, blocking until done. Uses tokio's async
+    // Command so it doesn't park a runtime thread (unlike run_piper_blocking).
+    async fn play_wav_bytes(&self, wav_bytes: &[u8]) -> Result<()> {
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt;
+
+        let mut aplay = Command::new("aplay")
+            .arg("-q")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to spawn aplay: {}", e))?;
+
+        if let Some(mut stdin) = aplay.stdin.take() {
+            stdin
+                .write_all(wav_bytes)
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to write audio to aplay: {}", e))?;
+            // stdin drops here, closing the pipe so aplay knows input is complete
+        }
+
+        let status = aplay
+            .wait()
+            .await
+            .map_err(|e| anyhow::anyhow!("aplay failed: {}", e))?;
+
+        if !status.success() {
+            return Err(anyhow::anyhow!("aplay exited with non-zero status"));
+        }
+        Ok(())
+    }
+
+    // Blocking on aplay.wait() (not just spawning) is what keeps MAVIS's
+    // "speaking" state accurate for the mute controller.
     async fn run_piper_blocking(&self, text: &str, voice_model: &str) -> Result<String> {
         use std::process::{Command as StdCommand, Stdio as StdStdio};
         use std::io::Write;
@@ -326,9 +437,7 @@ impl Executor {
             .spawn()
             .map_err(|e| anyhow::anyhow!("failed to spawn aplay: {}", e))?;
 
-        // BLOCK until audio finishes. This is the critical fix — the old
-        // code spawned aplay and immediately returned, so "idle" fired
-        // before MAVIS had actually finished speaking.
+        // Block until playback finishes — old code returned right after spawn.
         let status = aplay
             .wait()
             .map_err(|e| anyhow::anyhow!("aplay failed: {}", e))?;

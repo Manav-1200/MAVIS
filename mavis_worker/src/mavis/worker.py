@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from mavis.core.config import load_config
 from mavis.inference import SYSTEM_PROMPT, LlamaEngine, build_chat_messages
 from mavis.stt.engine import STTEngine
+from mavis.tts.engine import TTSEngine
 
 
 def _now_iso() -> str:
@@ -37,6 +38,7 @@ class WorkerServer:
             device="cpu",
             compute_type="int8",
         )
+        self.tts_engine = TTSEngine()
         self.config = load_config()
         self.executor = ThreadPoolExecutor(max_workers=1)
         self.last_activity = time.time()
@@ -99,6 +101,8 @@ class WorkerServer:
             return await self._generate(payload)
         elif req_type == "stt":
             return await self._stt(payload)
+        elif req_type == "tts":
+            return await self._tts(payload)
         elif req_type == "unload":
             return await self._unload()
         elif req_type == "memory":
@@ -118,6 +122,7 @@ class WorkerServer:
                 "status": "ok",
                 "model_loaded": self.engine.is_loaded,
                 "stt_loaded": self.stt_engine.is_loaded(),
+                "tts_loaded": self.tts_engine.is_loaded,
                 "uptime": time.time() - getattr(self, "_start_time", time.time()),
             }
         )
@@ -252,9 +257,43 @@ class WorkerServer:
                 }
             )
 
+    async def _tts(self, payload: dict) -> dict:
+        text = payload.get("text", "")
+        voice = payload.get("voice")
+        speed = payload.get("speed", 1.0)
+
+        if not text:
+            return _make_event(
+                {
+                    "type": "error",
+                    "error": "Missing text field",
+                }
+            )
+
+        try:
+            loop = asyncio.get_event_loop()
+            audio_b64 = await loop.run_in_executor(
+                self.executor,
+                lambda: self.tts_engine.synthesize(text, voice=voice, speed=speed),
+            )
+            return _make_event(
+                {
+                    "type": "response",
+                    "result": {"audio": audio_b64, "format": "wav"},
+                }
+            )
+        except (RuntimeError, OSError, ValueError) as e:
+            return _make_event(
+                {
+                    "type": "error",
+                    "error": f"TTS failed: {e!s}",
+                }
+            )
+
     async def _unload(self) -> dict:
         self.engine.unload()
         self.stt_engine.unload()
+        self.tts_engine.unload()
         return _make_event(
             {
                 "type": "response",
@@ -279,16 +318,26 @@ class WorkerServer:
                 now = time.time()
                 llm_idle = now - self.last_activity > self.idle_timeout
                 stt_idle = now - self.stt_engine.last_activity > self.idle_timeout
+                tts_idle = now - self.tts_engine.last_activity > self.idle_timeout
 
-                if self.engine.is_loaded and llm_idle and stt_idle:
+                any_loaded = (
+                    self.engine.is_loaded
+                    or self.stt_engine.is_loaded()
+                    or self.tts_engine.is_loaded
+                )
+                all_idle = llm_idle and stt_idle and tts_idle
+
+                # Gate on "anything loaded", not "LLM specifically loaded".
+                if any_loaded and all_idle:
                     print("[worker] Idle timeout reached. Unloading models.")
                     self.engine.unload()
                     self.stt_engine.unload()
-                else:
-                    if self.engine.is_loaded or self.stt_engine.is_loaded():
-                        print(
-                            f"[worker] Idle check: loaded, llm_idle={llm_idle}, stt_idle={stt_idle}"
-                        )
+                    self.tts_engine.unload()
+                elif any_loaded:
+                    print(
+                        f"[worker] Idle check: loaded, llm_idle={llm_idle}, "
+                        f"stt_idle={stt_idle}, tts_idle={tts_idle}"
+                    )
 
     async def run(self):
         self._start_time = time.time()
@@ -302,7 +351,13 @@ class WorkerServer:
 
         idle_task = asyncio.create_task(self.idle_monitor())
 
+        # Warm up TTS in the background — first Kokoro load pulls in torch
+        # and may fetch a spaCy model, which can take way longer than any
+        # request timeout. Doing it now means that cost lands at MAVIS
+        # startup instead of the user's first "say".
         loop = asyncio.get_event_loop()
+        loop.run_in_executor(self.executor, self.tts_engine.warm_up)
+
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
 
@@ -320,6 +375,7 @@ class WorkerServer:
         self.running = False
         self.engine.unload()
         self.stt_engine.unload()
+        self.tts_engine.unload()
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
 
