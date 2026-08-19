@@ -1,0 +1,339 @@
+//! Linux platform — Wayland / X11 auto-detect
+//!
+//! Window tracking: tries niri, sway, hyprland, then xdotool.
+//! Clipboard: wl-paste (Wayland) or xclip (X11).
+//! Screen: grim (Wayland) or import (X11).
+//! TTS: Piper via subprocess.
+
+use super::*;
+use anyhow::{anyhow, Context};
+use log::{info, warn};
+use serde_json::Value;
+use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use tokio::sync::mpsc;
+use tokio::time::{interval, Duration};
+
+pub struct LinuxProvider {
+    windows: Option<LinuxWindowTracker>,
+    clipboard: Option<LinuxClipboard>,
+    screen: Option<LinuxScreen>,
+    tts: Option<LinuxTts>,
+}
+
+impl LinuxProvider {
+    pub fn new() -> Self {
+        let wayland = std::env::var("WAYLAND_DISPLAY").is_ok();
+        let x11 = std::env::var("DISPLAY").is_ok();
+        info!("LinuxProvider: wayland={}, x11={}", wayland, x11);
+
+        Self {
+            windows: if wayland || x11 {
+                Some(LinuxWindowTracker::new(wayland))
+            } else {
+                warn!("No display server; window tracking disabled");
+                None
+            },
+            clipboard: if wayland || x11 {
+                Some(LinuxClipboard::new(wayland))
+            } else {
+                None
+            },
+            screen: if wayland || x11 {
+                Some(LinuxScreen::new(wayland))
+            } else {
+                None
+            },
+            tts: Some(LinuxTts::new()),
+        }
+    }
+}
+
+impl PlatformProvider for LinuxProvider {
+    fn windows(&self) -> Option<&dyn WindowTracker> {
+        self.windows.as_ref().map(|w| w as &dyn WindowTracker)
+    }
+    fn clipboard(&self) -> Option<&dyn ClipboardReader> {
+        self.clipboard.as_ref().map(|c| c as &dyn ClipboardReader)
+    }
+    fn screen(&self) -> Option<&dyn ScreenGrabber> {
+        self.screen.as_ref().map(|s| s as &dyn ScreenGrabber)
+    }
+    fn tts(&self) -> Option<&dyn TtsPlayer> {
+        self.tts.as_ref().map(|t| t as &dyn TtsPlayer)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Window Tracker
+// ---------------------------------------------------------------------------
+
+struct LinuxWindowTracker {
+    wayland: bool,
+}
+
+impl LinuxWindowTracker {
+    fn new(wayland: bool) -> Self {
+        Self { wayland }
+    }
+
+    fn run_cmd(args: &[&str]) -> Option<String> {
+        Command::new(args[0])
+            .args(&args[1..])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+    }
+
+    fn parse_niri_windows(json: &str) -> Option<(String, String, u32)> {
+        let v: Value = serde_json::from_str(json).ok()?;
+        let wins = v.as_array()?;
+        for w in wins {
+            if w.get("is_focused")?.as_bool()? {
+                let title = w.get("title")?.as_str()?.to_string();
+                let app = w.get("app_id")?.as_str().unwrap_or("unknown").to_string();
+                let pid = w.get("pid")?.as_u64()? as u32;
+                return Some((app, title, pid));
+            }
+        }
+        None
+    }
+
+    fn parse_sway_tree(json: &str) -> Option<(String, String, u32)> {
+        let v: Value = serde_json::from_str(json).ok()?;
+        Self::sway_find_focused(&v)
+    }
+
+    fn sway_find_focused(v: &Value) -> Option<(String, String, u32)> {
+        if v.get("focused")?.as_bool()? {
+            let app = v.get("app_id")?.as_str()?.to_string();
+            let title = v.get("name")?.as_str()?.to_string();
+            let pid = v.get("pid")?.as_u64()? as u32;
+            return Some((app, title, pid));
+        }
+        for node in v.get("nodes")?.as_array()? {
+            if let Some(r) = Self::sway_find_focused(node) {
+                return Some(r);
+            }
+        }
+        for node in v.get("floating_nodes")?.as_array()? {
+            if let Some(r) = Self::sway_find_focused(node) {
+                return Some(r);
+            }
+        }
+        None
+    }
+
+    fn parse_hypr_active(json: &str) -> Option<(String, String, u32)> {
+        let v: Value = serde_json::from_str(json).ok()?;
+        let app = v.get("class")?.as_str()?.to_string();
+        let title = v.get("title")?.as_str()?.to_string();
+        let pid = v.get("pid")?.as_u64()? as u32;
+        Some((app, title, pid))
+    }
+
+    fn xdotool_active() -> Option<(String, String, u32)> {
+        let id = Self::run_cmd(&["xdotool", "getactivewindow"])?;
+        let title = Self::run_cmd(&["xdotool", "getwindowname", &id]).unwrap_or_default();
+        let pid = Self::run_cmd(&["xdotool", "getwindowpid", &id])
+            .and_then(|s| s.parse().ok())?;
+        Some(("unknown".to_string(), title, pid))
+    }
+}
+
+impl WindowTracker for LinuxWindowTracker {
+    fn active_window(&self) -> Result<(String, String, u32)> {
+        if self.wayland {
+            if let Some(json) = Self::run_cmd(&["niri", "msg", "--json", "windows"]) {
+                if let Some(r) = Self::parse_niri_windows(&json) {
+                    return Ok(r);
+                }
+            }
+            if let Some(json) = Self::run_cmd(&["swaymsg", "-t", "get_tree"]) {
+                if let Some(r) = Self::parse_sway_tree(&json) {
+                    return Ok(r);
+                }
+            }
+            if let Some(json) = Self::run_cmd(&["hyprctl", "activewindow", "-j"]) {
+                if let Some(r) = Self::parse_hypr_active(&json) {
+                    return Ok(r);
+                }
+            }
+        }
+
+        if let Some(r) = Self::xdotool_active() {
+            return Ok(r);
+        }
+
+        Err(anyhow!("No window tracker available for this compositor"))
+    }
+
+    fn subscribe(&self) -> Result<mpsc::Receiver<WindowEvent>> {
+        let (tx, rx) = mpsc::channel(32);
+        let tracker = LinuxWindowTracker::new(self.wayland);
+        let mut last = String::new();
+
+        tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_millis(500));
+            loop {
+                ticker.tick().await;
+                if let Ok((app, title, pid)) = tracker.active_window() {
+                    let key = format!("{}:{}:{}", app, title, pid);
+                    if key != last {
+                        last = key;
+                        let _ = tx.send(WindowEvent { app_name: app, window_title: title, pid }).await;
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Clipboard
+// ---------------------------------------------------------------------------
+
+struct LinuxClipboard {
+    wayland: bool,
+}
+
+impl LinuxClipboard {
+    fn new(wayland: bool) -> Self {
+        Self { wayland }
+    }
+
+    fn read_cmd(&self) -> Option<String> {
+        if self.wayland {
+            LinuxWindowTracker::run_cmd(&["wl-paste", "--no-newline"])
+        } else {
+            LinuxWindowTracker::run_cmd(&["xclip", "-selection", "clipboard", "-o"])
+        }
+    }
+}
+
+impl ClipboardReader for LinuxClipboard {
+    fn read_text(&self) -> Result<Option<String>> {
+        match self.read_cmd() {
+            Some(t) if !t.is_empty() => Ok(Some(t)),
+            _ => Ok(None),
+        }
+    }
+
+    fn subscribe(&self) -> Result<mpsc::Receiver<String>> {
+        let (tx, rx) = mpsc::channel(16);
+        let cb = LinuxClipboard::new(self.wayland);
+        let mut last = String::new();
+
+        tokio::spawn(async move {
+            let mut ticker = interval(Duration::from_millis(500));
+            loop {
+                ticker.tick().await;
+                if let Some(text) = cb.read_cmd() {
+                    if text != last && !text.is_empty() {
+                        last = text.clone();
+                        let _ = tx.send(text).await;
+                    }
+                }
+            }
+        });
+
+        Ok(rx)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Screen Grabber
+// ---------------------------------------------------------------------------
+
+struct LinuxScreen {
+    wayland: bool,
+}
+
+impl LinuxScreen {
+    fn new(wayland: bool) -> Self {
+        Self { wayland }
+    }
+}
+
+impl ScreenGrabber for LinuxScreen {
+    fn capture_focused(&self) -> Result<Screenshot> {
+        let tmp = "/tmp/mavis_screenshot.png";
+        if self.wayland {
+            std::process::Command::new("grim")
+                .arg(tmp)
+                .status()
+                .context("grim failed")?;
+        } else {
+            std::process::Command::new("import")
+                .args(&["-window", "root", tmp])
+                .status()
+                .context("import (ImageMagick) failed")?;
+        }
+
+        let png_data = std::fs::read(tmp).context("failed to read screenshot")?;
+        // Parse PNG header for dimensions without adding image crate dependency
+        let (width, height) = parse_png_dimensions(&png_data).unwrap_or((0, 0));
+        Ok(Screenshot { width, height, png_data })
+    }
+}
+
+fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
+    if data.len() < 24 || &data[0..8] != &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
+        return None;
+    }
+    let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
+    let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
+    Some((w, h))
+}
+
+// ---------------------------------------------------------------------------
+// TTS
+// ---------------------------------------------------------------------------
+
+struct LinuxTts {
+    speaking: Arc<AtomicBool>,
+}
+
+impl LinuxTts {
+    fn new() -> Self {
+        Self { speaking: Arc::new(AtomicBool::new(false)) }
+    }
+}
+
+impl TtsPlayer for LinuxTts {
+    fn speak(&self, text: &str) -> Result<()> {
+        self.stop()?;
+        let speaking = self.speaking.clone();
+        speaking.store(true, Ordering::SeqCst);
+        let text = text.to_string();
+
+        std::thread::spawn(move || {
+            let _ = std::process::Command::new("piper")
+                .args(&["--model", &std::env::var("MAVIS_PIPER_MODEL").unwrap_or_else(|_| "amy-medium".to_string())])
+                .args(&["--length-scale", "1.15", "--sentence-silence", "0.25"])
+                .stdin(std::process::Stdio::piped())
+                .spawn()
+                .and_then(|mut child| {
+                    use std::io::Write;
+                    if let Some(stdin) = child.stdin.take() {
+                        let mut stdin = stdin;
+                        let _ = stdin.write_all(text.as_bytes());
+                    }
+                    child.wait()
+                });
+            speaking.store(false, Ordering::SeqCst);
+        });
+
+        Ok(())
+    }
+
+    fn stop(&self) -> Result<()> {
+        let _ = std::process::Command::new("pkill").arg("-f").arg("piper").status();
+        self.speaking.store(false, Ordering::SeqCst);
+        Ok(())
+    }
+}
