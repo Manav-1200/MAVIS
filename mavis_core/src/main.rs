@@ -112,7 +112,7 @@ async fn main() -> Result<()> {
 
     // STT Pipeline
     let bus_for_stt_start = Arc::clone(&bus);
-    let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default()).start();
+    let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default()).start(bus_for_stt_start);
     let bus_for_stt = Arc::clone(&bus);
 
     // STT mute controller — mutes mic while TTS is speaking to prevent feedback loop
