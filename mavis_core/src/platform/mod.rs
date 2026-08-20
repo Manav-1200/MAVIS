@@ -4,8 +4,9 @@
 //! in submodules. The Context Engine requests capabilities; the platform
 //! layer provides them or returns None if unavailable.
 
-use std::path::PathBuf;
-
+mod linux;
+mod windows;
+mod macos;
 // ---------------------------------------------------------------------------
 // Capabilities
 // ---------------------------------------------------------------------------
