@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
     let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     // Platform layer — Linux / Windows / macOS abstraction
-    let platform = Arc::new(platform::Platform::detect().build());
+    let platform = Arc::new(platform::Platform::detect().build_provider());
     info!("Platform: initialized");
 
     // Memory Manager — shared between ContextEngine and Planner
