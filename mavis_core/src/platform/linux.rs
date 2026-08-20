@@ -6,7 +6,7 @@
 //! TTS: Piper via subprocess.
 
 use super::*;
-use anyhow::{anyhow, Context};
+use anyhow::Context as _;
 use log::{info, warn};
 use serde_json::Value;
 use std::process::Command;
@@ -51,6 +51,9 @@ impl LinuxProvider {
 }
 
 impl PlatformProvider for LinuxProvider {
+    fn audio(&self) -> Option<&dyn AudioCapture> {
+        None
+    }
     fn windows(&self) -> Option<&dyn WindowTracker> {
         self.windows.as_ref().map(|w| w as &dyn WindowTracker)
     }
@@ -144,7 +147,7 @@ impl LinuxWindowTracker {
 }
 
 impl WindowTracker for LinuxWindowTracker {
-    fn active_window(&self) -> Result<(String, String, u32)> {
+    fn active_window(&self) -> Result<(String, String, u32), PlatformError> {
         if self.wayland {
             if let Some(json) = Self::run_cmd(&["niri", "msg", "--json", "windows"]) {
                 if let Some(r) = Self::parse_niri_windows(&json) {
@@ -167,10 +170,10 @@ impl WindowTracker for LinuxWindowTracker {
             return Ok(r);
         }
 
-        Err(anyhow!("No window tracker available for this compositor"))
+        Err(PlatformError("No window tracker available for this compositor".into()))
     }
 
-    fn subscribe(&self) -> Result<mpsc::Receiver<WindowEvent>> {
+    fn subscribe_changes(&self) -> Result<mpsc::Receiver<WindowEvent>, PlatformError> {
         let (tx, rx) = mpsc::channel(32);
         let tracker = LinuxWindowTracker::new(self.wayland);
         let mut last = String::new();
@@ -179,12 +182,15 @@ impl WindowTracker for LinuxWindowTracker {
             let mut ticker = interval(Duration::from_millis(500));
             loop {
                 ticker.tick().await;
-                if let Ok((app, title, pid)) = tracker.active_window() {
-                    let key = format!("{}:{}:{}", app, title, pid);
-                    if key != last {
-                        last = key;
-                        let _ = tx.send(WindowEvent { app_name: app, window_title: title, pid }).await;
+                match tracker.active_window() {
+                    Ok((app, title, pid)) => {
+                        let key = format!("{}:{}:{}", app, title, pid);
+                        if key != last {
+                            last = key;
+                            let _ = tx.send(WindowEvent { app_name: app, window_title: title, pid }).await;
+                        }
                     }
+                    Err(_) => {}
                 }
             }
         });
@@ -216,14 +222,14 @@ impl LinuxClipboard {
 }
 
 impl ClipboardReader for LinuxClipboard {
-    fn read_text(&self) -> Result<Option<String>> {
+    fn read_text(&self) -> Result<Option<String>, PlatformError> {
         match self.read_cmd() {
             Some(t) if !t.is_empty() => Ok(Some(t)),
             _ => Ok(None),
         }
     }
 
-    fn subscribe(&self) -> Result<mpsc::Receiver<String>> {
+    fn subscribe_changes(&self) -> Result<mpsc::Receiver<String>, PlatformError> {
         let (tx, rx) = mpsc::channel(16);
         let cb = LinuxClipboard::new(self.wayland);
         let mut last = String::new();
@@ -260,24 +266,23 @@ impl LinuxScreen {
 }
 
 impl ScreenGrabber for LinuxScreen {
-    fn capture_focused(&self) -> Result<Screenshot> {
+    fn capture_focused(&self) -> Result<Screenshot, PlatformError> {
         let tmp = "/tmp/mavis_screenshot.png";
         if self.wayland {
             std::process::Command::new("grim")
                 .arg(tmp)
                 .status()
-                .context("grim failed")?;
+                .map_err(|e| PlatformError(format!("grim failed: {}", e)))?;
         } else {
             std::process::Command::new("import")
                 .args(&["-window", "root", tmp])
                 .status()
-                .context("import (ImageMagick) failed")?;
+                .map_err(|e| PlatformError(format!("import (ImageMagick) failed: {}", e)))?;
         }
 
-        let png_data = std::fs::read(tmp).context("failed to read screenshot")?;
-        // Parse PNG header for dimensions without adding image crate dependency
-        let (width, height) = parse_png_dimensions(&png_data).unwrap_or((0, 0));
-        Ok(Screenshot { width, height, png_data })
+        let data = std::fs::read(tmp).map_err(|e| PlatformError(format!("failed to read screenshot: {}", e)))?;
+        let (width, height) = parse_png_dimensions(&data).unwrap_or((0, 0));
+        Ok(Screenshot { width, height, data })
     }
 }
 
@@ -305,7 +310,7 @@ impl LinuxTts {
 }
 
 impl TtsPlayer for LinuxTts {
-    fn speak(&self, text: &str) -> Result<()> {
+    fn speak(&self, text: &str) -> Result<(), PlatformError> {
         self.stop()?;
         let speaking = self.speaking.clone();
         speaking.store(true, Ordering::SeqCst);
@@ -320,7 +325,6 @@ impl TtsPlayer for LinuxTts {
                 .and_then(|mut child| {
                     use std::io::Write;
                     if let Some(stdin) = child.stdin.take() {
-                        let mut stdin = stdin;
                         let _ = stdin.write_all(text.as_bytes());
                     }
                     child.wait()
@@ -331,7 +335,7 @@ impl TtsPlayer for LinuxTts {
         Ok(())
     }
 
-    fn stop(&self) -> Result<()> {
+    fn stop(&self) -> Result<(), PlatformError> {
         let _ = std::process::Command::new("pkill").arg("-f").arg("piper").status();
         self.speaking.store(false, Ordering::SeqCst);
         Ok(())

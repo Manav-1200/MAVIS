@@ -7,6 +7,7 @@
 mod linux;
 mod windows;
 mod macos;
+
 // ---------------------------------------------------------------------------
 // Capabilities
 // ---------------------------------------------------------------------------
@@ -25,18 +26,19 @@ pub trait WindowTracker {
     /// Returns the currently focused window: (app_name, window_title, pid)
     fn active_window(&self) -> Result<(String, String, u32), PlatformError>;
     /// Subscribe to window focus changes. Returns a channel receiver.
-    fn subscribe_changes(&self) -> Result<std::sync::mpsc::Receiver<WindowEvent>, PlatformError>;
+    fn subscribe_changes(&self) -> Result<tokio::sync::mpsc::Receiver<WindowEvent>, PlatformError>;
 }
 
 pub trait ClipboardReader {
     /// Read current clipboard text. Returns None if not text or empty.
     fn read_text(&self) -> Result<Option<String>, PlatformError>;
     /// Subscribe to clipboard changes.
-    fn subscribe_changes(&self) -> Result<std::sync::mpsc::Receiver<String>, PlatformError>;
+    fn subscribe_changes(&self) -> Result<tokio::sync::mpsc::Receiver<String>, PlatformError>;
 }
 
 pub trait ScreenGrabber {
-    /// Capture the focused monitor or window. Returns raw RGBA bytes + dimensions.
+    /// Capture the focused monitor or window. Returns raw bytes + dimensions.
+    /// `data` is PNG on Linux, RGBA on other platforms (Phase 12).
     fn capture_focused(&self) -> Result<Screenshot, PlatformError>;
 }
 
@@ -64,7 +66,8 @@ pub enum SampleFormat {
 pub struct Screenshot {
     pub width: u32,
     pub height: u32,
-    pub rgba: Vec<u8>,
+    /// Platform-specific bytes: PNG on Linux, RGBA elsewhere (future).
+    pub data: Vec<u8>,
 }
 
 pub struct WindowEvent {
