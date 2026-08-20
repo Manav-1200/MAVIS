@@ -1,5 +1,6 @@
 // Central nervous system. Owns Working Memory and routes all events.
 
+use crate::context_snapshot::ContextSnapshot;
 use crate::event_bus::EventBus;
 use crate::memory::manager::MemoryManager;
 use crate::models::event::{Event, EventType};
@@ -52,7 +53,26 @@ impl ContextEngine {
             }
 
             EventType::ContextUpdate => {
-                info!("ContextEngine: ContextUpdate merged into working memory");
+                if let Some(payload) = event.payload.as_object() {
+                    match serde_json::from_value::<ContextSnapshot>(serde_json::Value::Object(payload.clone())) {
+                        Ok(snapshot) => {
+                            let mut wm = self.memory.working.write().await;
+                            wm.active_window = snapshot.active_window;
+                            wm.last_clipboard = snapshot.clipboard_text;
+                            wm.context_timestamp = Some(snapshot.captured_at);
+                            info!(
+                                "ContextEngine: context injected — app={}, clipboard={}",
+                                wm.active_window.as_ref().map(|w| w.app_name.as_str()).unwrap_or("none"),
+                                wm.last_clipboard.as_ref().map(|s| &s[..s.len().min(20)]).unwrap_or("none")
+                            );
+                        }
+                        Err(e) => {
+                            warn!("ContextEngine: failed to parse ContextUpdate payload: {}", e);
+                        }
+                    }
+                } else {
+                    warn!("ContextEngine: ContextUpdate payload is not an object");
+                }
             }
 
             EventType::PlanReady => {

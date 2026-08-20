@@ -3,6 +3,7 @@
 
 #![allow(dead_code)]
 
+use crate::context_snapshot::WindowInfo;
 use crate::models::event::Event;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -15,6 +16,10 @@ pub struct WorkingMemory {
     pub current_intent: Option<String>,
     pub active_plan: Option<serde_json::Value>,
     pub ui_state: Option<String>,
+    // NEW — platform context fields
+    pub active_window: Option<WindowInfo>,
+    pub last_clipboard: Option<String>,
+    pub context_timestamp: Option<u64>,
 }
 
 impl WorkingMemory {

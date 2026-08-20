@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 mod bridge;
 mod context_engine;
+mod context_snapshot;
 mod event_bus;
 mod executor;
 mod memory;
@@ -19,6 +20,7 @@ mod system;
 mod ui;
 mod tts;
 
+use context_snapshot::{ContextSnapshot, WindowInfo};
 use event_bus::EventBus;
 use models::event::{Event, EventType};
 
@@ -110,7 +112,7 @@ async fn main() -> Result<()> {
 
     // STT Pipeline
     let bus_for_stt_start = Arc::clone(&bus);
-    let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default()).start(bus_for_stt_start);
+    let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default()).start();
     let bus_for_stt = Arc::clone(&bus);
 
     // STT mute controller — mutes mic while TTS is speaking to prevent feedback loop
@@ -292,17 +294,76 @@ async fn main() -> Result<()> {
         info!("Orb: shutting down");
     });
 
-    // Platform context polling — Phase 6 (active window, clipboard, etc.)
+    // Platform context polling — builds ContextSnapshot and publishes ContextUpdate every 2s
     let platform_ctx = Arc::clone(&platform);
     let bus_ctx = Arc::clone(&bus);
     let _ctx_poll_handle = tokio::spawn(async move {
         let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(2));
         loop {
             ticker.tick().await;
+
+            let mut snapshot = ContextSnapshot {
+                active_window: None,
+                clipboard_text: None,
+                captured_at: std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as u64,
+            };
+
+            // Window tracking
             if let Some(tracker) = platform_ctx.windows() {
-                if let Ok((app, title, pid)) = tracker.active_window() {
-                    log::debug!("Window: {} | {} | {}", app, title, pid);
-                    // Phase 6: inject into ContextEngine working memory
+                match tracker.active_window() {
+                    Ok((app, title, pid)) => {
+                        snapshot.active_window = Some(WindowInfo {
+                            app_name: app,
+                            window_title: title,
+                            pid: Some(pid),
+                        });
+                    }
+                    Err(e) => {
+                        log::debug!("Window tracking error: {}", e);
+                    }
+                }
+            }
+
+            // Clipboard
+            if let Some(clipboard) = platform_ctx.clipboard() {
+                match clipboard.read_text() {
+                    Ok(Some(text)) => {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() && trimmed.len() < 4096 {
+                            snapshot.clipboard_text = Some(trimmed.to_string());
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        log::debug!("Clipboard read error: {}", e);
+                    }
+                }
+            }
+
+            // Publish if we got anything useful
+            if !snapshot.is_empty() {
+                match serde_json::to_value(&snapshot) {
+                    Ok(payload) => {
+                        let event = Event {
+                            id: uuid::Uuid::new_v4(),
+                            timestamp: chrono::Utc::now(),
+                            source: "platform".to_string(),
+                            event_type: EventType::ContextUpdate,
+                            payload,
+                        };
+                        bus_ctx.publish(event);
+                        log::debug!(
+                            "ContextUpdate: app={} | clipboard={}",
+                            snapshot.active_window.as_ref().map(|w| w.app_name.as_str()).unwrap_or("none"),
+                            snapshot.clipboard_text.as_ref().map(|_| "yes").unwrap_or("no")
+                        );
+                    }
+                    Err(e) => {
+                        log::warn!("Failed to serialize context snapshot: {}", e);
+                    }
                 }
             }
         }
