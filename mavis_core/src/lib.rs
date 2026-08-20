@@ -12,3 +12,4 @@ pub mod ui;
 pub mod bridge;
 pub mod tts;
 pub mod platform;
+pub mod context_snapshot;
