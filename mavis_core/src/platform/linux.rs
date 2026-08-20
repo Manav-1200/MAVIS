@@ -6,7 +6,6 @@
 //! TTS: Piper via subprocess.
 
 use super::*;
-use anyhow::Context as _;
 use log::{info, warn};
 use serde_json::Value;
 use std::process::Command;
@@ -324,7 +323,7 @@ impl TtsPlayer for LinuxTts {
                 .spawn()
                 .and_then(|mut child| {
                     use std::io::Write;
-                    if let Some(stdin) = child.stdin.take() {
+                    if let Some(mut stdin) = child.stdin.take() {
                         let _ = stdin.write_all(text.as_bytes());
                     }
                     child.wait()
