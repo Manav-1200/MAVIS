@@ -1,12 +1,18 @@
 // mavis_core/src/executor.rs
 // Executes plans: shell commands, app launching, notifications, TTS.
 // Listens for PlanReady, emits ActionComplete + UiStateChange.
+// CHANGELOG 2026-08-21:
+//   - Audio playback: pw-play > paplay > aplay (PipeWire-first for Arch)
+//   - Piper model + .onnx.json validated before synthesis
+//   - Kokoro WAV bytes and Piper WAV file both route through unified play_audio()
 
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
 use anyhow::Result;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
+use std::path::Path;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 
 pub struct Executor {
@@ -297,11 +303,19 @@ impl Executor {
         let voice_model = std::env::var("MAVIS_VOICE_MODEL")
             .unwrap_or_else(|_| format!("{}/.local/share/piper-voices/en_US-lessac-medium.onnx", home));
 
-        if std::path::Path::new(&voice_model).exists() {
-            self.run_piper_blocking(text, &voice_model).await
-        } else {
-            self.fallback_say(text).await
+        let model_path = Path::new(&voice_model);
+        let json_path = model_path.with_extension("onnx.json");
+
+        if !model_path.exists() {
+            warn!("Piper model missing: {:?}", model_path);
+            return self.fallback_say(text).await;
         }
+        if !json_path.exists() {
+            warn!("Piper config missing: {:?}", json_path);
+            return self.fallback_say(text).await;
+        }
+
+        self.run_piper_blocking(text, &voice_model).await
     }
 
     // Talks to the worker's TTS request type directly over the socket
@@ -309,7 +323,7 @@ impl Executor {
     // back synchronously, not the bus's fire-and-forget event flow.
     async fn run_kokoro_via_worker(&self, text: &str) -> Result<String> {
         let wav_bytes = self.synthesize_via_worker(text).await?;
-        self.play_wav_bytes(&wav_bytes).await?;
+        play_audio_bytes(&wav_bytes).await?;
         Ok(format!("TTS (Kokoro): {}", text))
     }
 
@@ -368,84 +382,46 @@ impl Executor {
             .map_err(|e| anyhow::anyhow!("failed to decode TTS audio: {}", e))
     }
 
-    // Plays WAV bytes via aplay, blocking until done. Uses tokio's async
-    // Command so it doesn't park a runtime thread (unlike run_piper_blocking).
-    async fn play_wav_bytes(&self, wav_bytes: &[u8]) -> Result<()> {
-        use std::process::Stdio;
-        use tokio::io::AsyncWriteExt;
-
-        let mut aplay = Command::new("aplay")
-            .arg("-q")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to spawn aplay: {}", e))?;
-
-        if let Some(mut stdin) = aplay.stdin.take() {
-            stdin
-                .write_all(wav_bytes)
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to write audio to aplay: {}", e))?;
-            // stdin drops here, closing the pipe so aplay knows input is complete
-        }
-
-        let status = aplay
-            .wait()
-            .await
-            .map_err(|e| anyhow::anyhow!("aplay failed: {}", e))?;
-
-        if !status.success() {
-            return Err(anyhow::anyhow!("aplay exited with non-zero status"));
-        }
-        Ok(())
-    }
-
-    // Blocking on aplay.wait() (not just spawning) is what keeps MAVIS's
+    // Blocking until playback finishes — that's what keeps MAVIS's
     // "speaking" state accurate for the mute controller.
     async fn run_piper_blocking(&self, text: &str, voice_model: &str) -> Result<String> {
-        use std::process::{Command as StdCommand, Stdio as StdStdio};
-        use std::io::Write;
+        let wav_path = std::env::temp_dir().join("mavis_tts_piper.wav");
 
-        let mut piper = match StdCommand::new("piper")
+        let mut child = Command::new("piper")
             .args(&[
                 "--model", voice_model,
-                "--output_file", "-",
+                "--output_file", wav_path.to_str().unwrap_or("/tmp/mavis_tts_piper.wav"),
                 "--length-scale", "1.15",
                 "--sentence-silence", "0.25",
             ])
-            .stdin(StdStdio::piped())
-            .stdout(StdStdio::piped())
-            .stderr(StdStdio::null())
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
-        {
-            Ok(child) => child,
-            Err(_) => {
-                return self.fallback_say(text).await;
-            }
-        };
+            .map_err(|e| anyhow::anyhow!("failed to spawn piper: {}", e))?;
 
-        if let Some(mut stdin) = piper.stdin.take() {
-            let _ = stdin.write_all(text.as_bytes());
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(text.as_bytes())
+                .await
+                .map_err(|e| anyhow::anyhow!("failed to write to piper stdin: {}", e))?;
         }
 
-        let mut aplay = StdCommand::new("aplay")
-            .args(&["-r", "22050", "-f", "S16_LE", "-c", "1", "-t", "raw", "-"])
-            .stdin(piper.stdout.take().unwrap())
-            .stdout(StdStdio::null())
-            .stderr(StdStdio::null())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to spawn aplay: {}", e))?;
+        let output = child
+            .wait_with_output()
+            .await
+            .map_err(|e| anyhow::anyhow!("piper process error: {}", e))?;
 
-        // Block until playback finishes — old code returned right after spawn.
-        let status = aplay
-            .wait()
-            .map_err(|e| anyhow::anyhow!("aplay failed: {}", e))?;
-
-        if !status.success() {
-            return Err(anyhow::anyhow!("aplay exited with non-zero status"));
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(anyhow::anyhow!("piper synthesis failed: {}", stderr));
         }
 
+        if !wav_path.exists() {
+            return Err(anyhow::anyhow!("Piper did not produce an output WAV file"));
+        }
+
+        play_audio_file(&wav_path).await?;
         Ok(format!("TTS (Piper): {}", text))
     }
 
@@ -475,6 +451,57 @@ impl Executor {
         };
         self.bus.publish(event);
     }
+}
+
+// ---------------------------------------------------------------------
+// Unified audio playback — PipeWire-native first.
+// ---------------------------------------------------------------------
+
+/// Play a WAV file, trying pw-play → paplay → aplay.
+async fn play_audio_file(path: &Path) -> Result<()> {
+    if !path.exists() {
+        return Err(anyhow::anyhow!("WAV file does not exist: {:?}", path));
+    }
+
+    let backends: [(&str, Vec<String>); 3] = [
+        ("pw-play", vec![path.to_string_lossy().to_string()]),
+        ("paplay", vec![path.to_string_lossy().to_string()]),
+        ("aplay", vec![path.to_string_lossy().to_string()]),
+    ];
+
+    for (cmd, args) in backends {
+        debug!("Trying audio backend: {}", cmd);
+        match Command::new(cmd).args(&args).output().await {
+            Ok(output) if output.status.success() => {
+                info!("Audio playback succeeded via {}", cmd);
+                return Ok(());
+            }
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("{} playback failed (exit {}): {}", cmd, output.status, stderr.trim());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                debug!("{} not found in PATH, skipping", cmd);
+            }
+            Err(e) => {
+                warn!("{} spawn error: {}", cmd, e);
+            }
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "All audio playback backends failed. \
+         Install one of: pw-play (pipewire), paplay (pulseaudio), aplay (alsa-utils)."
+    ))
+}
+
+/// Write WAV bytes to a temp file, then play via play_audio_file.
+async fn play_audio_bytes(data: &[u8]) -> Result<()> {
+    let temp_path = std::env::temp_dir().join("mavis_tts_kokoro.wav");
+    tokio::fs::write(&temp_path, data)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to write temp audio file: {}", e))?;
+    play_audio_file(&temp_path).await
 }
 
 #[cfg(test)]
