@@ -175,8 +175,57 @@ class STTEngine:
 
     @staticmethod
     def _deduplicate_repetition(text: str) -> str:
-        """Collapse repeated sentences like 'Hi. Hi. Hi.' into 'Hi.'"""
-        parts = re.split(r"([.!?]+(?:\s+|$))", text)
+        """
+        Collapse repeated phrases that faster-whisper hallucinates.
+        Handles both sentence-level ('Hi. Hi.') and phrase-level loops
+        ('go to the airport... go to the airport...').
+        """
+        if not text or len(text.split()) < 4:
+            return text
+
+        words = text.split()
+        cleaned = words[:]
+        changed = False
+
+        # --- Pass 1: phrase-level dedup (4+ word windows, 3+ repeats) ---
+        for window in range(4, len(words) // 3 + 1):
+            i = 0
+            pass_cleaned = []
+            while i < len(cleaned):
+                phrase = cleaned[i : i + window]
+                if len(phrase) < window:
+                    pass_cleaned.extend(phrase)
+                    break
+
+                # Count consecutive repeats
+                repeat_count = 1
+                j = i + window
+                while j + window <= len(cleaned) and cleaned[j : j + window] == phrase:
+                    repeat_count += 1
+                    j += window
+
+                if repeat_count >= 3:
+                    # Strong hallucination — keep one
+                    pass_cleaned.extend(phrase)
+                    i = j
+                    changed = True
+                elif repeat_count == 2:
+                    # Possible emphasis — keep two
+                    pass_cleaned.extend(phrase * 2)
+                    i = j
+                    changed = True
+                else:
+                    pass_cleaned.append(cleaned[i])
+                    i += 1
+
+            if changed:
+                cleaned = pass_cleaned
+                break  # One pass is enough; avoids over-aggression
+
+        result = " ".join(cleaned)
+
+        # --- Pass 2: sentence-level dedup (safety net) ---
+        parts = re.split(r"([.!?]+(?:\s+|$))", result)
         output = []
         prev_phrase = None
 
@@ -186,7 +235,7 @@ class STTEngine:
             if not phrase:
                 continue
             if phrase.lower() == prev_phrase:
-                continue  # skip duplicate
+                continue
             output.append(phrase + punct)
             prev_phrase = phrase.lower()
 

@@ -1,75 +1,26 @@
-# MAVIS Python Worker Dependencies
-# Compatible with Python 3.10+ (Debian 12, Ubuntu 22.04, Arch, etc.)
-# CPU-focused build. No CUDA required.
+# MAVIS Worker Dependencies
+# Compatible with Arch Linux + Python 3.14 (rolling release)
+# Install: pip install -r requirements.txt
 
-# ---------------------------------------------------------------------------
-# Core AI / ML
-# ---------------------------------------------------------------------------
-
-# Local LLM inference. Pre-built wheels available for Linux x86_64.
-# If pre-built wheel fails on your distro, install build deps first:
-#   sudo apt install build-essential cmake python3-dev
-# Then: CMAKE_ARGS="-DLLAMA_NATIVE=OFF" pip install llama-cpp-python==0.2.90
-llama-cpp-python==0.2.90
-
-# Whisper STT (CPU, int8). Avoids VRAM contention with LLM.
-faster-whisper==1.0.3
-
-# PyTorch CPU backend (required by faster-whisper).
-# Using CPU-only wheels to keep install small and avoid CUDA mismatch.
-# If you have CUDA and want GPU STT, remove the --extra-index-url and install torch normally.
+# --- PyTorch (CPU-only) ---
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.2.2+cpu
-torchaudio==2.2.2+cpu
+torch==2.11.0+cpu
+torchaudio==2.11.0+cpu
 
-# NumPy — pinned below 2.0 for compatibility with older torch/faster-whisper builds.
-numpy==1.26.4
+# --- Core AI ---
+llama-cpp-python>=0.3.0
+faster-whisper>=1.1.0
 
-# ---------------------------------------------------------------------------
-# TTS (Piper)
-# ---------------------------------------------------------------------------
+# --- TTS ---
+piper-tts>=1.2.0
+kokoro-onnx>=0.4.0
 
-# Piper TTS — local neural speech synthesis.
-# If piper-tts wheel is unavailable for your platform, use:
-#   pip install piper-phonemize-cross==1.2.0 piper-tts==1.2.0
-piper-tts==1.2.0
+# --- Utils ---
+numpy>=2.0.0
+pydantic>=2.0.0
+toml>=0.10.0
 
-# ---------------------------------------------------------------------------
-# Config & Serialization
-# ---------------------------------------------------------------------------
-
-pydantic==2.7.4
-toml==0.10.2
-
-# ---------------------------------------------------------------------------
-# Async & Networking
-# ---------------------------------------------------------------------------
-
-aiohttp==3.9.5
-aiosignal==1.3.1
-frozenlist==1.4.1
-async-timeout==4.0.3; python_version < "3.11"
-
-# ---------------------------------------------------------------------------
-# Utilities
-# ---------------------------------------------------------------------------
-
-uuid==1.30
-python-dateutil==2.9.0
-
-# ---------------------------------------------------------------------------
-# Future Phase 7+ Dependencies (commented out — uncomment when needed)
-# ---------------------------------------------------------------------------
-
-# sentence-transformers==2.7.0   # Semantic recall / vector embeddings
-# faiss-cpu==1.8.0               # Local vector search (alternative: hnswlib)
-# spacy==3.7.5                   # Entity extraction for memory graph
-# https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.7.1/en_core_web_sm-3.7.1-py3-none-any.whl
-
-# ---------------------------------------------------------------------------
-# Dev / Lint (optional — install with: pip install -r requirements.txt -r requirements-dev.txt)
-# ---------------------------------------------------------------------------
-
-# pytest==8.2.2
-# ruff==0.4.10
-# mypy==1.10.0
+# --- Future Phase 7+ (uncomment when needed) ---
+# sentence-transformers
+# faiss-cpu
+# spacy
