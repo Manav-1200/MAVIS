@@ -64,6 +64,12 @@ class STTEngine:
         )
         logger.info("STT model loaded.")
 
+    def warm_up(self) -> None:
+        """Pre-load the model so first request doesn't block on download."""
+        print("[stt] Warming up model...", flush=True)
+        self._load()
+        print("[stt] Model warm-up complete.", flush=True)
+
     def unload(self) -> None:
         """Aggressively unload the model and free GPU memory."""
         if self._model is None:
