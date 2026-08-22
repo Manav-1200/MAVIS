@@ -48,8 +48,8 @@ class TTSEngine:
             "MAVIS_VOICE_MODEL",
             os.path.expanduser("~/.local/share/piper-voices/en_US-lessac-medium.onnx"),
         )
-        json_path = model + ".json"
-        if not os.path.exists(model) or not os.path.exists(json_path):
+        config_path = model + ".json"
+        if not os.path.exists(model) or not os.path.exists(config_path):
             raise RuntimeError(f"Piper model or config missing: {model}")
 
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
@@ -63,8 +63,8 @@ class TTSEngine:
                     model,
                     "--output_file",
                     out_path,
-                    "--json_file",
-                    json_path,
+                    "--config",
+                    config_path,
                 ],
                 input=text.encode(),
                 capture_output=True,
