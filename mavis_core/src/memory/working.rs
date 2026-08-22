@@ -16,10 +16,11 @@ pub struct WorkingMemory {
     pub current_intent: Option<String>,
     pub active_plan: Option<serde_json::Value>,
     pub ui_state: Option<String>,
-    // NEW — platform context fields
     pub active_window: Option<WindowInfo>,
     pub last_clipboard: Option<String>,
     pub context_timestamp: Option<u64>,
+    // NEW — structured user profile extracted from conversation
+    pub user_name: Option<String>,
 }
 
 impl WorkingMemory {
@@ -40,6 +41,10 @@ impl WorkingMemory {
 
     pub fn clear_intent(&mut self) {
         self.current_intent = None;
+    }
+
+    pub fn set_user_name(&mut self, name: String) {
+        self.user_name = Some(name);
     }
 
     pub fn set_active_plan(&mut self, plan: serde_json::Value) {

@@ -95,6 +95,14 @@ impl Planner {
         let snapshot = self.working.read().await;
         let mut items = Vec::new();
 
+        // NEW — inject user profile first so it appears at the top of context
+        if let Some(name) = &snapshot.user_name {
+            items.push(serde_json::json!({
+                "source": "user_profile",
+                "content": format!("The user's name is {}.", name),
+            }));
+        }
+
         if let Some(intent) = &snapshot.current_intent {
             items.push(serde_json::json!({
                 "source": "current_intent",
@@ -102,7 +110,10 @@ impl Planner {
             }));
         }
 
-        for event in snapshot.recent_events(5) {
+        // CHANGED — 5 → 15. Between two user turns MAVIS generates ~7 internal
+        // events (WorkerRequest, WorkerResponse, PlanReady, ActionComplete,
+        // 2× UiStateChange). A window of 5 drops the prior turn entirely.
+        for event in snapshot.recent_events(15) {
             let (source, content) = match event.event_type {
                 EventType::UserIntent => (
                     "user",

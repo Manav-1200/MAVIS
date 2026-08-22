@@ -44,6 +44,14 @@ impl ContextEngine {
                 {
                     let mut wm = self.memory.working.write().await;
                     wm.set_intent(intent.to_string());
+
+                    // NEW — extract and persist user name
+                    if let Some(name) = extract_user_name(intent) {
+                        if wm.user_name.as_ref() != Some(&name) {
+                            wm.set_user_name(name.clone());
+                            info!("ContextEngine: stored user name: {}", name);
+                        }
+                    }
                 }
             }
 
@@ -170,4 +178,43 @@ impl ContextEngine {
     pub async fn working_memory_snapshot(&self) -> crate::memory::working::WorkingMemory {
         self.memory.working.read().await.clone()
     }
+}
+
+// ---------------------------------------------------------------------
+// Name extraction — simple pattern matching, no NLP dependency.
+// ---------------------------------------------------------------------
+fn extract_user_name(text: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    // Patterns: "my name is X", "i am X", "i'm X", "call me X"
+    let patterns = [
+        ("my name is ", 13),
+        ("i am ", 5),
+        ("i'm ", 4),
+        ("call me ", 8),
+        ("name is ", 8),
+    ];
+
+    for (prefix, prefix_len) in patterns {
+        if let Some(pos) = lower.find(prefix) {
+            let start = pos + prefix_len;
+            let rest = &text[start..];
+            // Take the next word as the name, strip punctuation
+            let name: String = rest
+                .trim_start()
+                .split_whitespace()
+                .next()?
+                .trim_end_matches(|c: char| c.is_ascii_punctuation())
+                .to_string();
+            if !name.is_empty() && name.len() < 30 {
+                // Capitalize first letter
+                let mut chars = name.chars();
+                let capitalized = match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+                    None => name,
+                };
+                return Some(capitalized);
+            }
+        }
+    }
+    None
 }

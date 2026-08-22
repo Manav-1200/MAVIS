@@ -35,18 +35,28 @@ def build_chat_messages(
     Working memory is merged INTO the system prompt so models like Phi-3
     receive a single coherent system context block.
     """
-    # Merge working memory into the system prompt
-    system = system_prompt
+    # Separate user_profile items from general working memory
+    profile_lines: list[str] = []
+    context_lines: list[str] = []
+
     if working_memory:
-        context_lines: list[str] = []
         for item in working_memory:
             content = item.get("content", "")
             source = item.get("source", "memory")
-            if content:
+            if not content:
+                continue
+            if source == "user_profile":
+                # Inject profile facts directly into the system prompt body
+                profile_lines.append(content)
+            else:
                 context_lines.append(f"- [{source}] {content}")
 
-        if context_lines:
-            system += "\n\nWorking Memory:\n" + "\n".join(context_lines)
+    # Assemble system prompt: base + profile facts + working memory bullets
+    system = system_prompt
+    if profile_lines:
+        system += "\n\n" + "\n".join(profile_lines)
+    if context_lines:
+        system += "\n\nWorking Memory:\n" + "\n".join(context_lines)
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
 

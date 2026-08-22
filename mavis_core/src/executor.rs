@@ -495,13 +495,53 @@ async fn play_audio_file(path: &Path) -> Result<()> {
     ))
 }
 
-/// Write WAV bytes to a temp file, then play via play_audio_file.
+/// Write audio bytes to a temp file and play.
+/// Validates WAV header; if missing, falls back to raw-PCM via aplay.
 async fn play_audio_bytes(data: &[u8]) -> Result<()> {
-    let temp_path = std::env::temp_dir().join("mavis_tts_kokoro.wav");
-    tokio::fs::write(&temp_path, data)
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to write temp audio file: {}", e))?;
-    play_audio_file(&temp_path).await
+    if data.is_empty() {
+        return Err(anyhow::anyhow!("TTS returned empty audio bytes"));
+    }
+
+    let is_wav = data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE";
+
+    if is_wav {
+        let temp_path = std::env::temp_dir().join("mavis_tts_kokoro.wav");
+        tokio::fs::write(&temp_path, data)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to write temp WAV file: {}", e))?;
+        play_audio_file(&temp_path).await
+    } else {
+        // Raw PCM fallback — Kokoro at 24 kHz mono float32, but aplay can't do float32.
+        // If we reach here, the Python side failed to wrap PCM in WAV. Log loudly and
+        // try aplay with best-guess S16_LE flags. This is a safety net, not the happy path.
+        warn!("TTS audio lacks WAV header — falling back to raw PCM playback");
+        let temp_path = std::env::temp_dir().join("mavis_tts_kokoro.raw");
+        tokio::fs::write(&temp_path, data)
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to write temp raw file: {}", e))?;
+
+        let output = Command::new("aplay")
+            .args(&[
+                "-f", "S16_LE",   // best guess; may be wrong format
+                "-r", "24000",    // Kokoro sample rate
+                "-c", "1",        // mono
+                temp_path.to_str().unwrap_or("/tmp/mavis_tts_kokoro.raw"),
+            ])
+            .output()
+            .await;
+
+        match output {
+            Ok(o) if o.status.success() => {
+                info!("Raw PCM playback succeeded via aplay (fallback)");
+                Ok(())
+            }
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                Err(anyhow::anyhow!("aplay raw PCM failed: {}", stderr.trim()))
+            }
+            Err(e) => Err(anyhow::anyhow!("aplay spawn error: {}", e)),
+        }
+    }
 }
 
 #[cfg(test)]

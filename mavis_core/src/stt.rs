@@ -34,7 +34,11 @@ impl Default for SttConfig {
             min_speech_duration_ms: 500,
             frame_duration_ms: 30,
             max_utterance_duration_ms: 5000,
-            min_max_energy: 0.12,
+            // CHANGED: 0.12 -> 0.04. The old threshold filtered out quiet speech
+            // (user's natural speaking energy: 0.03–0.07). 0.04 still blocks
+            // keyboard clicks and fan noise (~0.01–0.02) while allowing normal
+            // conversation at normal distance.
+            min_max_energy: 0.04,
         }
     }
 }
