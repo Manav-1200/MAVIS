@@ -275,8 +275,6 @@ impl Executor {
 
         self.emit_ui_state("speaking").await;
 
-        // Kokoro via worker by default; MAVIS_TTS_ENGINE=piper to roll back.
-        // Falls back to Piper automatically on any Kokoro failure.
         let use_kokoro = std::env::var("MAVIS_TTS_ENGINE")
             .map(|v| !v.eq_ignore_ascii_case("piper"))
             .unwrap_or(true);
@@ -293,34 +291,16 @@ impl Executor {
             self.run_piper_or_fallback(text).await
         };
 
-        self.emit_ui_state("idle").await;
+        // Only transition to idle on success; let execute_plan emit error state
+        // on failure so the orb doesn't flicker idle → error.
+        match &result {
+            Ok(_) => self.emit_ui_state("idle").await,
+            Err(_) => {} // execute_plan will emit "error"
+        }
 
         result
     }
 
-    async fn run_piper_or_fallback(&self, text: &str) -> Result<String> {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let voice_model = std::env::var("MAVIS_VOICE_MODEL")
-            .unwrap_or_else(|_| format!("{}/.local/share/piper-voices/en_US-lessac-medium.onnx", home));
-
-        let model_path = Path::new(&voice_model);
-        let json_path = model_path.with_extension("onnx.json");
-
-        if !model_path.exists() {
-            warn!("Piper model missing: {:?}", model_path);
-            return self.fallback_say(text).await;
-        }
-        if !json_path.exists() {
-            warn!("Piper config missing: {:?}", json_path);
-            return self.fallback_say(text).await;
-        }
-
-        self.run_piper_blocking(text, &voice_model).await
-    }
-
-    // Talks to the worker's TTS request type directly over the socket
-    // (same pattern STT uses in main.rs) since this needs one response
-    // back synchronously, not the bus's fire-and-forget event flow.
     async fn run_kokoro_via_worker(&self, text: &str) -> Result<String> {
         let wav_bytes = self.synthesize_via_worker(text).await?;
         play_audio_bytes(&wav_bytes).await?;
@@ -347,8 +327,6 @@ impl Executor {
         let req_str = request.to_string();
         let req_bytes = req_str.as_bytes();
 
-        // Warm-up at worker startup should make this fast; 20s is slack
-        // for a loaded GPU, not an expected cold-load wait.
         let response_str = timeout(Duration::from_secs(20), async {
             let mut stream = UnixStream::connect(WORKER_SOCKET).await?;
             stream.write_all(&(req_bytes.len() as u32).to_le_bytes()).await?;
@@ -382,8 +360,26 @@ impl Executor {
             .map_err(|e| anyhow::anyhow!("failed to decode TTS audio: {}", e))
     }
 
-    // Blocking until playback finishes — that's what keeps MAVIS's
-    // "speaking" state accurate for the mute controller.
+    async fn run_piper_or_fallback(&self, text: &str) -> Result<String> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let voice_model = std::env::var("MAVIS_VOICE_MODEL")
+            .unwrap_or_else(|_| format!("{}/.local/share/piper-voices/en_US-lessac-medium.onnx", home));
+
+        let model_path = Path::new(&voice_model);
+        let json_path = model_path.with_extension("onnx.json");
+
+        if !model_path.exists() {
+            warn!("Piper model missing: {:?}", model_path);
+            return self.fallback_say(text).await;
+        }
+        if !json_path.exists() {
+            warn!("Piper config missing: {:?}", json_path);
+            return self.fallback_say(text).await;
+        }
+
+        self.run_piper_blocking(text, &voice_model).await
+    }
+
     async fn run_piper_blocking(&self, text: &str, voice_model: &str) -> Result<String> {
         let wav_path = std::env::temp_dir().join("mavis_tts_piper.wav");
 
@@ -504,22 +500,21 @@ async fn play_audio_bytes(data: &[u8]) -> Result<()> {
 
     let is_wav = data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE";
 
-    if is_wav {
-        let temp_path = std::env::temp_dir().join("mavis_tts_kokoro.wav");
-        tokio::fs::write(&temp_path, data)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to write temp WAV file: {}", e))?;
+    let temp_path = if is_wav {
+        std::env::temp_dir().join("mavis_tts_kokoro.wav")
+    } else {
+        std::env::temp_dir().join("mavis_tts_kokoro.raw")
+    };
+
+    tokio::fs::write(&temp_path, data)
+        .await
+        .map_err(|e| anyhow::anyhow!("failed to write temp audio file: {}", e))?;
+
+    let result = if is_wav {
         play_audio_file(&temp_path).await
     } else {
         // Raw PCM fallback — Kokoro at 24 kHz mono float32, but aplay can't do float32.
-        // If we reach here, the Python side failed to wrap PCM in WAV. Log loudly and
-        // try aplay with best-guess S16_LE flags. This is a safety net, not the happy path.
         warn!("TTS audio lacks WAV header — falling back to raw PCM playback");
-        let temp_path = std::env::temp_dir().join("mavis_tts_kokoro.raw");
-        tokio::fs::write(&temp_path, data)
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to write temp raw file: {}", e))?;
-
         let output = Command::new("aplay")
             .args(&[
                 "-f", "S16_LE",   // best guess; may be wrong format
@@ -541,7 +536,12 @@ async fn play_audio_bytes(data: &[u8]) -> Result<()> {
             }
             Err(e) => Err(anyhow::anyhow!("aplay spawn error: {}", e)),
         }
-    }
+    };
+
+    // Best-effort cleanup — don't fail playback if unlink fails
+    let _ = tokio::fs::remove_file(&temp_path).await;
+
+    result
 }
 
 #[cfg(test)]
