@@ -30,14 +30,18 @@ impl Default for SttConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
-            silence_duration_ms: 800,
+            // Increased from 800 → 1200. Allows natural thinking pauses without
+            // splitting the utterance. A 1.2s gap is still long enough to
+            // separate distinct commands.
+            silence_duration_ms: 1200,
             min_speech_duration_ms: 500,
             frame_duration_ms: 30,
-            max_utterance_duration_ms: 5000,
-            // CHANGED: 0.12 -> 0.04. The old threshold filtered out quiet speech
-            // (user's natural speaking energy: 0.03–0.07). 0.04 still blocks
-            // keyboard clicks and fan noise (~0.01–0.02) while allowing normal
-            // conversation at normal distance.
+            // Increased from 5000 → 15000. 15 seconds of active speech time
+            // covers long requests and explanations. Real-time cap is still
+            // enforced by the VAD (silence or forced end).
+            max_utterance_duration_ms: 15000,
+            // 0.04 blocks keyboard clicks (~0.01) and fan noise (~0.02) while
+            // allowing normal conversation at normal distance (~0.03–0.07).
             min_max_energy: 0.04,
         }
     }
