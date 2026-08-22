@@ -34,13 +34,18 @@ class WorkerServer:
         self.socket_path = socket_path
         self.engine = LlamaEngine()
         self.stt_engine = STTEngine(
-            model_size="base",
+            model_size="small",
             device="cpu",
             compute_type="int8",
         )
         self.tts_engine = TTSEngine()
         self.config = load_config()
-        self.executor = ThreadPoolExecutor(max_workers=1)
+
+        # Separate executors so STT never blocks behind TTS warm-up or LLM inference.
+        self.llm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm")
+        self.stt_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="stt")
+        self.tts_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="tts")
+
         self.last_activity = time.time()
         self.idle_timeout = self.config.get("worker", {}).get("idle_timeout", 300)
         self.lock = asyncio.Lock()
@@ -68,7 +73,6 @@ class WorkerServer:
                 writer.write(struct.pack("<I", len(resp_bytes)) + resp_bytes)
                 await writer.drain()
         except asyncio.IncompleteReadError:
-            # Client disconnected normally
             pass
         except asyncio.CancelledError:
             raise
@@ -150,7 +154,7 @@ class WorkerServer:
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
-                self.executor,
+                self.llm_executor,
                 lambda: self.engine.chat(
                     messages=chat_messages,
                     max_tokens=max_tokens,
@@ -196,7 +200,7 @@ class WorkerServer:
         try:
             loop = asyncio.get_event_loop()
             result = await loop.run_in_executor(
-                self.executor,
+                self.llm_executor,
                 lambda: self.engine.generate(
                     prompt=prompt,
                     max_tokens=max_tokens,
@@ -238,11 +242,13 @@ class WorkerServer:
 
         try:
             audio_bytes = base64.b64decode(audio_b64)
+            print(f"[worker] STT request: {len(audio_bytes)} bytes", flush=True)
             loop = asyncio.get_event_loop()
             text = await loop.run_in_executor(
-                self.executor,
+                self.stt_executor,
                 lambda: self.stt_engine.transcribe(audio_bytes, sample_rate=16000),
             )
+            print(f"[worker] STT result: '{text[:80]}...'", flush=True)
             return _make_event(
                 {
                     "type": "response",
@@ -271,9 +277,10 @@ class WorkerServer:
             )
 
         try:
+            print(f"[worker] TTS request: '{text[:60]}...'", flush=True)
             loop = asyncio.get_event_loop()
             audio_b64 = await loop.run_in_executor(
-                self.executor,
+                self.tts_executor,
                 lambda: self.tts_engine.synthesize(text, voice=voice, speed=speed),
             )
             return _make_event(
@@ -311,7 +318,7 @@ class WorkerServer:
         )
 
     async def idle_monitor(self):
-        print(f"[worker] Idle monitor started (timeout={self.idle_timeout}s)")
+        print(f"[worker] Idle monitor started (timeout={self.idle_timeout}s)", flush=True)
         while self.running:
             await asyncio.sleep(30)
             async with self.lock:
@@ -327,16 +334,16 @@ class WorkerServer:
                 )
                 all_idle = llm_idle and stt_idle and tts_idle
 
-                # Gate on "anything loaded", not "LLM specifically loaded".
                 if any_loaded and all_idle:
-                    print("[worker] Idle timeout reached. Unloading models.")
+                    print("[worker] Idle timeout reached. Unloading models.", flush=True)
                     self.engine.unload()
                     self.stt_engine.unload()
                     self.tts_engine.unload()
                 elif any_loaded:
                     print(
                         f"[worker] Idle check: loaded, llm_idle={llm_idle}, "
-                        f"stt_idle={stt_idle}, tts_idle={tts_idle}"
+                        f"stt_idle={stt_idle}, tts_idle={tts_idle}",
+                        flush=True,
                     )
 
     async def run(self):
@@ -347,16 +354,15 @@ class WorkerServer:
         server = await asyncio.start_unix_server(self.handle_client, path=self.socket_path)
         os.chmod(self.socket_path, 0o666)
 
-        print(f"[worker] Listening on {self.socket_path}")
+        print(f"[worker] Listening on {self.socket_path}", flush=True)
 
         idle_task = asyncio.create_task(self.idle_monitor())
 
-        # Warm up TTS in the background — first Kokoro load pulls in torch
-        # and may fetch a spaCy model, which can take way longer than any
-        # request timeout. Doing it now means that cost lands at MAVIS
-        # startup instead of the user's first "say".
+        # Warm up AI subsystems in the background so first requests are fast.
+        # STT model download (~500MB) can take 2-5 minutes on first run.
         loop = asyncio.get_event_loop()
-        loop.run_in_executor(self.executor, self.tts_engine.warm_up)
+        loop.run_in_executor(self.tts_executor, self.tts_engine.warm_up)
+        loop.run_in_executor(self.stt_executor, self.stt_engine.warm_up)
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
@@ -371,11 +377,14 @@ class WorkerServer:
             pass
 
     async def shutdown(self):
-        print("[worker] Shutting down...")
+        print("[worker] Shutting down...", flush=True)
         self.running = False
         self.engine.unload()
         self.stt_engine.unload()
         self.tts_engine.unload()
+        self.llm_executor.shutdown(wait=False)
+        self.stt_executor.shutdown(wait=False)
+        self.tts_executor.shutdown(wait=False)
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
 
