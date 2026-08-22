@@ -168,10 +168,17 @@ async fn main() -> Result<()> {
             let req_str = request.to_string();
             let req_bytes = req_str.as_bytes();
 
-            // Try to connect and send with 60s timeout per attempt (model load can be slow)
+            // First attempt: 300s timeout for model download on cold start.
+            // Retries: 60s for already-loaded model.
             let mut response_text: Option<String> = None;
             for attempt in 1..=5 {
-                let result = timeout(Duration::from_secs(60), async {
+                let attempt_timeout = if attempt == 1 {
+                    Duration::from_secs(300)
+                } else {
+                    Duration::from_secs(60)
+                };
+
+                let result = timeout(attempt_timeout, async {
                     let mut stream = UnixStream::connect(WORKER_SOCKET).await?;
                     let len = req_bytes.len() as u32;
                     stream.write_all(&len.to_le_bytes()).await?;
