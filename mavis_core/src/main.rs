@@ -112,7 +112,9 @@ async fn main() -> Result<()> {
 
     // STT Pipeline
     let bus_for_stt_start = Arc::clone(&bus);
-    let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default()).start(bus_for_stt_start);
+    let (speech_start_tx, mut speech_start_rx) = mpsc::channel::<()>(8);
+    let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default())
+        .start(bus_for_stt_start, Some(speech_start_tx));
     let bus_for_stt = Arc::clone(&bus);
 
     // STT mute controller — mutes mic while TTS is speaking to prevent feedback loop
@@ -132,6 +134,32 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+    });
+
+    // Parallel LLM warm-up: start loading Phi-3 the instant VAD detects speech,
+    // overlapping STT inference with LLM loading. Fire-and-forget.
+    let warmup_handle = tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::UnixStream;
+        use tokio::time::{timeout, Duration};
+
+        while speech_start_rx.recv().await.is_some() {
+            let request = serde_json::json!({
+                "type": "WorkerRequest",
+                "payload": {
+                    "request_type": "warmup",
+                }
+            });
+            let req_bytes = request.to_string().into_bytes();
+
+            let _ = timeout(Duration::from_secs(10), async {
+                let mut stream = UnixStream::connect(WORKER_SOCKET).await?;
+                stream.write_all(&(req_bytes.len() as u32).to_le_bytes()).await?;
+                stream.write_all(&req_bytes).await?;
+                stream.flush().await?;
+                Ok::<_, std::io::Error>(())
+            }).await;
         }
     });
 
@@ -402,6 +430,9 @@ async fn main() -> Result<()> {
 
     // Stop STT first so the audio thread exits cleanly
     stt_handle.stop();
+    // Explicitly drop the handle so the stream (and its speech_start_tx) are
+    // released, allowing the warmup task and utterance channel to close cleanly.
+    drop(stt_handle);
 
     // Join everything concurrently so total shutdown is capped at 5s, not 5s × N.
     let timeout = std::time::Duration::from_secs(5);
@@ -415,6 +446,7 @@ async fn main() -> Result<()> {
         tokio::time::timeout(timeout, bridge_handle),
         tokio::time::timeout(timeout, stt_task),
         tokio::time::timeout(timeout, mute_handle),
+        tokio::time::timeout(timeout, warmup_handle),
         tokio::time::timeout(timeout, orb_handle),
     );
 

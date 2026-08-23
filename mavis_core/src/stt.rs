@@ -30,15 +30,12 @@ impl Default for SttConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
-            // Increased from 800 → 1200. Allows natural thinking pauses without
-            // splitting the utterance. A 1.2s gap is still long enough to
-            // separate distinct commands.
-            silence_duration_ms: 1200,
-            min_speech_duration_ms: 500,
+            // Reduced from 1200 → 600. Ships voice to STT ~0.6s faster after speech ends.
+            silence_duration_ms: 600,
+            // Reduced from 500 → 250. Detects speech sooner, catches "MAVIS" faster.
+            min_speech_duration_ms: 250,
             frame_duration_ms: 30,
-            // Increased from 5000 → 15000. 15 seconds of active speech time
-            // covers long requests and explanations. Real-time cap is still
-            // enforced by the VAD (silence or forced end).
+            // 15 seconds of active speech time covers long requests.
             max_utterance_duration_ms: 15000,
             // 0.04 blocks keyboard clicks (~0.01) and fan noise (~0.02) while
             // allowing normal conversation at normal distance (~0.03–0.07).
@@ -66,6 +63,8 @@ struct EnergyVad {
     pub is_speaking: bool,
     max_energy_seen: f32,
     pub last_max_energy: f32,
+    /// Sample rate, used to size the 1s pre-buffer.
+    sample_rate: usize,
 }
 
 impl EnergyVad {
@@ -87,6 +86,7 @@ impl EnergyVad {
             is_speaking: false,
             max_energy_seen: 0.0,
             last_max_energy: 0.0,
+            sample_rate: cfg.sample_rate as usize,
         }
     }
 
@@ -145,8 +145,10 @@ impl EnergyVad {
                         return Some(utterance);
                     }
                 } else {
-                    // Trim buffer to prevent unbounded growth during silence
-                    while self.buffer.len() > self.silence_threshold_frames * self.frame_size {
+                    // Keep last 1s of audio as a rolling pre-buffer. When VAD
+                    // detects speech, these samples are already in the buffer so
+                    // the beginning of the utterance (e.g. "MAVIS") isn't clipped.
+                    while self.buffer.len() > self.sample_rate {
                         self.buffer.pop_front();
                     }
                     self.speech_frames = self.speech_frames.saturating_sub(1);
@@ -176,8 +178,7 @@ impl EnergyVad {
         self.silence_frames = 0;
         self.is_speaking = false;
         self.max_energy_seen = 0.0;
-        // Reset noise floor so the next utterance starts fresh. Without this,
-        // the floor accumulates across the session and eventually deafens the VAD.
+        // Reset noise floor so the next utterance starts fresh.
         self.noise_floor = 0.005;
     }
 }
@@ -257,7 +258,7 @@ impl SttManager {
         Self { config }
     }
 
-    pub fn start(self, bus: Arc<EventBus>) -> (SttHandle, mpsc::Receiver<Vec<f32>>) {
+    pub fn start(self, bus: Arc<EventBus>, speech_start_tx: Option<mpsc::Sender<()>>) -> (SttHandle, mpsc::Receiver<Vec<f32>>) {
         let running = Arc::new(AtomicBool::new(true));
         let running_stream = running.clone();
         let tts_active = Arc::new(AtomicBool::new(false));
@@ -308,6 +309,7 @@ impl SttManager {
                 let vad = vad.clone();
                 let tx = tx.clone();
                 let bus_for_ui = bus.clone();
+                let speech_start = speech_start_tx.clone();
                 device
                     .build_input_stream(
                         &stream_config.into(),
@@ -367,6 +369,11 @@ impl SttManager {
                                     payload: serde_json::json!({ "state": "thinking" }),
                                 });
                             } else if !was_speaking && now_speaking {
+                                // Fire-and-forget LLM warm-up so Phi-3 loads in parallel
+                                // while the user is still speaking.
+                                if let Some(ref sstx) = speech_start {
+                                    let _ = sstx.try_send(());
+                                }
                                 let _ = bus_for_ui.publish(Event {
                                     id: uuid::Uuid::new_v4(),
                                     timestamp: chrono::Utc::now(),
