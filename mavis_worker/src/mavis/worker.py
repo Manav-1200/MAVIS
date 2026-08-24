@@ -37,6 +37,7 @@ class WorkerServer:
             model_size="small",
             device="cpu",
             compute_type="int8",
+            confidence_threshold=0.6,
         )
         self.tts_engine = TTSEngine()
         self.config = load_config()
@@ -70,8 +71,13 @@ class WorkerServer:
                     self.last_activity = time.time()
 
                 resp_bytes = json.dumps(response).encode("utf-8")
-                writer.write(struct.pack("<I", len(resp_bytes)) + resp_bytes)
-                await writer.drain()
+                try:
+                    writer.write(struct.pack("<I", len(resp_bytes)) + resp_bytes)
+                    await writer.drain()
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                    # Client closed connection before reading response
+                    # (e.g., fire-and-forget warmup from Rust side)
+                    pass
         except asyncio.IncompleteReadError:
             pass
         except asyncio.CancelledError:
@@ -81,8 +87,11 @@ class WorkerServer:
 
             traceback.print_exc()
         finally:
-            writer.close()
-            await writer.wait_closed()
+            try:
+                writer.close()
+                await writer.wait_closed()
+            except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                pass
 
     def _extract_request(self, request: dict) -> tuple[str, dict]:
         event_type = request.get("type", "")
@@ -107,6 +116,8 @@ class WorkerServer:
             return await self._stt(payload)
         elif req_type == "tts":
             return await self._tts(payload)
+        elif req_type == "warmup":
+            return await self._warmup()
         elif req_type == "unload":
             return await self._unload()
         elif req_type == "memory":
@@ -243,10 +254,21 @@ class WorkerServer:
         try:
             audio_bytes = base64.b64decode(audio_b64)
             print(f"[worker] STT request: {len(audio_bytes)} bytes", flush=True)
+
+            # One-shot active listen override: if MAVIS_ACTIVE_LISTEN=1, bypass
+            # the confidence gate for this utterance and clear the flag.
+            active_listen = os.environ.pop("MAVIS_ACTIVE_LISTEN", None) == "1"
+            if active_listen:
+                print("[worker] Active listen override enabled for this utterance", flush=True)
+
             loop = asyncio.get_event_loop()
             text = await loop.run_in_executor(
                 self.stt_executor,
-                lambda: self.stt_engine.transcribe(audio_bytes, sample_rate=16000),
+                lambda: self.stt_engine.transcribe(
+                    audio_bytes,
+                    sample_rate=16000,
+                    bypass_confidence=active_listen,
+                ),
             )
             print(f"[worker] STT result: '{text[:80]}...'", flush=True)
             return _make_event(
@@ -297,6 +319,22 @@ class WorkerServer:
                 }
             )
 
+    async def _warmup(self) -> dict:
+        """Eagerly load the LLM so the next chat request doesn't block."""
+        print("[worker] LLM warm-up requested", flush=True)
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            self.llm_executor,
+            self.engine.warm_up,
+        )
+        print("[worker] LLM warm-up complete", flush=True)
+        return _make_event(
+            {
+                "type": "response",
+                "result": {"status": "warmed_up"},
+            }
+        )
+
     async def _unload(self) -> dict:
         self.engine.unload()
         self.stt_engine.unload()
@@ -323,26 +361,25 @@ class WorkerServer:
             await asyncio.sleep(30)
             async with self.lock:
                 now = time.time()
+                # STT model stays permanently loaded (Phase 5 latency fix).
+                # Only LLM and TTS are eligible for idle unload.
                 llm_idle = now - self.last_activity > self.idle_timeout
-                stt_idle = now - self.stt_engine.last_activity > self.idle_timeout
                 tts_idle = now - self.tts_engine.last_activity > self.idle_timeout
 
-                any_loaded = (
-                    self.engine.is_loaded
-                    or self.stt_engine.is_loaded()
-                    or self.tts_engine.is_loaded
-                )
-                all_idle = llm_idle and stt_idle and tts_idle
+                any_loaded = self.engine.is_loaded or self.tts_engine.is_loaded
+                all_idle = llm_idle and tts_idle
 
                 if any_loaded and all_idle:
-                    print("[worker] Idle timeout reached. Unloading models.", flush=True)
+                    print(
+                        "[worker] Idle timeout reached. Unloading models (STT stays resident).",
+                        flush=True,
+                    )
                     self.engine.unload()
-                    self.stt_engine.unload()
+                    # Intentionally do NOT unload STT
                     self.tts_engine.unload()
                 elif any_loaded:
                     print(
-                        f"[worker] Idle check: loaded, llm_idle={llm_idle}, "
-                        f"stt_idle={stt_idle}, tts_idle={tts_idle}",
+                        f"[worker] Idle check: loaded, llm_idle={llm_idle}, tts_idle={tts_idle}",
                         flush=True,
                     )
 

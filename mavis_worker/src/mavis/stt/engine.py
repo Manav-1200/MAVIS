@@ -29,10 +29,12 @@ class STTEngine:
         model_size: str = "base",
         device: str = "cpu",
         compute_type: str = "int8",
+        confidence_threshold: float = 0.6,
     ) -> None:
         self.model_size = model_size
         self.device = device
         self.compute_type = compute_type
+        self.confidence_threshold = confidence_threshold
         self._model: object | None = None
         self._last_activity = time.time()
 
@@ -94,16 +96,23 @@ class STTEngine:
     # ------------------------------------------------------------------ #
     # Inference
     # ------------------------------------------------------------------ #
-    def transcribe(self, audio_bytes: bytes, sample_rate: int = 16000) -> str:
+    def transcribe(
+        self,
+        audio_bytes: bytes,
+        sample_rate: int = 16000,
+        bypass_confidence: bool = False,
+    ) -> str:
         """
         Transcribe raw PCM audio (float32, mono, 16 kHz).
 
         Args:
             audio_bytes: Raw float32 little-endian PCM.
             sample_rate: Expected sample rate (must match audio data).
+            bypass_confidence: If True, skip the confidence gate (active listen).
 
         Returns:
-            Transcribed text, stripped and normalized.
+            Transcribed text, stripped and normalized. Empty string if confidence
+            is below threshold or no speech is detected.
         """
         self._load()
         self._last_activity = time.time()
@@ -136,16 +145,44 @@ class STTEngine:
             vad_filter=False,  # Rust VAD already segmented; don't double-filter
         )
 
-        raw_text = " ".join(seg.text for seg in segments).strip()
+        # Consume generator so we can inspect per-segment confidence
+        segments = list(segments)
+
+        segment_confidences = []
+        raw_parts = []
+        for seg in segments:
+            raw_parts.append(seg.text)
+            # avg_logprob is (-inf, 0]. Map to [0, 1] via exp.
+            conf = float(np.exp(seg.avg_logprob)) if hasattr(seg, "avg_logprob") else 1.0
+            segment_confidences.append(conf)
+
+        avg_confidence = float(np.mean(segment_confidences)) if segment_confidences else 0.0
+
+        raw_text = " ".join(raw_parts).strip()
         text = self._deduplicate_repetition(raw_text)
+
+        # Confidence gate: drop ambient noise / hallucinations
+        if not bypass_confidence and avg_confidence < self.confidence_threshold:
+            logger.info(
+                "STT: low confidence, dropping (avg=%.3f < %.3f)",
+                avg_confidence,
+                self.confidence_threshold,
+            )
+            print(
+                f"[stt] Low confidence ({avg_confidence:.3f} < {self.confidence_threshold}), "
+                "dropping utterance",
+                flush=True,
+            )
+            return ""
 
         if text != raw_text:
             logger.info("STT dedup: '%s' -> '%s'", raw_text[:80], text[:80])
 
         logger.info(
-            "Transcribed (%s, prob=%.2f): %s",
+            "Transcribed (%s, prob=%.2f, conf=%.2f): %s",
             info.language,
             info.language_probability,
+            avg_confidence,
             text[:120],
         )
         return text

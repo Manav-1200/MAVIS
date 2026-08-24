@@ -5,6 +5,8 @@
 //   - Audio playback: pw-play > paplay > aplay (PipeWire-first for Arch)
 //   - Piper model + .onnx.json validated before synthesis
 //   - Kokoro WAV bytes and Piper WAV file both route through unified play_audio()
+// CHANGELOG 2026-08-23:
+//   - Default TTS to Piper. Kokoro opt-in via MAVIS_TTS_ENGINE=kokoro.
 
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
@@ -275,9 +277,12 @@ impl Executor {
 
         self.emit_ui_state("speaking").await;
 
+        // Default to Piper. Set MAVIS_TTS_ENGINE=kokoro to opt-in.
+        // Kokoro requires significant VRAM; on 6GB GPUs it collides with Phi-3
+        // and can poison the CUDA context, causing llama.cpp to hard-crash.
         let use_kokoro = std::env::var("MAVIS_TTS_ENGINE")
-            .map(|v| !v.eq_ignore_ascii_case("piper"))
-            .unwrap_or(true);
+            .map(|v| v.eq_ignore_ascii_case("kokoro"))
+            .unwrap_or(false);
 
         let result = if use_kokoro {
             match self.run_kokoro_via_worker(text).await {
