@@ -1,6 +1,7 @@
 // mavis_core/src/ui/orb.rs
 // Living Orb UI. Small (80×80), borderless, transparent, draggable.
 // Renders a soft pulsing circle that reacts to OrbState.
+// Phase 5: Celebrating state added. Clean glowing sphere — no lettermark.
 
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 use std::sync::mpsc::{channel, Sender};
@@ -53,17 +54,15 @@ impl Orb {
             let mut drag_anchor: (f32, f32) = (0.0, 0.0);
 
             while window.is_open() && !window.is_key_down(Key::Escape) {
-                // Poll state updates from the async runtime
                 while let Ok(s) = state_rx.try_recv() {
                     current_state = s;
                 }
 
-                // Graceful shutdown signal
                 if shutdown_rx.try_recv().is_ok() {
                     break;
                 }
 
-                // --- Drag-to-move ---
+                // Drag-to-move
                 let mouse_down = window.get_mouse_down(MouseButton::Left);
                 let mouse_pos = window.get_mouse_pos(MouseMode::Clamp).unwrap_or((0.0, 0.0));
 
@@ -77,19 +76,15 @@ impl Orb {
 
                 if is_dragging {
                     let win_pos = window.get_position();
-                    // cursor_screen = window_pos + mouse_rel
                     let cursor_screen_x = win_pos.0 as f32 + mouse_pos.0;
                     let cursor_screen_y = win_pos.1 as f32 + mouse_pos.1;
-
                     let new_x = (cursor_screen_x - drag_anchor.0) as isize;
                     let new_y = (cursor_screen_y - drag_anchor.1) as isize;
-
                     if (new_x, new_y) != win_pos {
                         window.set_position(new_x, new_y);
                     }
                 }
 
-                // --- Render ---
                 let elapsed = start.elapsed().as_secs_f32();
                 render_orb(&mut buffer, elapsed, current_state);
 
@@ -117,9 +112,7 @@ impl Orb {
     }
 }
 
-/// Render a soft circular orb into an ARGB buffer.
 fn render_orb(buffer: &mut [u32], time: f32, state: OrbState) {
-    // Clear to fully transparent
     for p in buffer.iter_mut() {
         *p = 0x00000000;
     }
@@ -136,6 +129,7 @@ fn render_orb(buffer: &mut [u32], time: f32, state: OrbState) {
         OrbState::Working => 1.0 + 0.08 * (time * 2.5).sin(),
         OrbState::Error => 1.0 + 0.20 * (time * 6.0).sin(),
         OrbState::Asleep => 1.0 + 0.02 * (time * 0.8).sin(),
+        OrbState::Celebrating => 1.0 + 0.18 * (time * 6.0).sin(),
     };
 
     let radius = base_radius * pulse;
@@ -148,6 +142,7 @@ fn render_orb(buffer: &mut [u32], time: f32, state: OrbState) {
         OrbState::Working => (200, 100, 255),
         OrbState::Error => (255, 50, 50),
         OrbState::Asleep => (80, 80, 120),
+        OrbState::Celebrating => (255, 215, 0), // warm gold
     };
 
     for y in 0..ORB_SIZE {
