@@ -1,29 +1,34 @@
 // mavis_core/src/executor.rs
 // Executes plans: shell commands, app launching, notifications, TTS.
-// Listens for PlanReady, emits ActionComplete + UiStateChange.
-// CHANGELOG 2026-08-21:
-//   - Audio playback: pw-play > paplay > aplay (PipeWire-first for Arch)
-//   - Piper model + .onnx.json validated before synthesis
-//   - Kokoro WAV bytes and Piper WAV file both route through unified play_audio()
-// CHANGELOG 2026-08-23:
-//   - Default TTS to Piper. Kokoro opt-in via MAVIS_TTS_ENGINE=kokoro.
+// Listens for PlanReady + TtsInterrupt, emits ActionComplete + UiStateChange.
+//
+// CHANGELOG 2026-08-25 (Phase 5):
+//   - TTS queue: non-blocking say() with sequential playback
+//   - TTS interruption: kill current playback + drain queue on TtsInterrupt
+//   - Audio playback refactored to spawn() + wait() so we can kill the child
+//   - fallback_say now blocks until process exits
+//   - execute_plan skips final idle emit if TTS was queued (queue handles it)
 
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::mpsc;
 
 pub struct Executor {
     bus: Arc<EventBus>,
+    tts_queue: TtsQueue,
 }
 
 impl Executor {
-    pub fn new(bus: Arc<EventBus>) -> Self {
-        Self { bus }
+    pub fn new(bus: Arc<EventBus>, tts_active: Arc<AtomicBool>) -> Self {
+        let tts_queue = TtsQueue::new(bus.clone(), tts_active);
+        Self { bus, tts_queue }
     }
 
     pub async fn run(&mut self) {
@@ -46,13 +51,15 @@ impl Executor {
     }
 
     async fn handle_event(&self, event: Event) -> Result<()> {
-        if event.event_type == EventType::PlanReady {
-            if let Err(e) = self.execute_plan(event).await {
-                warn!("Executor: plan execution failed: {}", e);
-                self.emit_ui_state("error").await;
+        match event.event_type {
+            EventType::PlanReady => self.execute_plan(event).await,
+            EventType::TtsInterrupt => {
+                info!("Executor: TTS interrupt received — draining queue");
+                self.tts_queue.interrupt().await;
+                Ok(())
             }
+            _ => Ok(()),
         }
-        Ok(())
     }
 
     async fn execute_plan(&self, event: Event) -> Result<()> {
@@ -69,6 +76,8 @@ impl Executor {
 
         info!("Executor: executing plan with {} action(s)", actions.len());
 
+        let mut tts_queued = false;
+
         for (idx, action) in actions.iter().enumerate() {
             let action_type = action.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
             let description = action.get("description").and_then(|v| v.as_str()).unwrap_or("");
@@ -79,7 +88,12 @@ impl Executor {
                 if description.is_empty() { "(no description)" } else { description }
             );
 
-            let result = self.execute_action(action).await;
+            let result = if action_type == "say" {
+                tts_queued = true;
+                self.run_say(action).await
+            } else {
+                self.execute_action(action).await
+            };
 
             let success = result.is_ok();
             let output = result.as_ref().ok().cloned().unwrap_or_default();
@@ -89,7 +103,6 @@ impl Executor {
                 error!("Executor: action {} failed: {}", idx, error_msg);
             }
 
-            // Emit ActionComplete so ContextEngine persists it and clears state
             let completion_event = Event {
                 id: uuid::Uuid::new_v4(),
                 timestamp: chrono::Utc::now(),
@@ -108,12 +121,18 @@ impl Executor {
 
             if !success {
                 self.emit_ui_state("error").await;
-                // Stop plan execution on first failure (safer default)
+                // Drain any queued TTS so the user doesn't hear stale audio
+                self.tts_queue.interrupt().await;
                 return Ok(());
             }
         }
 
-        self.emit_ui_state("idle").await;
+        // Only emit idle here if no TTS was queued.
+        // If TTS was queued, the queue emits idle when it finishes.
+        if !tts_queued {
+            self.emit_ui_state("idle").await;
+        }
+
         Ok(())
     }
 
@@ -125,7 +144,6 @@ impl Executor {
             if let Some(actions) = obj.get("actions").and_then(|v| v.as_array()) {
                 return actions.clone();
             }
-            // Single action object
             return vec![plan.clone()];
         }
         Vec::new()
@@ -164,7 +182,7 @@ impl Executor {
                     .get("text")
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| anyhow::anyhow!("say action missing 'text'"))?;
-                self.run_say(text).await
+                self.run_say_text(text).await
             }
             "system" => {
                 let op = action.get("op").and_then(|v| v.as_str()).unwrap_or("unknown");
@@ -226,7 +244,6 @@ impl Executor {
                 Ok(format!("Launched {} (pid: {})", target, pid))
             }
             Err(direct_err) => {
-                // Fallback to xdg-open for URLs, files, or unknown binaries
                 let looks_like_url = target.contains("://");
                 let looks_like_path = target.starts_with('/') || target.starts_with('~');
                 if looks_like_url || looks_like_path {
@@ -270,176 +287,19 @@ impl Executor {
         Ok(format!("Notification: {} — {}", title, message))
     }
 
-    // Blocks until playback finishes and emits speaking/idle around it —
-    // that's what lets main.rs mute the mic while MAVIS talks.
-    async fn run_say(&self, text: &str) -> Result<String> {
-        info!("Executor: say: {}", text);
-
-        self.emit_ui_state("speaking").await;
-
-        // Default to Piper. Set MAVIS_TTS_ENGINE=kokoro to opt-in.
-        // Kokoro requires significant VRAM; on 6GB GPUs it collides with Phi-3
-        // and can poison the CUDA context, causing llama.cpp to hard-crash.
-        let use_kokoro = std::env::var("MAVIS_TTS_ENGINE")
-            .map(|v| v.eq_ignore_ascii_case("kokoro"))
-            .unwrap_or(false);
-
-        let result = if use_kokoro {
-            match self.run_kokoro_via_worker(text).await {
-                Ok(msg) => Ok(msg),
-                Err(e) => {
-                    warn!("Kokoro TTS failed ({}); falling back to Piper", e);
-                    self.run_piper_or_fallback(text).await
-                }
-            }
-        } else {
-            self.run_piper_or_fallback(text).await
-        };
-
-        // Only transition to idle on success; let execute_plan emit error state
-        // on failure so the orb doesn't flicker idle → error.
-        match &result {
-            Ok(_) => self.emit_ui_state("idle").await,
-            Err(_) => {} // execute_plan will emit "error"
-        }
-
-        result
+    /// Queue text for TTS playback. Non-blocking — returns immediately.
+    async fn run_say(&self, action: &serde_json::Value) -> Result<String> {
+        let text = action
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("say action missing 'text'"))?;
+        self.run_say_text(text).await
     }
 
-    async fn run_kokoro_via_worker(&self, text: &str) -> Result<String> {
-        let wav_bytes = self.synthesize_via_worker(text).await?;
-        play_audio_bytes(&wav_bytes).await?;
-        Ok(format!("TTS (Kokoro): {}", text))
-    }
-
-    async fn synthesize_via_worker(&self, text: &str) -> Result<Vec<u8>> {
-        use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::UnixStream;
-        use tokio::time::{timeout, Duration};
-
-        const WORKER_SOCKET: &str = "/tmp/mavis_worker.sock";
-        let voice = std::env::var("MAVIS_KOKORO_VOICE").unwrap_or_else(|_| "af_heart".to_string());
-
-        let request = serde_json::json!({
-            "type": "WorkerRequest",
-            "payload": {
-                "request_type": "tts",
-                "text": text,
-                "voice": voice,
-            }
-        });
-        let req_str = request.to_string();
-        let req_bytes = req_str.as_bytes();
-
-        let response_str = timeout(Duration::from_secs(20), async {
-            let mut stream = UnixStream::connect(WORKER_SOCKET).await?;
-            stream.write_all(&(req_bytes.len() as u32).to_le_bytes()).await?;
-            stream.write_all(req_bytes).await?;
-            stream.flush().await?;
-
-            let mut len_buf = [0u8; 4];
-            stream.read_exact(&mut len_buf).await?;
-            let resp_len = u32::from_le_bytes(len_buf) as usize;
-            let mut resp_buf = vec![0u8; resp_len];
-            stream.read_exact(&mut resp_buf).await?;
-            Ok::<_, std::io::Error>(String::from_utf8_lossy(&resp_buf).to_string())
-        })
-        .await
-        .map_err(|_| anyhow::anyhow!("TTS worker request timed out"))??;
-
-        let resp_json: serde_json::Value = serde_json::from_str(&response_str)?;
-
-        if let Some(err) = resp_json.get("payload").and_then(|p| p.get("error")) {
-            anyhow::bail!("worker TTS error: {}", err);
-        }
-
-        let audio_b64 = resp_json
-            .get("payload")
-            .and_then(|p| p.get("result"))
-            .and_then(|r| r.get("audio"))
-            .and_then(|a| a.as_str())
-            .ok_or_else(|| anyhow::anyhow!("worker TTS response missing audio field"))?;
-
-        B64.decode(audio_b64)
-            .map_err(|e| anyhow::anyhow!("failed to decode TTS audio: {}", e))
-    }
-
-    async fn run_piper_or_fallback(&self, text: &str) -> Result<String> {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let voice_model = std::env::var("MAVIS_VOICE_MODEL")
-            .unwrap_or_else(|_| format!("{}/.local/share/piper-voices/en_US-lessac-medium.onnx", home));
-
-        let model_path = Path::new(&voice_model);
-        let json_path = model_path.with_extension("onnx.json");
-
-        if !model_path.exists() {
-            warn!("Piper model missing: {:?}", model_path);
-            return self.fallback_say(text).await;
-        }
-        if !json_path.exists() {
-            warn!("Piper config missing: {:?}", json_path);
-            return self.fallback_say(text).await;
-        }
-
-        self.run_piper_blocking(text, &voice_model).await
-    }
-
-    async fn run_piper_blocking(&self, text: &str, voice_model: &str) -> Result<String> {
-        let wav_path = std::env::temp_dir().join("mavis_tts_piper.wav");
-
-        let mut child = Command::new("piper")
-            .args(&[
-                "--model", voice_model,
-                "--output_file", wav_path.to_str().unwrap_or("/tmp/mavis_tts_piper.wav"),
-                "--length-scale", "1.15",
-                "--sentence-silence", "0.25",
-            ])
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to spawn piper: {}", e))?;
-
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(text.as_bytes())
-                .await
-                .map_err(|e| anyhow::anyhow!("failed to write to piper stdin: {}", e))?;
-        }
-
-        let output = child
-            .wait_with_output()
-            .await
-            .map_err(|e| anyhow::anyhow!("piper process error: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("piper synthesis failed: {}", stderr));
-        }
-
-        if !wav_path.exists() {
-            return Err(anyhow::anyhow!("Piper did not produce an output WAV file"));
-        }
-
-        play_audio_file(&wav_path).await?;
-        Ok(format!("TTS (Piper): {}", text))
-    }
-
-    async fn fallback_say(&self, text: &str) -> Result<String> {
-        for tts in ["spd-say", "espeak"] {
-            let mut cmd = Command::new(tts);
-            cmd.arg(text);
-            cmd.stdin(std::process::Stdio::null());
-            cmd.stdout(std::process::Stdio::null());
-            cmd.stderr(std::process::Stdio::null());
-            if let Ok(child) = cmd.spawn() {
-                let pid = child.id().map_or("?".to_string(), |p| p.to_string());
-                return Ok(format!("TTS via {} (pid: {}): {}", tts, pid, text));
-            }
-        }
-        info!("Executor: no TTS binary found, logging only");
-        Ok(format!("(say) {}", text))
+    async fn run_say_text(&self, text: &str) -> Result<String> {
+        info!("Executor: queue TTS: {}", text);
+        self.tts_queue.say(text);
+        Ok(format!("Queued TTS: {}", text))
     }
 
     async fn emit_ui_state(&self, state: &str) {
@@ -455,11 +315,208 @@ impl Executor {
 }
 
 // ---------------------------------------------------------------------
-// Unified audio playback — PipeWire-native first.
+// TTS Queue — sequential playback with interruption support
 // ---------------------------------------------------------------------
 
-/// Play a WAV file, trying pw-play → paplay → aplay.
-async fn play_audio_file(path: &Path) -> Result<()> {
+struct TtsQueue {
+    queue_tx: mpsc::UnboundedSender<String>,
+    kill_tx: mpsc::Sender<()>,
+    /// PID of the currently playing audio process. 0 = none.
+    current_pid: Arc<AtomicU32>,
+}
+
+impl TtsQueue {
+    fn new(bus: Arc<EventBus>, tts_active: Arc<AtomicBool>) -> Self {
+        let (queue_tx, mut queue_rx) = mpsc::unbounded_channel::<String>();
+        let (kill_tx, mut kill_rx) = mpsc::channel::<()>(1);
+        let current_pid = Arc::new(AtomicU32::new(0));
+        let pid_for_task = current_pid.clone();
+        let bus_clone = bus.clone();
+        let tts_active_clone = tts_active.clone();
+
+        tokio::spawn(async move {
+            while let Some(text) = queue_rx.recv().await {
+                // Drain stale kill signals so they don't kill the next utterance
+                while kill_rx.try_recv().is_ok() {}
+
+                tts_active_clone.store(true, Ordering::SeqCst);
+                Self::emit_state(&bus_clone, "speaking").await;
+
+                let interrupted = Self::play_text(&text, &pid_for_task, &mut kill_rx).await;
+
+                if interrupted {
+                    // Kill signal arrived during playback — drain remaining queue
+                    while queue_rx.try_recv().is_ok() {}
+                    tts_active_clone.store(false, Ordering::SeqCst);
+                    Self::emit_state(&bus_clone, "idle").await;
+                    continue;
+                }
+
+                // Normal completion. If queue is empty, go idle.
+                // (A brief idle→speaking flicker is acceptable if another item
+                //  was queued during playback; the next loop iteration handles it.)
+                tts_active_clone.store(false, Ordering::SeqCst);
+                Self::emit_state(&bus_clone, "idle").await;
+            }
+
+            // Channel closed — ensure mic is unmuted
+            tts_active_clone.store(false, Ordering::SeqCst);
+            Self::emit_state(&bus_clone, "idle").await;
+        });
+
+        Self {
+            queue_tx,
+            kill_tx,
+            current_pid,
+        }
+    }
+
+    /// Queue text for playback. Returns immediately.
+    fn say(&self, text: &str) {
+        let _ = self.queue_tx.send(text.to_string());
+    }
+
+    /// Interrupt current playback and drain the queue.
+    async fn interrupt(&self) {
+        // Kill the OS process directly by PID
+        let pid = self.current_pid.load(Ordering::SeqCst);
+        if pid != 0 {
+            let _ = Command::new("kill")
+                .arg("-15")
+                .arg(pid.to_string())
+                .output()
+                .await;
+        }
+        // Also signal the queue task to drain
+        let _ = self.kill_tx.try_send(());
+    }
+
+    /// Synthesize + play text. Returns true if interrupted, false if completed.
+    async fn play_text(
+        text: &str,
+        current_pid: &Arc<AtomicU32>,
+        kill_rx: &mut mpsc::Receiver<()>,
+    ) -> bool {
+        let use_kokoro = std::env::var("MAVIS_TTS_ENGINE")
+            .map(|v| v.eq_ignore_ascii_case("kokoro"))
+            .unwrap_or(false);
+
+        let result = if use_kokoro {
+            Self::play_kokoro(text, current_pid, kill_rx).await
+        } else {
+            Self::play_piper(text, current_pid, kill_rx).await
+        };
+
+        match result {
+            Ok(interrupted) => interrupted,
+            Err(e) => {
+                warn!("TTS playback error: {}", e);
+                false
+            }
+        }
+    }
+
+    async fn play_kokoro(
+        text: &str,
+        current_pid: &Arc<AtomicU32>,
+        kill_rx: &mut mpsc::Receiver<()>,
+    ) -> Result<bool> {
+        let wav_path = match synthesize_via_worker(text).await {
+            Ok(bytes) => {
+                let path = std::env::temp_dir().join("mavis_tts_kokoro.wav");
+                tokio::fs::write(&path, &bytes).await?;
+                path
+            }
+            Err(e) => {
+                warn!("Kokoro synthesis failed ({}), falling back to Piper", e);
+                return Self::play_piper(text, current_pid, kill_rx).await;
+            }
+        };
+
+        let mut child = spawn_audio_player(&wav_path).await?;
+        if let Some(pid) = child.id() {
+            current_pid.store(pid, Ordering::SeqCst);
+        }
+
+        let interrupted = tokio::select! {
+            result = child.wait() => {
+                if let Err(e) = result {
+                    warn!("Audio playback error: {}", e);
+                }
+                false
+            }
+            _ = kill_rx.recv() => {
+                let _ = child.kill().await;
+                true
+            }
+        };
+
+        current_pid.store(0, Ordering::SeqCst);
+        let _ = tokio::fs::remove_file(&wav_path).await;
+        Ok(interrupted)
+    }
+
+    async fn play_piper(
+        text: &str,
+        current_pid: &Arc<AtomicU32>,
+        kill_rx: &mut mpsc::Receiver<()>,
+    ) -> Result<bool> {
+        let home = std::env::var("HOME").unwrap_or_default();
+        let voice_model = std::env::var("MAVIS_VOICE_MODEL")
+            .unwrap_or_else(|_| format!("{}/.local/share/piper-voices/en_US-lessac-medium.onnx", home));
+        let model_path = Path::new(&voice_model);
+        let json_path = model_path.with_extension("onnx.json");
+
+        if !model_path.exists() || !json_path.exists() {
+            fallback_say_blocking(text).await?;
+            return Ok(false);
+        }
+
+        let wav_path = std::env::temp_dir().join("mavis_tts_piper.wav");
+        run_piper_to_file(text, &voice_model, &wav_path).await?;
+
+        let mut child = spawn_audio_player(&wav_path).await?;
+        if let Some(pid) = child.id() {
+            current_pid.store(pid, Ordering::SeqCst);
+        }
+
+        let interrupted = tokio::select! {
+            result = child.wait() => {
+                if let Err(e) = result {
+                    warn!("Audio playback error: {}", e);
+                }
+                false
+            }
+            _ = kill_rx.recv() => {
+                let _ = child.kill().await;
+                true
+            }
+        };
+
+        current_pid.store(0, Ordering::SeqCst);
+        let _ = tokio::fs::remove_file(&wav_path).await;
+        Ok(interrupted)
+    }
+
+    async fn emit_state(bus: &Arc<EventBus>, state: &str) {
+        let event = Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "executor".to_string(),
+            event_type: EventType::UiStateChange,
+            payload: serde_json::json!({ "state": state }),
+        };
+        let _ = bus.publish(event);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Audio helpers
+// ---------------------------------------------------------------------
+
+/// Spawn the first available audio player backend. Returns the Child handle
+/// so the caller can wait() or kill() it.
+async fn spawn_audio_player(path: &Path) -> Result<tokio::process::Child> {
     if !path.exists() {
         return Err(anyhow::anyhow!("WAV file does not exist: {:?}", path));
     }
@@ -472,14 +529,10 @@ async fn play_audio_file(path: &Path) -> Result<()> {
 
     for (cmd, args) in backends {
         debug!("Trying audio backend: {}", cmd);
-        match Command::new(cmd).args(&args).output().await {
-            Ok(output) if output.status.success() => {
-                info!("Audio playback succeeded via {}", cmd);
-                return Ok(());
-            }
-            Ok(output) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                warn!("{} playback failed (exit {}): {}", cmd, output.status, stderr.trim());
+        match Command::new(cmd).args(&args).spawn() {
+            Ok(child) => {
+                info!("Audio playback spawned via {} (pid={:?})", cmd, child.id());
+                return Ok(child);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 debug!("{} not found in PATH, skipping", cmd);
@@ -496,57 +549,124 @@ async fn play_audio_file(path: &Path) -> Result<()> {
     ))
 }
 
-/// Write audio bytes to a temp file and play.
-/// Validates WAV header; if missing, falls back to raw-PCM via aplay.
-async fn play_audio_bytes(data: &[u8]) -> Result<()> {
-    if data.is_empty() {
-        return Err(anyhow::anyhow!("TTS returned empty audio bytes"));
+/// Run piper synthesis to a WAV file (no playback).
+async fn run_piper_to_file(text: &str, voice_model: &str, wav_path: &Path) -> Result<()> {
+    let mut child = Command::new("piper")
+        .args(&[
+            "--model",
+            voice_model,
+            "--output_file",
+            wav_path.to_str().unwrap_or("/tmp/mavis_tts_piper.wav"),
+            "--length-scale",
+            "1.15",
+            "--sentence-silence",
+            "0.25",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("failed to spawn piper: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .await
+            .map_err(|e| anyhow::anyhow!("failed to write to piper stdin: {}", e))?;
     }
 
-    let is_wav = data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WAVE";
-
-    let temp_path = if is_wav {
-        std::env::temp_dir().join("mavis_tts_kokoro.wav")
-    } else {
-        std::env::temp_dir().join("mavis_tts_kokoro.raw")
-    };
-
-    tokio::fs::write(&temp_path, data)
+    let output = child
+        .wait_with_output()
         .await
-        .map_err(|e| anyhow::anyhow!("failed to write temp audio file: {}", e))?;
+        .map_err(|e| anyhow::anyhow!("piper process error: {}", e))?;
 
-    let result = if is_wav {
-        play_audio_file(&temp_path).await
-    } else {
-        // Raw PCM fallback — Kokoro at 24 kHz mono float32, but aplay can't do float32.
-        warn!("TTS audio lacks WAV header — falling back to raw PCM playback");
-        let output = Command::new("aplay")
-            .args(&[
-                "-f", "S16_LE",   // best guess; may be wrong format
-                "-r", "24000",    // Kokoro sample rate
-                "-c", "1",        // mono
-                temp_path.to_str().unwrap_or("/tmp/mavis_tts_kokoro.raw"),
-            ])
-            .output()
-            .await;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(anyhow::anyhow!("piper synthesis failed: {}", stderr));
+    }
 
-        match output {
-            Ok(o) if o.status.success() => {
-                info!("Raw PCM playback succeeded via aplay (fallback)");
-                Ok(())
-            }
-            Ok(o) => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
-                Err(anyhow::anyhow!("aplay raw PCM failed: {}", stderr.trim()))
-            }
-            Err(e) => Err(anyhow::anyhow!("aplay spawn error: {}", e)),
+    if !wav_path.exists() {
+        return Err(anyhow::anyhow!("Piper did not produce an output WAV file"));
+    }
+
+    Ok(())
+}
+
+/// Fallback TTS via spd-say or espeak. Blocks until the process exits.
+async fn fallback_say_blocking(text: &str) -> Result<()> {
+    for tts in ["spd-say", "espeak"] {
+        let mut child = Command::new(tts)
+            .arg(text)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("failed to spawn {}: {}", tts, e))?;
+
+        let _ = child
+            .wait()
+            .await
+            .map_err(|e| anyhow::anyhow!("{} wait error: {}", tts, e))?;
+
+        info!("TTS via {}: {}", tts, text);
+        return Ok(());
+    }
+    info!("Executor: no TTS binary found, logging only: {}", text);
+    Ok(())
+}
+
+/// Synthesize text via the Python worker (Kokoro). Returns raw WAV bytes.
+async fn synthesize_via_worker(text: &str) -> Result<Vec<u8>> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixStream;
+    use tokio::time::{timeout, Duration};
+
+    const WORKER_SOCKET: &str = "/tmp/mavis_worker.sock";
+    let voice = std::env::var("MAVIS_KOKORO_VOICE").unwrap_or_else(|_| "af_heart".to_string());
+
+    let request = serde_json::json!({
+        "type": "WorkerRequest",
+        "payload": {
+            "request_type": "tts",
+            "text": text,
+            "voice": voice,
         }
-    };
+    });
+    let req_str = request.to_string();
+    let req_bytes = req_str.as_bytes();
 
-    // Best-effort cleanup — don't fail playback if unlink fails
-    let _ = tokio::fs::remove_file(&temp_path).await;
+    let response_str = timeout(Duration::from_secs(20), async {
+        let mut stream = UnixStream::connect(WORKER_SOCKET).await?;
+        stream.write_all(&(req_bytes.len() as u32).to_le_bytes()).await?;
+        stream.write_all(req_bytes).await?;
+        stream.flush().await?;
 
-    result
+        let mut len_buf = [0u8; 4];
+        stream.read_exact(&mut len_buf).await?;
+        let resp_len = u32::from_le_bytes(len_buf) as usize;
+        let mut resp_buf = vec![0u8; resp_len];
+        stream.read_exact(&mut resp_buf).await?;
+        Ok::<_, std::io::Error>(String::from_utf8_lossy(&resp_buf).to_string())
+    })
+    .await
+    .map_err(|_| anyhow::anyhow!("TTS worker request timed out"))??;
+
+    let resp_json: serde_json::Value = serde_json::from_str(&response_str)?;
+
+    if let Some(err) = resp_json.get("payload").and_then(|p| p.get("error")) {
+        anyhow::bail!("worker TTS error: {}", err);
+    }
+
+    let audio_b64 = resp_json
+        .get("payload")
+        .and_then(|p| p.get("result"))
+        .and_then(|r| r.get("audio"))
+        .and_then(|a| a.as_str())
+        .ok_or_else(|| anyhow::anyhow!("worker TTS response missing audio field"))?;
+
+    B64.decode(audio_b64)
+        .map_err(|e| anyhow::anyhow!("failed to decode TTS audio: {}", e))
 }
 
 #[cfg(test)]
