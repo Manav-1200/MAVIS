@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use log::{info, warn};
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -34,14 +34,19 @@ async fn main() -> Result<()> {
     let bus = Arc::new(EventBus::new());
     let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
-    // Platform layer — Linux / Windows / macOS abstraction
+    // Shared TTS state — true while MAVIS is speaking. Mic is muted when true.
+    let tts_active = Arc::new(AtomicBool::new(false));
+
+    // Platform layer
     let platform = Arc::new(platform::Platform::detect().build_provider());
     info!("Platform: initialized");
 
     // Memory Manager — shared between ContextEngine and Planner
     let data_dir = std::path::Path::new("../memory");
     let memory = memory::manager::MemoryManager::new(data_dir)?;
+    let memory_for_shutdown = memory.clone();
     let working_memory = memory.working.clone();
+    info!("Memory: initialized (working events={})", memory.working.read().await.events.len());
 
     // Context Engine
     let bus_pub = Arc::clone(&bus);
@@ -73,9 +78,10 @@ async fn main() -> Result<()> {
         planner.run().await;
     });
 
-    // Executor
+    // Executor — now owns the TTS queue and receives tts_active
     let bus_clone = Arc::clone(&bus);
-    let mut executor = executor::Executor::new(bus_clone);
+    let tts_active_for_exec = tts_active.clone();
+    let mut executor = executor::Executor::new(bus_clone, tts_active_for_exec);
     let exec_handle = tokio::spawn(async move {
         executor.run().await;
     });
@@ -116,9 +122,12 @@ async fn main() -> Result<()> {
     let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default())
         .start(bus_for_stt_start, Some(speech_start_tx));
     let bus_for_stt = Arc::clone(&bus);
+    let _tts_active_stream = tts_active.clone();
 
-    // STT mute controller — mutes mic while TTS is speaking to prevent feedback loop
-    let tts_active_clone = stt_handle.tts_active.clone();
+    // STT mute controller — mutes mic while TTS is speaking.
+    // Phase 5 fix: only unmute on idle/error. working/thinking/listening
+    // no longer force-unmute, preventing overlap with queued TTS.
+    let tts_active_for_mute = tts_active.clone();
     let bus_for_mute = Arc::clone(&bus);
     let mute_handle = tokio::spawn(async move {
         let mut rx = bus_for_mute.subscribe();
@@ -126,10 +135,12 @@ async fn main() -> Result<()> {
             if let EventType::UiStateChange = event.event_type {
                 if let Some(state) = event.payload.get("state").and_then(|v| v.as_str()) {
                     match state {
-                        "speaking" => tts_active_clone.store(true, Ordering::SeqCst),
-                        "idle" | "error" | "listening" | "thinking" | "working" => {
-                            tts_active_clone.store(false, Ordering::SeqCst);
+                        "speaking" => tts_active_for_mute.store(true, Ordering::SeqCst),
+                        "idle" | "error" => {
+                            tts_active_for_mute.store(false, Ordering::SeqCst);
                         }
+                        // listening | thinking | working — do NOT touch tts_active.
+                        // The TTS queue owns the true state; these are visual-only.
                         _ => {}
                     }
                 }
@@ -137,8 +148,29 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Parallel LLM warm-up: start loading Phi-3 the instant VAD detects speech,
-    // overlapping STT inference with LLM loading. Fire-and-forget.
+    // Intent router — if user speaks during TTS, interrupt playback immediately.
+    let tts_active_for_router = tts_active.clone();
+    let bus_for_router = Arc::clone(&bus);
+    let router_handle = tokio::spawn(async move {
+        let mut rx = bus_for_router.subscribe();
+        while let Ok(event) = rx.recv().await {
+            if event.event_type == EventType::UserIntent {
+                if tts_active_for_router.load(Ordering::SeqCst) {
+                    info!("IntentRouter: user spoke during TTS — interrupting");
+                    let _ = bus_for_router.publish(Event {
+                        id: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now(),
+                        source: "intent_router".to_string(),
+                        event_type: EventType::TtsInterrupt,
+                        payload: serde_json::json!({}),
+                    });
+                    tts_active_for_router.store(false, Ordering::SeqCst);
+                }
+            }
+        }
+    });
+
+    // Parallel LLM warm-up
     let warmup_handle = tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         use tokio::net::UnixStream;
@@ -170,7 +202,6 @@ async fn main() -> Result<()> {
         use tokio::time::{sleep, timeout, Duration};
 
         while let Some(audio) = utterance_rx.recv().await {
-            // Wait for worker socket to exist (up to 30s)
             let socket_ready = timeout(Duration::from_secs(30), async {
                 while !std::path::Path::new(WORKER_SOCKET).exists() {
                     info!("STT: waiting for worker socket...");
@@ -196,8 +227,6 @@ async fn main() -> Result<()> {
             let req_str = request.to_string();
             let req_bytes = req_str.as_bytes();
 
-            // First attempt: 300s timeout for model download on cold start.
-            // Retries: 60s for already-loaded model.
             let mut response_text: Option<String> = None;
             for attempt in 1..=5 {
                 let attempt_timeout = if attempt == 1 {
@@ -247,7 +276,7 @@ async fn main() -> Result<()> {
                         sleep(Duration::from_millis(500)).await;
                     }
                     Err(_) => {
-                        warn!("STT: timeout (attempt {}/5) — model may still be loading", attempt);
+                        warn!("STT: timeout (attempt {}/5)", attempt);
                         sleep(Duration::from_millis(500)).await;
                     }
                 }
@@ -313,6 +342,7 @@ async fn main() -> Result<()> {
                                 "working" => ui::OrbState::Working,
                                 "error" => ui::OrbState::Error,
                                 "asleep" => ui::OrbState::Asleep,
+                                "celebrating" => ui::OrbState::Celebrating,
                                 _ => ui::OrbState::Idle,
                             };
                             orb.set_state(state);
@@ -329,7 +359,7 @@ async fn main() -> Result<()> {
         info!("Orb: shutting down");
     });
 
-    // Platform context polling — builds ContextSnapshot and publishes ContextUpdate every 2s
+    // Platform context polling
     let platform_ctx = Arc::clone(&platform);
     let bus_ctx = Arc::clone(&bus);
     let _ctx_poll_handle = tokio::spawn(async move {
@@ -346,7 +376,6 @@ async fn main() -> Result<()> {
                     .as_millis() as u64,
             };
 
-            // Window tracking
             if let Some(tracker) = platform_ctx.windows() {
                 match tracker.active_window() {
                     Ok((app, title, pid)) => {
@@ -362,7 +391,6 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Clipboard
             if let Some(clipboard) = platform_ctx.clipboard() {
                 match clipboard.read_text() {
                     Ok(Some(text)) => {
@@ -378,7 +406,6 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Publish if we got anything useful
             if !snapshot.is_empty() {
                 match serde_json::to_value(&snapshot) {
                     Ok(payload) => {
@@ -390,11 +417,6 @@ async fn main() -> Result<()> {
                             payload,
                         };
                         bus_ctx.publish(event);
-                        log::debug!(
-                            "ContextUpdate: app={} | clipboard={}",
-                            snapshot.active_window.as_ref().map(|w| w.app_name.as_str()).unwrap_or("none"),
-                            snapshot.clipboard_text.as_ref().map(|_| "yes").unwrap_or("no")
-                        );
                     }
                     Err(e) => {
                         log::warn!("Failed to serialize context snapshot: {}", e);
@@ -424,17 +446,17 @@ async fn main() -> Result<()> {
         }
     }
 
-    // CRITICAL: close the bus first. This wakes up every rx.recv().await immediately.
+    // Final save of working memory before shutdown
+    if let Err(e) = memory_for_shutdown.save_working().await {
+        warn!("Final working memory save failed: {}", e);
+    }
+
     bus.close();
     info!("EventBus closed — signaling all subsystems to shut down");
 
-    // Stop STT first so the audio thread exits cleanly
     stt_handle.stop();
-    // Explicitly drop the handle so the stream (and its speech_start_tx) are
-    // released, allowing the warmup task and utterance channel to close cleanly.
     drop(stt_handle);
 
-    // Join everything concurrently so total shutdown is capped at 5s, not 5s × N.
     let timeout = std::time::Duration::from_secs(5);
     let _ = tokio::join!(
         tokio::time::timeout(timeout, ctx_handle),
@@ -448,6 +470,7 @@ async fn main() -> Result<()> {
         tokio::time::timeout(timeout, mute_handle),
         tokio::time::timeout(timeout, warmup_handle),
         tokio::time::timeout(timeout, orb_handle),
+        tokio::time::timeout(timeout, router_handle),
     );
 
     info!("MAVIS shutdown complete.");
