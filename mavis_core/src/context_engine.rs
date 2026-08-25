@@ -1,3 +1,4 @@
+// mavis_core/src/context_engine.rs
 // Central nervous system. Owns Working Memory and routes all events.
 
 use crate::context_snapshot::ContextSnapshot;
@@ -7,15 +8,22 @@ use crate::models::event::{Event, EventType};
 use anyhow::Result;
 use log::{info, warn};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::Mutex;
 
 pub struct ContextEngine {
     memory: MemoryManager,
     bus: Arc<EventBus>,
+    last_save: Mutex<Instant>,
 }
 
 impl ContextEngine {
     pub fn new(bus: Arc<EventBus>, memory: MemoryManager) -> Result<Self> {
-        Ok(Self { memory, bus })
+        Ok(Self {
+            memory,
+            bus,
+            last_save: Mutex::new(Instant::now() - Duration::from_secs(10)),
+        })
     }
 
     pub async fn process_event(&mut self, event: Event) -> Result<()> {
@@ -45,7 +53,6 @@ impl ContextEngine {
                     let mut wm = self.memory.working.write().await;
                     wm.set_intent(intent.to_string());
 
-                    // NEW — extract and persist user name
                     if let Some(name) = extract_user_name(intent) {
                         if wm.user_name.as_ref() != Some(&name) {
                             wm.set_user_name(name.clone());
@@ -126,7 +133,14 @@ impl ContextEngine {
             EventType::SystemAction => {
                 info!("ContextEngine: SystemAction observed — {}", event.payload);
             }
+
+            EventType::TtsInterrupt => {
+                info!("ContextEngine: TTS interrupt observed");
+            }
         }
+
+        // Phase 5 — debounced save of working memory to disk
+        self.maybe_save().await;
 
         Ok(())
     }
@@ -178,6 +192,17 @@ impl ContextEngine {
     pub async fn working_memory_snapshot(&self) -> crate::memory::working::WorkingMemory {
         self.memory.working.read().await.clone()
     }
+
+    /// Save working memory to disk at most once per second.
+    async fn maybe_save(&self) {
+        let mut last = self.last_save.lock().await;
+        if last.elapsed() > Duration::from_secs(1) {
+            if let Err(e) = self.memory.save_working().await {
+                warn!("ContextEngine: failed to save working memory snapshot: {}", e);
+            }
+            *last = Instant::now();
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -185,7 +210,6 @@ impl ContextEngine {
 // ---------------------------------------------------------------------
 fn extract_user_name(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
-    // Patterns: "my name is X", "i am X", "i'm X", "call me X"
     let patterns = [
         ("my name is ", 13),
         ("i am ", 5),
@@ -198,7 +222,6 @@ fn extract_user_name(text: &str) -> Option<String> {
         if let Some(pos) = lower.find(prefix) {
             let start = pos + prefix_len;
             let rest = &text[start..];
-            // Take the next word as the name, strip punctuation
             let name: String = rest
                 .trim_start()
                 .split_whitespace()
@@ -206,7 +229,6 @@ fn extract_user_name(text: &str) -> Option<String> {
                 .trim_end_matches(|c: char| c.is_ascii_punctuation())
                 .to_string();
             if !name.is_empty() && name.len() < 30 {
-                // Capitalize first letter
                 let mut chars = name.chars();
                 let capitalized = match chars.next() {
                     Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
