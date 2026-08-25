@@ -19,7 +19,6 @@ pub struct WorkingMemory {
     pub active_window: Option<WindowInfo>,
     pub last_clipboard: Option<String>,
     pub context_timestamp: Option<u64>,
-    // NEW — structured user profile extracted from conversation
     pub user_name: Option<String>,
 }
 
@@ -67,5 +66,16 @@ impl WorkingMemory {
 
     pub fn is_busy(&self) -> bool {
         self.active_plan.is_some()
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 5 — session state recovery
+    // -----------------------------------------------------------------
+    pub fn to_json(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string_pretty(self)
+    }
+
+    pub fn from_json(json: &str) -> Result<Self, serde_json::Error> {
+        serde_json::from_str(json)
     }
 }
