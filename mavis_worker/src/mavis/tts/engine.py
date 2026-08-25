@@ -2,6 +2,7 @@
 # TTS engine facade — delegates to Kokoro. Falls back to Piper if Kokoro fails.
 
 import os
+import time
 
 
 class TTSEngine:
@@ -31,12 +32,14 @@ class TTSEngine:
                 engine = self._init_kokoro()
                 b64 = engine.synthesize(text, voice=voice, speed=speed)
                 self.is_loaded = engine.is_loaded
-                self.last_activity = engine.last_activity
+                self.last_activity = time.time()
                 return b64
             except (RuntimeError, OSError, ImportError, ValueError) as e:
                 print(f"[tts] Kokoro failed ({e}), falling back to Piper")
 
-        return self._synthesize_piper(text)
+        result = self._synthesize_piper(text)
+        self.last_activity = time.time()
+        return result
 
     def _synthesize_piper(self, text: str) -> str:
         """Use piper-tts as a fallback; returns WAV base64."""
@@ -86,5 +89,6 @@ class TTSEngine:
     def warm_up(self) -> None:
         try:
             self._init_kokoro().warm_up()
+            self.last_activity = time.time()
         except (RuntimeError, OSError, ImportError, ValueError) as e:
             print(f"[tts] Warm-up failed: {e}")
