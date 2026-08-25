@@ -25,6 +25,9 @@ pub enum EventType {
     WorkerResponse,
     UiStateChange,
     SystemAction,
+    /// Signal to kill current TTS playback and drain the queue.
+    /// Emitted by the intent router when the user speaks during TTS.
+    TtsInterrupt,
 }
 
 #[cfg(test)]
@@ -42,5 +45,18 @@ mod tests {
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("SystemWake"));
+    }
+
+    #[test]
+    fn test_tts_interrupt_variant() {
+        let event = Event {
+            id: Uuid::new_v4(),
+            timestamp: Utc::now(),
+            source: "test".to_string(),
+            event_type: EventType::TtsInterrupt,
+            payload: serde_json::json!({}),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains("TtsInterrupt"));
     }
 }
