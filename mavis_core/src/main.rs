@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
     let platform = Arc::new(platform::Platform::detect().build_provider());
     info!("Platform: initialized");
 
-    // Memory Manager — shared between ContextEngine and Planner
+    // Memory Manager
     let data_dir = std::path::Path::new("../memory");
     let memory = memory::manager::MemoryManager::new(data_dir)?;
     let memory_for_shutdown = memory.clone();
@@ -78,7 +78,7 @@ async fn main() -> Result<()> {
         planner.run().await;
     });
 
-    // Executor — now owns the TTS queue and receives tts_active
+    // Executor
     let bus_clone = Arc::clone(&bus);
     let tts_active_for_exec = tts_active.clone();
     let mut executor = executor::Executor::new(bus_clone, tts_active_for_exec);
@@ -116,17 +116,25 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Orb — created here so we can clone it for the energy task
+    let orb = ui::Orb::new();
+    let orb_for_energy = orb.clone();
+
     // STT Pipeline
     let bus_for_stt_start = Arc::clone(&bus);
     let (speech_start_tx, mut speech_start_rx) = mpsc::channel::<()>(8);
-    let (stt_handle, mut utterance_rx) = stt::SttManager::new(stt::SttConfig::default())
+    let (stt_handle, mut utterance_rx, mut energy_rx) = stt::SttManager::new(stt::SttConfig::default())
         .start(bus_for_stt_start, Some(speech_start_tx));
     let bus_for_stt = Arc::clone(&bus);
-    let _tts_active_stream = tts_active.clone();
 
-    // STT mute controller — mutes mic while TTS is speaking.
-    // Phase 5 fix: only unmute on idle/error. working/thinking/listening
-    // no longer force-unmute, preventing overlap with queued TTS.
+    // Voice activity LED — pipe real-time VAD energy into the orb
+    let energy_handle = tokio::spawn(async move {
+        while let Some(energy) = energy_rx.recv().await {
+            orb_for_energy.set_energy(energy);
+        }
+    });
+
+    // STT mute controller
     let tts_active_for_mute = tts_active.clone();
     let bus_for_mute = Arc::clone(&bus);
     let mute_handle = tokio::spawn(async move {
@@ -139,8 +147,6 @@ async fn main() -> Result<()> {
                         "idle" | "error" => {
                             tts_active_for_mute.store(false, Ordering::SeqCst);
                         }
-                        // listening | thinking | working — do NOT touch tts_active.
-                        // The TTS queue owns the true state; these are visual-only.
                         _ => {}
                     }
                 }
@@ -148,7 +154,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Intent router — if user speaks during TTS, interrupt playback immediately.
+    // Intent router — interrupt TTS when user speaks during playback
     let tts_active_for_router = tts_active.clone();
     let bus_for_router = Arc::clone(&bus);
     let router_handle = tokio::spawn(async move {
@@ -320,10 +326,9 @@ async fn main() -> Result<()> {
         info!("STT pipeline shut down");
     });
 
-    // Orb UI
+    // Orb UI task
     let bus_clone = Arc::clone(&bus);
     let orb_handle = tokio::spawn(async move {
-        let orb = ui::Orb::new();
         info!("Orb: initialized");
 
         let mut rx = bus_clone.subscribe();
@@ -446,7 +451,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Final save of working memory before shutdown
+    // Final save
     if let Err(e) = memory_for_shutdown.save_working().await {
         warn!("Final working memory save failed: {}", e);
     }
@@ -471,6 +476,7 @@ async fn main() -> Result<()> {
         tokio::time::timeout(timeout, warmup_handle),
         tokio::time::timeout(timeout, orb_handle),
         tokio::time::timeout(timeout, router_handle),
+        tokio::time::timeout(timeout, energy_handle),
     );
 
     info!("MAVIS shutdown complete.");
