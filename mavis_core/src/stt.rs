@@ -22,7 +22,6 @@ pub struct SttConfig {
     pub min_speech_duration_ms: u64,
     pub frame_duration_ms: u64,
     pub max_utterance_duration_ms: u64,
-    /// Minimum peak energy for an utterance to be considered real speech.
     pub min_max_energy: f32,
 }
 
@@ -30,15 +29,10 @@ impl Default for SttConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
-            // Reduced from 1200 → 600. Ships voice to STT ~0.6s faster after speech ends.
             silence_duration_ms: 600,
-            // Reduced from 500 → 250. Detects speech sooner, catches "MAVIS" faster.
             min_speech_duration_ms: 250,
             frame_duration_ms: 30,
-            // 15 seconds of active speech time covers long requests.
             max_utterance_duration_ms: 15000,
-            // 0.04 blocks keyboard clicks (~0.01) and fan noise (~0.02) while
-            // allowing normal conversation at normal distance (~0.03–0.07).
             min_max_energy: 0.04,
         }
     }
@@ -53,9 +47,7 @@ struct EnergyVad {
     silence_threshold_frames: usize,
     min_speech_threshold_frames: usize,
     max_speech_frames: usize,
-    /// Base threshold from config; effective threshold adapts to noise floor.
     base_threshold: f32,
-    /// Exponential moving average of ambient (non-speech) energy.
     noise_floor: f32,
     buffer: VecDeque<f32>,
     speech_frames: usize,
@@ -63,7 +55,6 @@ struct EnergyVad {
     pub is_speaking: bool,
     max_energy_seen: f32,
     pub last_max_energy: f32,
-    /// Sample rate, used to size the 1s pre-buffer.
     sample_rate: usize,
 }
 
@@ -90,8 +81,6 @@ impl EnergyVad {
         }
     }
 
-    /// Effective threshold adapts to noise floor but is hard-capped so it
-    /// never rises above typical voice energy for this mic (~0.027).
     fn effective_threshold(&self) -> f32 {
         self.base_threshold
             .max(self.noise_floor * 1.5)
@@ -125,8 +114,6 @@ impl EnergyVad {
                     }
                 }
             } else {
-                // Update noise floor on all low-energy frames, but cap it so
-                // fan noise can never raise the threshold above voice energy.
                 self.noise_floor = (self.noise_floor * 0.97 + energy * 0.03).min(0.015);
 
                 if self.is_speaking {
@@ -145,9 +132,6 @@ impl EnergyVad {
                         return Some(utterance);
                     }
                 } else {
-                    // Keep last 1s of audio as a rolling pre-buffer. When VAD
-                    // detects speech, these samples are already in the buffer so
-                    // the beginning of the utterance (e.g. "MAVIS") isn't clipped.
                     while self.buffer.len() > self.sample_rate {
                         self.buffer.pop_front();
                     }
@@ -178,7 +162,6 @@ impl EnergyVad {
         self.silence_frames = 0;
         self.is_speaking = false;
         self.max_energy_seen = 0.0;
-        // Reset noise floor so the next utterance starts fresh.
         self.noise_floor = 0.005;
     }
 }
@@ -258,13 +241,20 @@ impl SttManager {
         Self { config }
     }
 
-    pub fn start(self, bus: Arc<EventBus>, speech_start_tx: Option<mpsc::Sender<()>>) -> (SttHandle, mpsc::Receiver<Vec<f32>>) {
+    /// Start the STT pipeline.
+    ///
+    /// Returns:
+    /// - `SttHandle` — call `.stop()` to shut down the audio stream
+    /// - `mpsc::Receiver<Vec<f32>>` — utterance audio chunks for the worker
+    /// - `mpsc::Receiver<f32>` — real-time per-frame RMS energy for the orb LED
+    pub fn start(self, bus: Arc<EventBus>, speech_start_tx: Option<mpsc::Sender<()>>) -> (SttHandle, mpsc::Receiver<Vec<f32>>, mpsc::Receiver<f32>) {
         let running = Arc::new(AtomicBool::new(true));
         let running_stream = running.clone();
         let tts_active = Arc::new(AtomicBool::new(false));
         let tts_active_stream = tts_active.clone();
 
         let (tx, rx) = mpsc::channel::<Vec<f32>>(4);
+        let (energy_tx, energy_rx) = mpsc::channel::<f32>(64);
         let vad = Arc::new(Mutex::new(EnergyVad::new(&self.config)));
         let config = self.config.clone();
 
@@ -308,6 +298,7 @@ impl SttManager {
             SampleFormat::F32 => {
                 let vad = vad.clone();
                 let tx = tx.clone();
+                let energy_tx = energy_tx.clone();
                 let bus_for_ui = bus.clone();
                 let speech_start = speech_start_tx.clone();
                 device
@@ -335,6 +326,12 @@ impl SttManager {
                             } else {
                                 resample_linear(&mono, sample_rate, target as u32)
                             };
+
+                            // Real-time energy for voice activity LED
+                            if !resampled.is_empty() {
+                                let frame_energy = resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32;
+                                let _ = energy_tx.try_send(frame_energy);
+                            }
 
                             let mut vad_guard = vad.lock().unwrap();
                             let was_speaking = vad_guard.is_speaking;
@@ -369,8 +366,6 @@ impl SttManager {
                                     payload: serde_json::json!({ "state": "thinking" }),
                                 });
                             } else if !was_speaking && now_speaking {
-                                // Fire-and-forget LLM warm-up so Phi-3 loads in parallel
-                                // while the user is still speaking.
                                 if let Some(ref sstx) = speech_start {
                                     let _ = sstx.try_send(());
                                 }
@@ -395,7 +390,7 @@ impl SttManager {
         info!("STT listening active. Speak for 1-2 seconds, then pause.");
 
         let handle = SttHandle { running, tts_active, _stream: stream };
-        (handle, rx)
+        (handle, rx, energy_rx)
     }
 }
 
