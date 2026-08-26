@@ -5,9 +5,10 @@
 // CHANGELOG 2026-08-25 (Phase 5):
 //   - TTS queue: non-blocking say() with sequential playback
 //   - TTS interruption: kill current playback + drain queue on TtsInterrupt
-//   - Audio playback refactored to spawn() + wait() so we can kill the child
-//   - fallback_say now blocks until process exits
-//   - execute_plan skips final idle emit if TTS was queued (queue handles it)
+//   - Audio playback: pw-play > paplay > aplay (PipeWire-first for Arch)
+//   - Piper model + .onnx.json validated before synthesis
+//   - Kokoro WAV bytes and Piper WAV file both route through unified play_audio()
+//   - spawn_audio_player respects MAVIS_AUDIO_DEVICE env var
 
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
@@ -121,14 +122,11 @@ impl Executor {
 
             if !success {
                 self.emit_ui_state("error").await;
-                // Drain any queued TTS so the user doesn't hear stale audio
                 self.tts_queue.interrupt().await;
                 return Ok(());
             }
         }
 
-        // Only emit idle here if no TTS was queued.
-        // If TTS was queued, the queue emits idle when it finishes.
         if !tts_queued {
             self.emit_ui_state("idle").await;
         }
@@ -287,7 +285,6 @@ impl Executor {
         Ok(format!("Notification: {} — {}", title, message))
     }
 
-    /// Queue text for TTS playback. Non-blocking — returns immediately.
     async fn run_say(&self, action: &serde_json::Value) -> Result<String> {
         let text = action
             .get("text")
@@ -321,7 +318,6 @@ impl Executor {
 struct TtsQueue {
     queue_tx: mpsc::UnboundedSender<String>,
     kill_tx: mpsc::Sender<()>,
-    /// PID of the currently playing audio process. 0 = none.
     current_pid: Arc<AtomicU32>,
 }
 
@@ -336,7 +332,6 @@ impl TtsQueue {
 
         tokio::spawn(async move {
             while let Some(text) = queue_rx.recv().await {
-                // Drain stale kill signals so they don't kill the next utterance
                 while kill_rx.try_recv().is_ok() {}
 
                 tts_active_clone.store(true, Ordering::SeqCst);
@@ -345,21 +340,16 @@ impl TtsQueue {
                 let interrupted = Self::play_text(&text, &pid_for_task, &mut kill_rx).await;
 
                 if interrupted {
-                    // Kill signal arrived during playback — drain remaining queue
                     while queue_rx.try_recv().is_ok() {}
                     tts_active_clone.store(false, Ordering::SeqCst);
                     Self::emit_state(&bus_clone, "idle").await;
                     continue;
                 }
 
-                // Normal completion. If queue is empty, go idle.
-                // (A brief idle→speaking flicker is acceptable if another item
-                //  was queued during playback; the next loop iteration handles it.)
                 tts_active_clone.store(false, Ordering::SeqCst);
                 Self::emit_state(&bus_clone, "idle").await;
             }
 
-            // Channel closed — ensure mic is unmuted
             tts_active_clone.store(false, Ordering::SeqCst);
             Self::emit_state(&bus_clone, "idle").await;
         });
@@ -371,14 +361,11 @@ impl TtsQueue {
         }
     }
 
-    /// Queue text for playback. Returns immediately.
     fn say(&self, text: &str) {
         let _ = self.queue_tx.send(text.to_string());
     }
 
-    /// Interrupt current playback and drain the queue.
     async fn interrupt(&self) {
-        // Kill the OS process directly by PID
         let pid = self.current_pid.load(Ordering::SeqCst);
         if pid != 0 {
             let _ = Command::new("kill")
@@ -387,11 +374,9 @@ impl TtsQueue {
                 .output()
                 .await;
         }
-        // Also signal the queue task to drain
         let _ = self.kill_tx.try_send(());
     }
 
-    /// Synthesize + play text. Returns true if interrupted, false if completed.
     async fn play_text(
         text: &str,
         current_pid: &Arc<AtomicU32>,
@@ -514,16 +499,30 @@ impl TtsQueue {
 // Audio helpers
 // ---------------------------------------------------------------------
 
-/// Spawn the first available audio player backend. Returns the Child handle
-/// so the caller can wait() or kill() it.
+/// Spawn the first available audio player backend. Returns the Child handle.
+/// Respects MAVIS_AUDIO_DEVICE env var for pw-play and paplay.
 async fn spawn_audio_player(path: &Path) -> Result<tokio::process::Child> {
     if !path.exists() {
         return Err(anyhow::anyhow!("WAV file does not exist: {:?}", path));
     }
 
+    let device_arg = std::env::var("MAVIS_AUDIO_DEVICE").ok();
+
     let backends: [(&str, Vec<String>); 3] = [
-        ("pw-play", vec![path.to_string_lossy().to_string()]),
-        ("paplay", vec![path.to_string_lossy().to_string()]),
+        ("pw-play", {
+            let mut args = vec![path.to_string_lossy().to_string()];
+            if let Some(ref dev) = device_arg {
+                args.extend_from_slice(&["--device".to_string(), dev.clone()]);
+            }
+            args
+        }),
+        ("paplay", {
+            let mut args = vec![path.to_string_lossy().to_string()];
+            if let Some(ref dev) = device_arg {
+                args.extend_from_slice(&["--device".to_string(), dev.clone()]);
+            }
+            args
+        }),
         ("aplay", vec![path.to_string_lossy().to_string()]),
     ];
 
@@ -531,7 +530,7 @@ async fn spawn_audio_player(path: &Path) -> Result<tokio::process::Child> {
         debug!("Trying audio backend: {}", cmd);
         match Command::new(cmd).args(&args).spawn() {
             Ok(child) => {
-                info!("Audio playback spawned via {} (pid={:?})", cmd, child.id());
+                info!("Audio playback spawned via {} (pid={:?}, device={:?})", cmd, child.id(), device_arg);
                 return Ok(child);
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
