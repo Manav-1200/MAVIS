@@ -187,6 +187,24 @@ impl SttHandle {
 // ---------------------------------------------------------------------------
 
 fn select_input_device(host: &cpal::Host) -> Option<Device> {
+    // If MAVIS_AUDIO_DEVICE is set, try exact name match first
+    if let Ok(env_device) = std::env::var("MAVIS_AUDIO_DEVICE") {
+        if let Ok(devs) = host.input_devices() {
+            for d in devs {
+                if let Ok(name) = d.name() {
+                    if name == env_device {
+                        info!("STT: using MAVIS_AUDIO_DEVICE exact match: {}", name);
+                        return Some(d);
+                    }
+                }
+            }
+        }
+        warn!(
+            "MAVIS_AUDIO_DEVICE='{}' not found among input devices, falling back to scoring",
+            env_device
+        );
+    }
+
     let devices: Vec<(Device, String)> = match host.input_devices() {
         Ok(devs) => devs.filter_map(|d| d.name().ok().map(|n| (d, n))).collect(),
         Err(e) => {
@@ -241,12 +259,6 @@ impl SttManager {
         Self { config }
     }
 
-    /// Start the STT pipeline.
-    ///
-    /// Returns:
-    /// - `SttHandle` — call `.stop()` to shut down the audio stream
-    /// - `mpsc::Receiver<Vec<f32>>` — utterance audio chunks for the worker
-    /// - `mpsc::Receiver<f32>` — real-time per-frame RMS energy for the orb LED
     pub fn start(self, bus: Arc<EventBus>, speech_start_tx: Option<mpsc::Sender<()>>) -> (SttHandle, mpsc::Receiver<Vec<f32>>, mpsc::Receiver<f32>) {
         let running = Arc::new(AtomicBool::new(true));
         let running_stream = running.clone();
@@ -327,7 +339,6 @@ impl SttManager {
                                 resample_linear(&mono, sample_rate, target as u32)
                             };
 
-                            // Real-time energy for voice activity LED
                             if !resampled.is_empty() {
                                 let frame_energy = resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32;
                                 let _ = energy_tx.try_send(frame_energy);
