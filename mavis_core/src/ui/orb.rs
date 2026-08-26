@@ -1,7 +1,7 @@
 // mavis_core/src/ui/orb.rs
 // Living Orb UI. Small (80×80), borderless, transparent, draggable.
 // Renders a soft pulsing circle that reacts to OrbState.
-// Phase 5: Celebrating state added. Clean glowing sphere — no lettermark.
+// Phase 5: Voice activity LED — brightness modulates with real-time VAD energy.
 
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 use std::sync::mpsc::{channel, Sender};
@@ -13,15 +13,18 @@ use crate::ui::states::OrbState;
 const ORB_SIZE: usize = 80;
 const BUFFER_LEN: usize = ORB_SIZE * ORB_SIZE;
 
+#[derive(Clone)]
 pub struct Orb {
     state_tx: Sender<OrbState>,
     shutdown_tx: Sender<()>,
+    energy_tx: Sender<f32>,
 }
 
 impl Orb {
     pub fn new() -> Self {
         let (state_tx, state_rx) = channel::<OrbState>();
         let (shutdown_tx, shutdown_rx) = channel::<()>();
+        let (energy_tx, energy_rx) = channel::<f32>();
 
         thread::spawn(move || {
             let mut window = match Window::new(
@@ -47,6 +50,7 @@ impl Orb {
 
             let mut buffer: Vec<u32> = vec![0; BUFFER_LEN];
             let mut current_state = OrbState::Idle;
+            let mut current_energy = 0.0f32;
             let start = Instant::now();
 
             let mut is_dragging = false;
@@ -54,10 +58,20 @@ impl Orb {
             let mut drag_anchor: (f32, f32) = (0.0, 0.0);
 
             while window.is_open() && !window.is_key_down(Key::Escape) {
+                // Poll state updates
                 while let Ok(s) = state_rx.try_recv() {
                     current_state = s;
                 }
 
+                // Poll energy updates from VAD
+                while let Ok(e) = energy_rx.try_recv() {
+                    // Peak-hold: new energy replaces only if louder
+                    current_energy = current_energy.max(e);
+                }
+                // Exponential decay so the LED trails off smoothly
+                current_energy *= 0.92;
+
+                // Graceful shutdown
                 if shutdown_rx.try_recv().is_ok() {
                     break;
                 }
@@ -86,7 +100,7 @@ impl Orb {
                 }
 
                 let elapsed = start.elapsed().as_secs_f32();
-                render_orb(&mut buffer, elapsed, current_state);
+                render_orb(&mut buffer, elapsed, current_state, current_energy);
 
                 if let Err(e) = window.update_with_buffer(&buffer, ORB_SIZE, ORB_SIZE) {
                     log::error!("Orb: render error: {}", e);
@@ -100,6 +114,7 @@ impl Orb {
         Orb {
             state_tx,
             shutdown_tx,
+            energy_tx,
         }
     }
 
@@ -107,12 +122,16 @@ impl Orb {
         let _ = self.state_tx.send(state);
     }
 
+    pub fn set_energy(&self, energy: f32) {
+        let _ = self.energy_tx.send(energy);
+    }
+
     pub fn shutdown(&self) {
         let _ = self.shutdown_tx.send(());
     }
 }
 
-fn render_orb(buffer: &mut [u32], time: f32, state: OrbState) {
+fn render_orb(buffer: &mut [u32], time: f32, state: OrbState, energy: f32) {
     for p in buffer.iter_mut() {
         *p = 0x00000000;
     }
@@ -142,8 +161,24 @@ fn render_orb(buffer: &mut [u32], time: f32, state: OrbState) {
         OrbState::Working => (200, 100, 255),
         OrbState::Error => (255, 50, 50),
         OrbState::Asleep => (80, 80, 120),
-        OrbState::Celebrating => (255, 215, 0), // warm gold
+        OrbState::Celebrating => (255, 215, 0),
     };
+
+    // Voice activity LED scaling per state
+    let energy_scale = match state {
+        OrbState::Idle => 0.20,
+        OrbState::Listening => 0.50,
+        OrbState::Thinking => 0.10,
+        OrbState::Speaking => 0.10,
+        OrbState::Working => 0.10,
+        OrbState::Error => 0.20,
+        OrbState::Asleep => 0.05,
+        OrbState::Celebrating => 0.15,
+    };
+
+    // Normalize RMS energy (typical range 0.0–0.05) to 0.0–1.0
+    let normalized = (energy * 20.0).min(1.0);
+    let energy_boost = normalized * energy_scale;
 
     for y in 0..ORB_SIZE {
         for x in 0..ORB_SIZE {
@@ -156,7 +191,8 @@ fn render_orb(buffer: &mut [u32], time: f32, state: OrbState) {
                 let alpha = (edge * edge * (3.0 - 2.0 * edge) * 255.0) as u32;
 
                 let inner = (dist / radius).clamp(0.0, 1.0);
-                let brightness = 1.0 - inner * 0.4;
+                let base_brightness = 1.0 - inner * 0.4;
+                let brightness = (base_brightness + energy_boost).min(1.4);
 
                 let pr = (r as f32 * brightness) as u32;
                 let pg = (g as f32 * brightness) as u32;
