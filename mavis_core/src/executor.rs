@@ -9,17 +9,19 @@
 //   - Piper model + .onnx.json validated before synthesis
 //   - Kokoro WAV bytes and Piper WAV file both route through unified play_audio()
 //   - spawn_audio_player respects MAVIS_AUDIO_DEVICE env var
+//   - TTS queue emits Celebrating state briefly after the last queued item finishes
 
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
 use anyhow::Result;
 use log::{debug, error, info, warn};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration};
 
 pub struct Executor {
     bus: Arc<EventBus>,
@@ -319,6 +321,7 @@ struct TtsQueue {
     queue_tx: mpsc::UnboundedSender<String>,
     kill_tx: mpsc::Sender<()>,
     current_pid: Arc<AtomicU32>,
+    queue_depth: Arc<AtomicUsize>,
 }
 
 impl TtsQueue {
@@ -329,6 +332,8 @@ impl TtsQueue {
         let pid_for_task = current_pid.clone();
         let bus_clone = bus.clone();
         let tts_active_clone = tts_active.clone();
+        let queue_depth = Arc::new(AtomicUsize::new(0));
+        let queue_depth_for_task = queue_depth.clone();
 
         tokio::spawn(async move {
             while let Some(text) = queue_rx.recv().await {
@@ -338,12 +343,24 @@ impl TtsQueue {
                 Self::emit_state(&bus_clone, "speaking").await;
 
                 let interrupted = Self::play_text(&text, &pid_for_task, &mut kill_rx).await;
+                let was_last = queue_depth_for_task.fetch_sub(1, Ordering::SeqCst) == 1;
 
                 if interrupted {
-                    while queue_rx.try_recv().is_ok() {}
+                    let mut drained = 0;
+                    while queue_rx.try_recv().is_ok() {
+                        drained += 1;
+                    }
+                    if drained > 0 {
+                        queue_depth_for_task.fetch_sub(drained, Ordering::SeqCst);
+                    }
                     tts_active_clone.store(false, Ordering::SeqCst);
                     Self::emit_state(&bus_clone, "idle").await;
                     continue;
+                }
+
+                if was_last {
+                    Self::emit_state(&bus_clone, "celebrating").await;
+                    sleep(Duration::from_millis(1200)).await;
                 }
 
                 tts_active_clone.store(false, Ordering::SeqCst);
@@ -358,10 +375,12 @@ impl TtsQueue {
             queue_tx,
             kill_tx,
             current_pid,
+            queue_depth,
         }
     }
 
     fn say(&self, text: &str) {
+        self.queue_depth.fetch_add(1, Ordering::SeqCst);
         let _ = self.queue_tx.send(text.to_string());
     }
 

@@ -1,3 +1,4 @@
+// mavis_core/src/stt.rs
 //! MAVIS STT Manager — Rust runtime side
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
@@ -340,7 +341,7 @@ impl SttManager {
                             };
 
                             if !resampled.is_empty() {
-                                let frame_energy = resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32;
+                                let frame_energy = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
                                 let _ = energy_tx.try_send(frame_energy);
                             }
 

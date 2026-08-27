@@ -170,7 +170,9 @@ async fn main() -> Result<()> {
                         event_type: EventType::TtsInterrupt,
                         payload: serde_json::json!({}),
                     });
-                    tts_active_for_router.store(false, Ordering::SeqCst);
+                    // Do NOT clear tts_active here — let the mute controller
+                    // clear it when the TTS queue emits 'idle'. This prevents
+                    // the STT from capturing the dying tail of TTS audio.
                 }
             }
         }
