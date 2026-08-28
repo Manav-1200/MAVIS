@@ -211,7 +211,7 @@ impl ContextEngine {
 fn extract_user_name(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     let patterns = [
-        ("my name is ", 13),
+        ("my name is ", 11),   // FIXED: was 13
         ("i am ", 5),
         ("i'm ", 4),
         ("call me ", 8),

@@ -14,7 +14,7 @@ except ImportError as e:
 
 
 class LlamaEngine:
-    def __init__(self, model_path: str | None = None, n_gpu_layers: int = -1):
+    def __init__(self, model_path: str | None = None, n_gpu_layers: int = 20):
         self._model_path = model_path
         self._n_gpu_layers = n_gpu_layers
         self._llm: Llama | None = None
@@ -84,6 +84,10 @@ class LlamaEngine:
     @property
     def is_loaded(self) -> bool:
         return self._llm is not None
+
+    def warm_up(self):
+        """Eagerly load model weights so the next chat request is fast."""
+        self.load_model()
 
     def get_memory_usage(self) -> dict[str, float]:
         if not self.is_loaded:
