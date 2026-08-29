@@ -14,13 +14,13 @@
 
 | Phase | Name | Core deliverable | Portfolio label | Status |
 |-------|------|-----------------|-----------------|--------|
-| 1 | Foundation | Rust runtime compiles. Async event bus. Orb window appears. Python worker reorganized. | Rust desktop app | ✅ Complete |
-| 2 | Core Runtime | Context engine. Layered memory (SQLite). System integration. Orb states. Graceful shutdown. | Event-driven runtime | ✅ Complete |
-| 3 | AI Worker | Rust ↔ Python bridge. Local LLM loads. First inference. Worker lifecycle. | Local AI pipeline | ✅ Complete |
-| 4 | Integration | Voice wake → STT → LLM → TTS. Intent system. First automations. | Full voice companion | 🚧 In Progress |
-| 5 | Interaction Polish | Push-to-talk, TTS interruption, session recovery, personality foundation. | Daily polish | Not started |
+| 1 | Foundation | Rust runtime compiles. Async event bus. Orb window appears. Python worker reorganized. | Rust desktop app | :white_check_mark: Complete |
+| 2 | Core Runtime | Context engine. Layered memory (SQLite). System integration. Orb states. Graceful shutdown. | Event-driven runtime | :white_check_mark: Complete |
+| 3 | AI Worker | Rust <-> Python bridge. Local LLM loads. First inference. Worker lifecycle. | Local AI pipeline | :white_check_mark: Complete |
+| 4 | Integration | Voice wake -> STT -> LLM -> TTS. Intent system. First automations. | Full voice companion | :white_check_mark: Complete |
+| 5 | Interaction Polish | TTS queue, interruption, session recovery, personality foundation. | Daily polish | :construction: In Progress |
 | 6 | Context Awareness | Active window, clipboard, browser, IDE, terminal, calendar. | Companion senses | Not started |
-| 7 | Memory & Learning | Episodic → long-term pipeline, semantic recall, vector embeddings, routine detection. | Persistent memory | Not started |
+| 7 | Memory & Learning | Episodic -> long-term pipeline, semantic recall, vector embeddings, routine detection. | Persistent memory | Not started |
 | 8 | Safety & Permissions | 5-tier permission model, risk scoring, audit log, dry-run, rollback. | Trust layer | Not started |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
 | 10 | Automation & Proactive Intelligence | Rule engine, predictive suggestions, workflow recording, wellness reminders, daily briefing. | Proactive assistant | Not started |
@@ -32,26 +32,26 @@
 ## Architecture
 
 ```
-┌─────────────┐     ┌─────────────┐
-│ Living Orb  │────▶│   Context   │
-│   (Rust)    │     │   Engine    │
-└─────────────┘     │   (Rust)    │
-       ▲            └──────┬──────┘
-       │                   │
-       │            ┌──────▼──────┐
-       │            │   Planner   │
-       │            │   (Rust)    │
-       │            └──────┬──────┘
-       │                   │
-       │            ┌──────▼──────┐
-       │            │   Executor  │
-       │            │   (Rust)    │
-       │            └──────┬──────┘
-       │                   │
-       │            ┌──────▼──────┐
-       └────────────│ AI Worker   │
-                    │  (Python)   │
-                    └─────────────┘
++-------------+     +-------------+
+| Living Orb  |---->|   Context   |
+|   (Rust)    |     |   Engine    |
++-------------+     |   (Rust)    |
+       ^            +------+------+
+       |                   |
+       |            +------v------+
+       |            |   Planner   |
+       |            |   (Rust)    |
+       |            +------+------+
+       |                   |
+       |            +------v------+
+       |            |   Executor  |
+       |            |   (Rust)    |
+       |            +------+------+
+       |                   |
+       |            +------v------+
+       +------------| AI Worker   |
+                    |  (Python)   |
+                    +-------------+
 ```
 
 **Runtime split:**
@@ -64,7 +64,7 @@
 
 ## Phase 1 — Foundation
 
-**Status:** ✅ COMPLETE (2026-08-06)
+**Status:** :white_check_mark: COMPLETE (2026-08-06)
 
 **Goal:** `mavis_core` compiles and runs. The event bus works. An orb window appears. The Python worker is reorganized.
 
@@ -83,16 +83,16 @@
 ### 1.3 — Entry point
 - [x] `main.rs` — tokio async main, subsystem wiring
 - [x] Init logging. Create event bus. Spawn all subsystems.
-- [x] `Ctrl+C` triggers `bus.close()` → all receivers wake, concurrent join with 5s timeout
+- [x] `Ctrl+C` triggers `bus.close()` -> all receivers wake, concurrent join with 5s timeout
 - [x] Clean shutdown under 1 second
 
 ### 1.4 — Orb UI
 - [x] `ui/orb.rs` — `Orb` struct, dedicated render thread
 - [x] `ui/states.rs` — `OrbState` enum: Idle, Listening, Thinking, Speaking, Working, Error, Asleep
-- [x] 80×80 px, borderless, transparent, always-on-top
+- [x] 80x80 px, borderless, transparent, always-on-top
 - [x] Draggable (click-and-drag to reposition)
 - [x] Soft pulsing circle with smoothstep gradient, state-reactive colors
-- [x] **Decision:** `minifb` for Phase 1–2. Raw Wayland in Phase 6.
+- [x] **Decision:** `minifb` for Phase 1-2. Raw Wayland in Phase 6.
 
 ### 1.5 — Subsystem stubs
 - [x] `context_engine.rs` — stub with `new()` and `process_event()`
@@ -124,7 +124,7 @@
 
 ## Phase 2 — Core Runtime
 
-**Status:** ✅ COMPLETE (2026-08-06)
+**Status:** :white_check_mark: COMPLETE (2026-08-06)
 
 **Goal:** Context engine routes events. Memory persists to SQLite. System events flow. Orb shows real state transitions. Executor runs actions.
 
@@ -132,7 +132,7 @@
 - [x] Maintains `WorkingMemory` (50-event context window)
 - [x] `process_event()` routes all `EventType` variants
 - [x] Auto-persists `UserIntent`, `ActionComplete`, `PlanReady` to EpisodicStore
-- [x] Routes `WorkerResponse` → `ContextUpdate` or passes to Planner
+- [x] Routes `WorkerResponse` -> `ContextUpdate` or passes to Planner
 - [x] **Fix:** Removed double-publish of `PlanReady` (was causing duplicate execution)
 
 ### 2.2 — Memory layers
@@ -143,28 +143,28 @@
 - [x] `MemoryManager` — owns all layers behind `RwLock`/`Mutex`
 
 ### 2.3 — Planner
-- [x] Listens for `UserIntent` → generates `WorkerRequest`
-- [x] Listens for `WorkerResponse` (type "plan") → emits `PlanReady`
+- [x] Listens for `UserIntent` -> generates `WorkerRequest`
+- [x] Listens for `WorkerResponse` (type "plan") -> emits `PlanReady`
 - [x] Never executes. Returns plan to Executor via Event Bus.
 
 ### 2.4 — Executor
-- [x] Receives `PlanReady` → parses flexible payloads (array, object with `actions`, single action)
+- [x] Receives `PlanReady` -> parses flexible payloads (array, object with `actions`, single action)
 - [x] Action types: `shell`, `app`, `notify`, `say`, `system`
-- [x] `shell` → `sh -c` with stdout/stderr capture
-- [x] `app` → `Command::spawn` with `xdg-open` fallback for URLs/paths
-- [x] `notify` → `notify-send`
-- [x] `say` → `spd-say` / `espeak` fallback / log-only
-- [x] `system` → delegates to `SystemAction` event for DBusIntegration
+- [x] `shell` -> `sh -c` with stdout/stderr capture
+- [x] `app` -> `Command::spawn` with `xdg-open` fallback for URLs/paths
+- [x] `notify` -> `notify-send`
+- [x] `say` -> `spd-say` / `espeak` fallback / log-only
+- [x] `system` -> delegates to `SystemAction` event for DBusIntegration
 - [x] Emits `ActionComplete` after each action
-- [x] Emits `UiStateChange` (working → idle/error) for Orb feedback
+- [x] Emits `UiStateChange` (working -> idle/error) for Orb feedback
 - [x] Stops plan execution on first failure
 
 ### 2.5 — System integration
 - [x] `system/dbus.rs` — `DbusIntegration`: listens for `SystemAction` events
-  - `notify` → `notify-send`
-  - `media_play_pause/next/previous` → `playerctl` / `dbus-send` fallback
-  - `brightness_up/down` → `brightnessctl`
-  - `volume_up/down/mute` → `pactl`
+  - `notify` -> `notify-send`
+  - `media_play_pause/next/previous` -> `playerctl` / `dbus-send` fallback
+  - `brightness_up/down` -> `brightnessctl`
+  - `volume_up/down/mute` -> `pactl`
 - [x] `system/hotkeys.rs` — `HotkeyManager`: UDS socket at `/tmp/mavis_hotkey.sock`
   - Wayland-compatible (no X11 grab needed)
   - Emits `UserIntent` with `trigger: "hotkey"`
@@ -187,7 +187,7 @@
 - [x] Hotkey socket accepts connections and emits intents
 - [x] File changes appear in working memory via `ContextUpdate`
 - [x] Memory persists across restarts (SQLite)
-- [x] Planner decomposes intent → Executor runs actions
+- [x] Planner decomposes intent -> Executor runs actions
 - [x] `cargo test` passes (7 tests)
 - [x] Graceful shutdown under 1 second
 - [x] Tag: `v0.2.0-core-runtime`
@@ -196,7 +196,7 @@
 
 ## Phase 3 — AI Worker
 
-**Status:** ✅ COMPLETE (2026-08-10)
+**Status:** :white_check_mark: COMPLETE (2026-08-10)
 
 **Goal:** Replace `[STUB]` with real model loading. Local quantized LLM in 6GB VRAM. First inference. Worker lifecycle managed.
 
@@ -211,15 +211,15 @@
 - [x] Eager spawn — worker starts with runtime, socket ready immediately
 - [x] Health check every 30s. Restart if dead.
 - [x] Idle timeout — request model unload after 5 min. Reclaim VRAM.
-- [x] Crash recovery — restart once. Second crash within 60s → mark unavailable.
+- [x] Crash recovery — restart once. Second crash within 60s -> mark unavailable.
 - [x] `MAVIS_PYTHON_PATH` env var for venv python
 
 ### 3.3 — Model loading
 - [x] **Decision:** `llama-cpp-python` with quantized models (Q4_K_M)
-- [x] Target: 3–4 GB model, 2–3 GB headroom on RTX 4050 6GB
+- [x] Target: 3-4 GB model, 2-3 GB headroom on RTX 4050 6GB
 - [x] Primary: `Phi-3-mini-4k-instruct-Q4_K_M.gguf` (~2.3 GB)
 - [x] `mavis_worker/src/mavis/inference/engine.py` — `load_model()`, `generate()`, `chat()`, `get_memory_usage()`
-- [x] First inference: "Hello MAVIS" → load → generate → orb `Thinking → Speaking`
+- [x] First inference: "Hello MAVIS" -> load -> generate -> orb `Thinking -> Speaking`
 
 ### 3.4 — Prompt system
 - [x] `mavis_worker/src/mavis/inference/prompts.py` — prompt templates
@@ -228,7 +228,7 @@
 - [x] Context injection from working memory
 
 ### 3.5 — Phase 3 wrap-up
-- [x] First request → worker spawns → model loads → response → orb animates. Under 10s.
+- [x] First request -> worker spawns -> model loads -> response -> orb animates. Under 10s.
 - [x] Worker unloads after idle. VRAM reclaimed.
 - [x] Crash recovery works.
 - [x] Tag: `v0.3.0-ai-worker`
@@ -237,7 +237,7 @@
 
 ## Phase 4 — Integration
 
-**Status:** 🚧 IN PROGRESS (2026-08-10 — ongoing)
+**Status:** :white_check_mark: COMPLETE (2026-08-26)
 
 **Goal:** Voice in, voice out. Intent classification. First automations.
 
@@ -256,7 +256,7 @@
 - [x] Executor emits `UiStateChange("speaking")` before TTS and `idle` after.
 
 ### 4.3 — Voice loop & feedback prevention
-- [x] E2E flow: speak → VAD detects → STT transcribes → Planner routes → LLM generates → Executor runs TTS → Amy speaks.
+- [x] E2E flow: speak -> VAD detects -> STT transcribes -> Planner routes -> LLM generates -> Executor runs TTS -> Amy speaks.
 - [x] TTS feedback loop prevented via `tts_active` atomic flag + mute controller task.
 - [x] STT drops samples while `tts_active=true`.
 
@@ -275,7 +275,7 @@
 - [x] E2E clean loop verified — no self-triggering
 
 ### 4.6 — Session fixes (2026-08-17)
-- [x] Aggressive `_post_process()` — strips `===`, markdown, bullets, truncates to 1–2 sentences
+- [x] Aggressive `_post_process()` — strips `===`, markdown, bullets, truncates to 1-2 sentences
 - [x] TTS prosody — `--length-scale 1.15`, `--sentence-silence 0.25`, auto-detect `lessac` > `ryan` > `amy`
 - [x] VAD noise floor fix — `reset()` resets floor to 0.005, capped at 0.015, multiplier 1.5 capped at 0.022
 - [x] Pre-emphasis regression fix — removed pre-emphasis filter that attenuated voice energy
@@ -289,14 +289,14 @@
 - [x] Worker eager spawn
 - [x] STT request timeout for model load
 - [x] faster-whisper model cached locally
-- [x] E2E voice loop wired (speak → hear response)
+- [x] E2E voice loop wired (speak -> hear response)
 - [x] E2E voice loop verified clean (no self-triggering)
 - [x] Phi-3 manual chat template (no prompt regurgitation)
 - [x] Working memory injection into LLM prompt
 - [x] Adaptive VAD noise floor updating per-utterance
 - [x] LLM response quality (no `===`/markdown/repetition)
 - [x] TTS naturalness (prosody settings)
-- [ ] Idle unload verified with both models
+- [x] Idle unload verified with both models
 - [ ] Fan noise robust filtering (may need silero-vad)
 - [ ] Niri hotkey binding for push-to-talk (deferred to Phase 5)
 
@@ -304,15 +304,49 @@
 
 ## Phase 5 — Interaction Polish & Personality Foundation
 
+**Status:** :construction: IN PROGRESS (2026-08-26 — ongoing)
+
 **Goal:** Close the gap between "it works" and "it feels good to use every day." Establish the emotional baseline.
 
-- [ ] **STT confidence threshold** — Filter low-confidence transcriptions before Planner
-- [ ] **TTS queue / interruption** — Allow new user speech to interrupt ongoing TTS (polite cutoff)
-- [ ] **Voice activity LED** — Orb brightness pulses with VAD energy (subtle, non-distracting)
-- [ ] **Session state recovery** — If Rust crashes, resume working memory from last snapshot
-- [ ] **Audio device selection** — Respect `MAVIS_AUDIO_DEVICE` env var; fallback chain
-- [ ] **Emotional expression through orb** — Orb color / pulse / glow maps to companion state (listening, thinking, working, idle, concerned, celebrating). Never anthropomorphic face — abstract emotion only.
-- [ ] **Conversation style baseline** — Consistent tone: warm, concise, helpful, never obsequious. Defined in system prompt and enforced by post-processor.
+### 5.1 — TTS Queue & Interruption
+- [x] Non-blocking `say()` — queues text via `mpsc`, returns immediately
+- [x] Background task handles sequential playback
+- [x] `interrupt()` sends `kill -15` to current audio PID + drains queue
+- [x] Intent router publishes `TtsInterrupt` when speech detected during TTS
+- [x] Mute controller only unblocks mic on `idle`/`error`
+
+### 5.2 — Session State Recovery
+- [x] `WorkingMemory` serialization (`to_json()` / `from_json()` via serde_json)
+- [x] Hydration on startup — reads `../memory/working_memory.json`
+- [x] Debounced auto-save (1s max rate) after every `process_event()`
+- [x] Shutdown save — `memory.save_working().await` before `bus.close()`
+
+### 5.3 — Orb Emotional Expression
+- [x] `Celebrating` state — warm gold pulse after successful completion
+- [x] Rendered in orb for ~1.2s before returning to idle
+
+### 5.4 — Voice Activity LED
+- [x] Real-time VAD energy piped to orb brightness
+- [x] Peak-hold + decay (`*= 0.92` per frame)
+- [x] Per-state energy scale: Listening=0.50, Idle=0.20, others lower
+
+### 5.5 — Audio Device Selection
+- [x] `MAVIS_AUDIO_DEVICE` env var respected for mic (exact CPAL name match)
+- [x] `MAVIS_AUDIO_DEVICE` env var respected for output (`--device` for pw-play/paplay)
+
+### 5.6 — Bug Fixes (2026-08-29)
+- [x] **Echo cancellation** — VAD reset + 250ms post-TTS cooldown prevents TTS feedback loop
+- [x] **Name extraction** — Fixed offset bug (13->11) + added denylist for false positives
+- [x] **BrokenPipeError** — Rust warmup reads response before close; worker catches disconnects silently
+- [x] **Prompt pollution** — Echo deduplication filters STT-transcribed TTS from working memory
+- [x] **warm_up crash** — Added `warm_up()` method to `LlamaEngine`
+- [x] **VRAM OOM** — Reduced `n_gpu_layers` from -1 to 20 for 6GB stability
+
+### 5.7 — Remaining
+- [ ] Conversation style baseline — tighten system prompt + post-processor for warm/concise tone
+- [ ] TTS voice selection — `MAVIS_TTS_VOICE=piper|kokoro` instead of engine-only env var
+- [ ] Hotkey-triggered active listen — DBus/hotkey bypasses confidence gate
+- [ ] E2E verification of all fixes
 
 ---
 
@@ -343,11 +377,11 @@
 ### 7.1 Intelligent Memory Pipeline
 
 ```
-Working Memory (session) ──► Episodic (sqlite, 30 days) ──► Long-Term (sqlite + embeddings)
-                                    │                              │
-                                    ▼                              ▼
+Working Memory (session) ---> Episodic (sqlite, 30 days) ---> Long-Term (sqlite + embeddings)
+                                    |                              |
+                                    v                              v
                             Importance scoring              Consolidation (nightly)
-                            (LLM rates 1–10)                (summarize, compress, embed)
+                            (LLM rates 1-10)                (summarize, compress, embed)
 ```
 
 - [ ] **Importance scoring** — After each interaction, lightweight LLM call rates memory importance
@@ -401,17 +435,17 @@ Working Memory (session) ──► Episodic (sqlite, 30 days) ──► Long-Ter
 
 - [ ] **Command validation** — Static regex / deny-list for dangerous commands (`rm -rf /`, `mkfs`, `dd if=/dev/zero`)
 - [ ] **Risk scoring** — Static analysis + heuristic scoring: file deletion = high risk; file creation = low; network call = medium
-- [ ] **LLM validation** — Second-pass LLM call rates risk 1–10 for any `Execute` action; blocks if ≥ 8 without `Administrator` tier
+- [ ] **LLM validation** — Second-pass LLM call rates risk 1-10 for any `Execute` action; blocks if >= 8 without `Administrator` tier
 - [ ] **Rollback where possible** — File operations create `.mavis-backup/` snapshots before destructive actions; allow undo within 5 minutes
-- [ ] **Confirmation for destructive actions** — Any action with risk ≥ 5 requires explicit user confirmation; no silent execution
+- [ ] **Confirmation for destructive actions** — Any action with risk >= 5 requires explicit user confirmation; no silent execution
 
 ### 8.3 Confirmation Flow
 
 ```
-Executor proposes action → Risk score computed
-    → If score < 3: execute silently (respects "Never intrusive")
-    → If score 3–7: TTS "Shall I <action>?" → wait 5 s for "yes" / orb tap
-    → If score ≥ 8: TTS "This requires administrator permission. Confirm?" → require explicit "yes, administrator"
+Executor proposes action -> Risk score computed
+    -> If score < 3: execute silently (respects "Never intrusive")
+    -> If score 3-7: TTS "Shall I <action>?" -> wait 5 s for "yes" / orb tap
+    -> If score >= 8: TTS "This requires administrator permission. Confirm?" -> require explicit "yes, administrator"
 ```
 
 ---
@@ -533,10 +567,10 @@ Executor proposes action → Risk score computed
 
 - [ ] **Local model registry** — `~/.config/mavis/models/` with manifests
 - [ ] **Capability-based routing** — Planner chooses model by task:
-  - Chat / reasoning → Phi-3 / Llama-3
-  - Code → CodeLlama / DeepSeek-Coder
-  - Vision → LLaVA / BakLLaVA
-  - Fast fallback → Phi-3-mini for low-latency intents
+  - Chat / reasoning -> Phi-3 / Llama-3
+  - Code -> CodeLlama / DeepSeek-Coder
+  - Vision -> LLaVA / BakLLaVA
+  - Fast fallback -> Phi-3-mini for low-latency intents
 - [ ] **Model benchmarking** — Automatic perplexity / latency benchmarks on user hardware; ranks models
 - [ ] **Automatic model selection** — Pick best model per task based on benchmark scores and current resource availability
 - [ ] **Cloud fallback** — Optional, opt-in, privacy-preserving (no conversation text sent; only anonymized embeddings if needed)
@@ -567,7 +601,7 @@ Executor proposes action → Risk score computed
 5. **Event bus** — UDS + JSON. No HTTP, no gRPC, no cloud APIs in core loop.
 6. **Local-first, privacy-first** — No telemetry. No cloud STT/TTS by default. All models local.
 7. **Voice is interface, not identity** — MAVIS does not "become" a voice. The orb is the identity.
-8. **Layered memory** — Permanent → Long-Term → Episodic → Session → Working. No single flat store.
+8. **Layered memory** — Permanent -> Long-Term -> Episodic -> Session -> Working. No single flat store.
 9. **AI-agnostic** — Prompts and context format must work with Phi-3, Llama, Mistral, etc.
 10. **"Always present. Never intrusive."** — Every feature must pass this test before shipping.
 
@@ -610,4 +644,4 @@ Executor proposes action → Risk score computed
 
 ---
 
-*Last updated: 2026-08-19*
+*Last updated: 2026-08-29*
