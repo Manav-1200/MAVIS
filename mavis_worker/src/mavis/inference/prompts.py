@@ -51,12 +51,29 @@ def build_chat_messages(
             else:
                 context_lines.append(f"- [{source}] {content}")
 
+    # Echo deduplication: if a [user] line is contained in or very similar to
+    # the most recent [mavis] line, it's STT picking up TTS output — drop it.
+    filtered_context: list[str] = []
+    last_mavis: str | None = None
+    for line in context_lines:
+        if line.startswith("- [mavis]"):
+            last_mavis = line[len("- [mavis] ") :].strip().lower()
+            filtered_context.append(line)
+        elif line.startswith("- [user]") and last_mavis is not None:
+            user_text = line[len("- [user] ") :].strip().lower()
+            # Drop if the user "message" is substantially the same as MAVIS's last output
+            if user_text in last_mavis or last_mavis in user_text:
+                continue
+            filtered_context.append(line)
+        else:
+            filtered_context.append(line)
+
     # Assemble system prompt: base + profile facts + working memory bullets
     system = system_prompt
     if profile_lines:
         system += "\n\n" + "\n".join(profile_lines)
-    if context_lines:
-        system += "\n\nWorking Memory:\n" + "\n".join(context_lines)
+    if filtered_context:
+        system += "\n\nWorking Memory:\n" + "\n".join(filtered_context)
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]
 
