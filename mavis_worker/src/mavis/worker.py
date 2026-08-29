@@ -55,7 +55,13 @@ class WorkerServer:
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
             while self.running:
-                raw_len = await reader.readexactly(4)
+                try:
+                    raw_len = await reader.readexactly(4)
+                except (asyncio.IncompleteReadError, BrokenPipeError, ConnectionResetError):
+                    # Client closed connection normally (e.g., after reading response,
+                    # or fire-and-forget warmup that now reads the response).
+                    break
+
                 length = struct.unpack("<I", raw_len)[0]
                 if length > 10_000_000:
                     break
@@ -76,10 +82,7 @@ class WorkerServer:
                     await writer.drain()
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     # Client closed connection before reading response
-                    # (e.g., fire-and-forget warmup from Rust side)
-                    pass
-        except asyncio.IncompleteReadError:
-            pass
+                    break
         except asyncio.CancelledError:
             raise
         except Exception:  # noqa: BLE001
