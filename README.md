@@ -26,26 +26,26 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 ## Architecture
 
 ```
-┌─────────────┐     ┌─────────────┐
-│ Living Orb  │────▶│   Context   │
-│   (Rust)    │     │   Engine    │
-└─────────────┘     │   (Rust)    │
-       ▲            └──────┬──────┘
-       │                   │
-       │            ┌──────▼──────┐
-       │            │   Planner   │
-       │            │   (Rust)    │
-       │            └──────┬──────┘
-       │                   │
-       │            ┌──────▼──────┐
-       │            │   Executor  │
-       │            │   (Rust)    │
-       │            └──────┬──────┘
-       │                   │
-       │            ┌──────▼──────┐
-       └────────────│ AI Worker   │
-                    │  (Python)   │
-                    └─────────────┘
++-------------+     +-------------+
+| Living Orb  |---->|   Context   |
+|   (Rust)    |     |   Engine    |
++-------------+     |   (Rust)    |
+       ^            +------+------+
+       |                   |
+       |            +------v------+
+       |            |   Planner   |
+       |            |   (Rust)    |
+       |            +------+------+
+       |                   |
+       |            +------v------+
+       |            |   Executor  |
+       |            |   (Rust)    |
+       |            +------+------+
+       |                   |
+       |            +------v------+
+       +------------| AI Worker   |
+                    |  (Python)   |
+                    +-------------+
 ```
 
 **Runtime split:**
@@ -60,11 +60,11 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 
 | Phase | What | Status |
 |-------|------|--------|
-| 1 — Foundation | Rust runtime, event bus, orb window | ✅ Complete |
-| 2 — Core Runtime | Context engine, memory, system integration | ✅ Complete |
-| 3 — AI Worker | Local LLM, Rust–Python bridge | ✅ Complete |
-| 4 — Integration | Voice pipeline, intent system, automations | 🚧 In Progress |
-| 5 — Interaction Polish | Push-to-talk, TTS interruption, personality | Not started |
+| 1 — Foundation | Rust runtime, event bus, orb window | :white_check_mark: Complete |
+| 2 — Core Runtime | Context engine, memory, system integration | :white_check_mark: Complete |
+| 3 — AI Worker | Local LLM, Rust–Python bridge | :white_check_mark: Complete |
+| 4 — Integration | Voice pipeline, intent system, automations | :white_check_mark: Complete |
+| 5 — Interaction Polish | TTS queue, interruption, session recovery, personality | :construction: In Progress |
 | 6 — Context Awareness | Active window, clipboard, browser, IDE | Not started |
 | 7 — Memory & Learning | Semantic recall, vector embeddings, routines | Not started |
 | 8 — Safety & Permissions | Permission tiers, risk scoring, audit log | Not started |
@@ -80,11 +80,11 @@ Full roadmap in [`PHASES.md`](PHASES.md).
 | Layer | Tools |
 |-------|-------|
 | Runtime | Rust, tokio, serde, rusqlite |
-| UI | winit → raw Wayland |
+| UI | winit -> raw Wayland |
 | System | DBus, inotify, global hotkeys |
 | AI | Python, llama-cpp-python (Q4_K_M) |
 | STT | faster-whisper (CPU int8) |
-| TTS | piper |
+| TTS | piper, kokoro |
 | Audio | cpal |
 | Bridge | UDS + length-prefixed JSON |
 | Platform | Traits for Linux/Windows/macOS |
