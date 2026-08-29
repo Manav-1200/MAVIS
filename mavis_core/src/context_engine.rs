@@ -208,10 +208,21 @@ impl ContextEngine {
 // ---------------------------------------------------------------------
 // Name extraction — simple pattern matching, no NLP dependency.
 // ---------------------------------------------------------------------
+
+/// Common words that are NOT names. Prevents false positives like
+/// "No, I'm here" → "Here".
+const NAME_DENYLIST: &[&str] = &[
+    "here", "there", "sure", "ok", "fine", "good", "ready", "back",
+    "home", "done", "right", "well", "yeah", "yes", "no", "maybe",
+    "nothing", "something", "anything", "everything", "someone",
+    "everyone", "nobody", "anybody", "today", "tomorrow", "yesterday",
+    "talking", "speaking", "listening", "waiting", "coming", "going",
+];
+
 fn extract_user_name(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     let patterns = [
-        ("my name is ", 11),   // FIXED: was 13
+        ("my name is ", 11),
         ("i am ", 5),
         ("i'm ", 4),
         ("call me ", 8),
@@ -228,14 +239,18 @@ fn extract_user_name(text: &str) -> Option<String> {
                 .next()?
                 .trim_end_matches(|c: char| c.is_ascii_punctuation())
                 .to_string();
-            if !name.is_empty() && name.len() < 30 {
-                let mut chars = name.chars();
-                let capitalized = match chars.next() {
-                    Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
-                    None => name,
-                };
-                return Some(capitalized);
+            if name.is_empty() || name.len() >= 30 {
+                continue;
             }
+            if NAME_DENYLIST.contains(&name.to_lowercase().as_str()) {
+                continue;
+            }
+            let mut chars = name.chars();
+            let capitalized = match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+                None => name,
+            };
+            return Some(capitalized);
         }
     }
     None
