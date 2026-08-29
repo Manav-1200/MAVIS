@@ -6,6 +6,7 @@ use cpal::{Device, SampleFormat, SampleRate, SupportedStreamConfig};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 use log::{error, info, warn};
 
@@ -314,6 +315,11 @@ impl SttManager {
                 let energy_tx = energy_tx.clone();
                 let bus_for_ui = bus.clone();
                 let speech_start = speech_start_tx.clone();
+
+                // Echo-cancellation state: track TTS transitions and enforce cooldown
+                let mut was_tts_active = false;
+                let mut post_tts_cooldown: Option<Instant> = None;
+
                 device
                     .build_input_stream(
                         &stream_config.into(),
@@ -321,10 +327,11 @@ impl SttManager {
                             if !running_stream.load(Ordering::Relaxed) {
                                 return;
                             }
-                            if tts_active_stream.load(Ordering::Relaxed) {
-                                return;
-                            }
 
+                            let is_tts_active = tts_active_stream.load(Ordering::Relaxed);
+
+                            // Convert to mono and resample regardless of TTS state
+                            // so we don't drop frames that CPAL expects us to consume
                             let mono: Vec<f32> = if channels == 1 {
                                 data.to_vec()
                             } else {
@@ -340,6 +347,35 @@ impl SttManager {
                                 resample_linear(&mono, sample_rate, target as u32)
                             };
 
+                            // -----------------------------------------------------------------
+                            // TTS is active — discard everything to prevent echo contamination
+                            // -----------------------------------------------------------------
+                            if is_tts_active {
+                                was_tts_active = true;
+                                let mut vad_guard = vad.lock().unwrap();
+                                vad_guard.reset();
+                                return;
+                            }
+
+                            // -----------------------------------------------------------------
+                            // TTS just ended — reset VAD and enter cooldown so room echo decays
+                            // -----------------------------------------------------------------
+                            if was_tts_active {
+                                let mut vad_guard = vad.lock().unwrap();
+                                vad_guard.reset();
+                                was_tts_active = false;
+                                post_tts_cooldown = Some(Instant::now());
+                                drop(vad_guard);
+                            }
+
+                            if let Some(start) = post_tts_cooldown {
+                                if start.elapsed() < Duration::from_millis(250) {
+                                    return;
+                                }
+                                post_tts_cooldown = None;
+                            }
+
+                            // Only send energy for actual user voice (not TTS echo)
                             if !resampled.is_empty() {
                                 let frame_energy = (resampled.iter().map(|s| s * s).sum::<f32>() / resampled.len() as f32).sqrt();
                                 let _ = energy_tx.try_send(frame_energy);
