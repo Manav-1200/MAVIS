@@ -1,4 +1,12 @@
+// mavis_core/src/main.rs
 // Entry point. Initializes subsystems, wires them together, runs until shutdown.
+//
+// CHANGELOG 2026-08-26 (Phase 5):
+//   - Intent router: interrupts TTS when user speaks during playback
+//   - Mute controller: only unblocks mic on idle/error (not working/thinking/listening)
+//   - Voice activity LED: real-time VAD energy piped to orb
+//   - Warm-up fix: reads worker response before closing socket (no BrokenPipeError)
+//   - Shutdown save: working_memory.json written before bus.close()
 
 use anyhow::Result;
 use log::{info, warn};
@@ -180,7 +188,7 @@ async fn main() -> Result<()> {
 
     // Parallel LLM warm-up
     let warmup_handle = tokio::spawn(async move {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixStream;
         use tokio::time::{timeout, Duration};
 
@@ -198,6 +206,15 @@ async fn main() -> Result<()> {
                 stream.write_all(&(req_bytes.len() as u32).to_le_bytes()).await?;
                 stream.write_all(&req_bytes).await?;
                 stream.flush().await?;
+                // Read and discard response so the worker doesn't get BrokenPipeError
+                // when it tries to write to a socket we've closed.
+                let mut len_buf = [0u8; 4];
+                let _ = timeout(Duration::from_secs(5), stream.read_exact(&mut len_buf)).await;
+                let resp_len = u32::from_le_bytes(len_buf) as usize;
+                if resp_len > 0 && resp_len < 10_000_000 {
+                    let mut resp_buf = vec![0u8; resp_len];
+                    let _ = timeout(Duration::from_secs(5), stream.read_exact(&mut resp_buf)).await;
+                }
                 Ok::<_, std::io::Error>(())
             }).await;
         }
