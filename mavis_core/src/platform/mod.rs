@@ -42,12 +42,6 @@ pub trait ScreenGrabber {
     fn capture_focused(&self) -> Result<Screenshot, PlatformError>;
 }
 
-pub trait TtsPlayer {
-    /// Speak text using native TTS (SAPI5 / say / Piper).
-    fn speak(&self, text: &str) -> Result<(), PlatformError>;
-    fn stop(&self) -> Result<(), PlatformError>;
-}
-
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
@@ -124,5 +118,4 @@ pub trait PlatformProvider: Send + Sync {
     fn windows(&self) -> Option<&dyn WindowTracker>;
     fn clipboard(&self) -> Option<&dyn ClipboardReader>;
     fn screen(&self) -> Option<&dyn ScreenGrabber>;
-    fn tts(&self) -> Option<&dyn TtsPlayer>;
 }
