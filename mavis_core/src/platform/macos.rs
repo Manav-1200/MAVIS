@@ -13,7 +13,6 @@ impl MacOsProvider {
 struct MacOsWindowTracker;
 struct MacOsClipboard;
 struct MacOsScreen;
-struct MacOsTts;
 
 impl WindowTracker for MacOsWindowTracker {
     fn active_window(&self) -> Result<(String, String, u32), PlatformError> {
@@ -39,15 +38,6 @@ impl ScreenGrabber for MacOsScreen {
     }
 }
 
-impl TtsPlayer for MacOsTts {
-    fn speak(&self, _text: &str) -> Result<(), PlatformError> {
-        Err(PlatformError("macOS TTS not yet implemented".into()))
-    }
-    fn stop(&self) -> Result<(), PlatformError> {
-        Err(PlatformError("macOS TTS not yet implemented".into()))
-    }
-}
-
 impl PlatformProvider for MacOsProvider {
     fn audio(&self) -> Option<&dyn AudioCapture> {
         None
@@ -59,9 +49,6 @@ impl PlatformProvider for MacOsProvider {
         None
     }
     fn screen(&self) -> Option<&dyn ScreenGrabber> {
-        None
-    }
-    fn tts(&self) -> Option<&dyn TtsPlayer> {
         None
     }
 }
