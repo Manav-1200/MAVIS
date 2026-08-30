@@ -3,14 +3,11 @@
 //! Window tracking: tries niri, sway, hyprland, then xdotool.
 //! Clipboard: wl-paste (Wayland) or xclip (X11).
 //! Screen: grim (Wayland) or import (X11).
-//! TTS: Piper via subprocess.
 
 use super::*;
 use log::{info, warn};
 use serde_json::Value;
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
@@ -18,7 +15,6 @@ pub struct LinuxProvider {
     windows: Option<LinuxWindowTracker>,
     clipboard: Option<LinuxClipboard>,
     screen: Option<LinuxScreen>,
-    tts: Option<LinuxTts>,
 }
 
 impl LinuxProvider {
@@ -44,7 +40,6 @@ impl LinuxProvider {
             } else {
                 None
             },
-            tts: Some(LinuxTts::new()),
         }
     }
 }
@@ -61,9 +56,6 @@ impl PlatformProvider for LinuxProvider {
     }
     fn screen(&self) -> Option<&dyn ScreenGrabber> {
         self.screen.as_ref().map(|s| s as &dyn ScreenGrabber)
-    }
-    fn tts(&self) -> Option<&dyn TtsPlayer> {
-        self.tts.as_ref().map(|t| t as &dyn TtsPlayer)
     }
 }
 
@@ -292,51 +284,4 @@ fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
     let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
     Some((w, h))
-}
-
-// ---------------------------------------------------------------------------
-// TTS
-// ---------------------------------------------------------------------------
-
-struct LinuxTts {
-    speaking: Arc<AtomicBool>,
-}
-
-impl LinuxTts {
-    fn new() -> Self {
-        Self { speaking: Arc::new(AtomicBool::new(false)) }
-    }
-}
-
-impl TtsPlayer for LinuxTts {
-    fn speak(&self, text: &str) -> Result<(), PlatformError> {
-        self.stop()?;
-        let speaking = self.speaking.clone();
-        speaking.store(true, Ordering::SeqCst);
-        let text = text.to_string();
-
-        std::thread::spawn(move || {
-            let _ = std::process::Command::new("piper")
-                .args(&["--model", &std::env::var("MAVIS_PIPER_MODEL").unwrap_or_else(|_| "amy-medium".to_string())])
-                .args(&["--length-scale", "1.15", "--sentence-silence", "0.25"])
-                .stdin(std::process::Stdio::piped())
-                .spawn()
-                .and_then(|mut child| {
-                    use std::io::Write;
-                    if let Some(mut stdin) = child.stdin.take() {
-                        let _ = stdin.write_all(text.as_bytes());
-                    }
-                    child.wait()
-                });
-            speaking.store(false, Ordering::SeqCst);
-        });
-
-        Ok(())
-    }
-
-    fn stop(&self) -> Result<(), PlatformError> {
-        let _ = std::process::Command::new("pkill").arg("-f").arg("piper").status();
-        self.speaking.store(false, Ordering::SeqCst);
-        Ok(())
-    }
 }
