@@ -13,7 +13,6 @@ impl WindowsProvider {
 struct WindowsWindowTracker;
 struct WindowsClipboard;
 struct WindowsScreen;
-struct WindowsTts;
 
 impl WindowTracker for WindowsWindowTracker {
     fn active_window(&self) -> Result<(String, String, u32), PlatformError> {
@@ -39,15 +38,6 @@ impl ScreenGrabber for WindowsScreen {
     }
 }
 
-impl TtsPlayer for WindowsTts {
-    fn speak(&self, _text: &str) -> Result<(), PlatformError> {
-        Err(PlatformError("Windows TTS not yet implemented".into()))
-    }
-    fn stop(&self) -> Result<(), PlatformError> {
-        Err(PlatformError("Windows TTS not yet implemented".into()))
-    }
-}
-
 impl PlatformProvider for WindowsProvider {
     fn audio(&self) -> Option<&dyn AudioCapture> {
         None
@@ -59,9 +49,6 @@ impl PlatformProvider for WindowsProvider {
         None
     }
     fn screen(&self) -> Option<&dyn ScreenGrabber> {
-        None
-    }
-    fn tts(&self) -> Option<&dyn TtsPlayer> {
         None
     }
 }
