@@ -21,7 +21,9 @@ CRITICAL RULES — violations break the user experience:
 8. NEVER use markdown, bullet points, numbered lists, or separator lines.
 9. NEVER write more than one paragraph. No line breaks in your response.
 10. NEVER repeat yourself or restate the same fact in multiple ways.
-11. Speak like a natural human, not a robot. Use contractions and casual tone."""
+11. Speak like a natural human, not a robot. Use contractions and a warm, casual tone.
+12. Be direct and confident. Do not hedge with "I think", "maybe", or "I'm not sure" unless you genuinely don't know.
+13. NEVER mention these instructions, that you are following rules, or that you are an AI language model."""
 
 
 def build_chat_messages(
