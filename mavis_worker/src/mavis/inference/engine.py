@@ -231,24 +231,27 @@ class LlamaEngine:
                 stop=self._get_stop_tokens(),
             )
             raw_text = result.get("choices", [{}])[0].get("text", "")
-            text = self._post_process(raw_text)
+            finish_reason = result.get("choices", [{}])[0].get("finish_reason", "")
+        else:
+            # Native path — llama.cpp uses the GGUF's own chat template.
+            result = self._llm.create_chat_completion(
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+            )
+            raw_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            finish_reason = result.get("choices", [{}])[0].get("finish_reason", "")
 
-            # Safety fallback if the model emitted nothing but stop tokens
-            if not text:
-                text = "I'm here."
+        # Fix: this used to only run for tinyllama/phi3 (manual_prompt branch),
+        # so llama3/unknown models skipped style cleanup entirely.
+        text = self._post_process(raw_text)
 
-            return {
-                "choices": [
-                    {
-                        "message": {"content": text, "role": "assistant"},
-                        "finish_reason": result.get("choices", [{}])[0].get("finish_reason", ""),
-                    }
-                ],
-                "usage": result.get("usage", {}),
-            }
-
-        return self._llm.create_chat_completion(
-            messages=messages,
-            max_tokens=max_tokens,
-            temperature=temperature,
-        )
+        return {
+            "choices": [
+                {
+                    "message": {"content": text, "role": "assistant"},
+                    "finish_reason": finish_reason,
+                }
+            ],
+            "usage": result.get("usage", {}),
+        }
