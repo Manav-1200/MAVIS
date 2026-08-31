@@ -22,7 +22,9 @@ class LlamaEngine:
 
     def _resolve_model_path(self) -> str:
         if self._model_path:
-            return self._model_path
+            configured = Path(self._model_path).expanduser()
+            if configured.exists():
+                return str(configured)
 
         candidates = [
             Path.home() / ".local/share/mavis/models/Phi-3-mini-4k-instruct-Q4_K_M.gguf",

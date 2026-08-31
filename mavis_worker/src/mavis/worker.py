@@ -32,7 +32,11 @@ def _make_event(payload: dict, event_type: str = "WorkerResponse") -> dict:
 class WorkerServer:
     def __init__(self, socket_path: str = "/tmp/mavis_worker.sock"):
         self.socket_path = socket_path
-        self.engine = LlamaEngine()
+        self.config = load_config()
+        self.engine = LlamaEngine(
+            model_path=self.config.get("model.path"),
+            n_gpu_layers=self.config.get("model.n_gpu_layers", 20),
+        )
         self.stt_engine = STTEngine(
             model_size="small",
             device="cpu",
@@ -40,7 +44,6 @@ class WorkerServer:
             confidence_threshold=0.6,
         )
         self.tts_engine = TTSEngine()
-        self.config = load_config()
 
         # Separate executors so STT never blocks behind TTS warm-up or LLM inference.
         self.llm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="llm")

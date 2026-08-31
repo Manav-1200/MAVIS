@@ -68,7 +68,7 @@ class AppConfig:
             "model": {
                 "path": "~/.local/share/mavis/models/Llama-3.1-8B-Instruct-Q4_K_M.gguf",
                 "n_ctx": 4096,
-                "n_gpu_layers": -1,
+                "n_gpu_layers": 20,
                 "verbose": False,
             },
             "worker": {
