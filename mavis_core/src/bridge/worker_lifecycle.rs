@@ -84,6 +84,7 @@ impl WorkerLifecycle {
         let mut child = Command::new(&self.python_path)
             .arg("-m")
             .arg(&self.worker_module)
+            .env("PYTHONUNBUFFERED", "1")
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)

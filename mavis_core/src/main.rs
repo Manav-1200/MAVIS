@@ -132,7 +132,7 @@ async fn main() -> Result<()> {
     let bus_for_stt_start = Arc::clone(&bus);
     let (speech_start_tx, mut speech_start_rx) = mpsc::channel::<()>(8);
     let (stt_handle, mut utterance_rx, mut energy_rx) = stt::SttManager::new(stt::SttConfig::default())
-        .start(bus_for_stt_start, Some(speech_start_tx));
+        .start(bus_for_stt_start, Some(speech_start_tx), tts_active.clone());
     let bus_for_stt = Arc::clone(&bus);
 
     // Voice activity LED — pipe real-time VAD energy into the orb

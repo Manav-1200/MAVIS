@@ -217,8 +217,8 @@ const NAME_DENYLIST: &[&str] = &[
     "nothing", "something", "anything", "everything", "someone",
     "everyone", "nobody", "anybody", "today", "tomorrow", "yesterday",
     "talking", "speaking", "listening", "waiting", "coming", "going",
+    "not", "in", "looking", "mavis",
 ];
-
 fn extract_user_name(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     let patterns = [

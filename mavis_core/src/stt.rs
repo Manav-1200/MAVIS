@@ -261,10 +261,14 @@ impl SttManager {
         Self { config }
     }
 
-    pub fn start(self, bus: Arc<EventBus>, speech_start_tx: Option<mpsc::Sender<()>>) -> (SttHandle, mpsc::Receiver<Vec<f32>>, mpsc::Receiver<f32>) {
+    pub fn start(
+        self,
+        bus: Arc<EventBus>,
+        speech_start_tx: Option<mpsc::Sender<()>>,
+        tts_active: Arc<AtomicBool>,
+    ) -> (SttHandle, mpsc::Receiver<Vec<f32>>, mpsc::Receiver<f32>) {
         let running = Arc::new(AtomicBool::new(true));
         let running_stream = running.clone();
-        let tts_active = Arc::new(AtomicBool::new(false));
         let tts_active_stream = tts_active.clone();
 
         let (tx, rx) = mpsc::channel::<Vec<f32>>(4);

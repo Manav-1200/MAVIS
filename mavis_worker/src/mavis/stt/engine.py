@@ -14,6 +14,23 @@ import numpy as np
 
 logger = logging.getLogger("mavis.stt")
 
+# Faster-whisper doesn't output silence as empty text — it hallucinates
+# plausible-sounding filler, often with HIGH confidence, since the model
+# is trained to always produce fluent speech. These are well-documented
+# recurring phrases from the whisper community, plus ones seen in testing.
+# Grows the same way NAME_DENYLIST does: add a phrase here when you catch
+# a new one, rather than trying to raise thresholds and losing sensitivity.
+HALLUCINATION_DENYLIST = {
+    "thank you for watching",
+    "thanks for watching",
+    "please subscribe to my channel",
+    "i don't know what i'm talking about",
+    "thank you",
+    "bye",
+    "bye bye",
+    "the end",
+}
+
 
 class STTEngine:
     """
@@ -160,6 +177,16 @@ class STTEngine:
 
         raw_text = " ".join(raw_parts).strip()
         text = self._deduplicate_repetition(raw_text)
+
+        # Hallucination denylist: known filler phrases the model produces on
+        # silence/near-silence, regardless of how confident it claims to be.
+        # Segment joins can leave double spaces, and the model sometimes uses
+        # curly apostrophes — normalize both before comparing.
+        normalized = re.sub(r"\s+", " ", text.strip().lower()).replace("\u2019", "'")
+        if normalized.rstrip(".!?") in HALLUCINATION_DENYLIST:
+            logger.info("STT: hallucination denylist match, dropping: %s", text[:80])
+            print(f"[stt] Hallucination denylist match, dropping: '{text[:80]}'", flush=True)
+            return ""
 
         # Confidence gate: drop ambient noise / hallucinations
         if not bypass_confidence and avg_confidence < self.confidence_threshold:
