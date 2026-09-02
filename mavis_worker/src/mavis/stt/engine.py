@@ -160,6 +160,7 @@ class STTEngine:
             language="en",
             condition_on_previous_text=False,
             vad_filter=False,  # Rust VAD already segmented; don't double-filter
+            initial_prompt="MAVIS",  # bias decoder toward this rare proper noun
         )
 
         # Consume generator so we can inspect per-segment confidence
@@ -191,13 +192,14 @@ class STTEngine:
         # Confidence gate: drop ambient noise / hallucinations
         if not bypass_confidence and avg_confidence < self.confidence_threshold:
             logger.info(
-                "STT: low confidence, dropping (avg=%.3f < %.3f)",
+                "STT: low confidence, dropping (avg=%.3f < %.3f): %s",
                 avg_confidence,
                 self.confidence_threshold,
+                text[:80],
             )
             print(
                 f"[stt] Low confidence ({avg_confidence:.3f} < {self.confidence_threshold}), "
-                "dropping utterance",
+                f"dropping utterance: '{text[:80]}'",
                 flush=True,
             )
             return ""
