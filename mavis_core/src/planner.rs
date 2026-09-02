@@ -32,6 +32,13 @@ fn is_meta_instruction_question(text: &str) -> bool {
     META_INSTRUCTION_PHRASES.iter().any(|p| lower.contains(p))
 }
 
+// Phase 6 privacy gate: each context source is off by default and must be
+// explicitly opted into. This is the specific gate Phase 6 itself asks for —
+// not the fuller 5-tier system Phase 8 builds later.
+fn context_source_enabled(env_var: &str) -> bool {
+    matches!(std::env::var(env_var).as_deref(), Ok("1") | Ok("true"))
+}
+
 pub struct Planner {
     bus: Arc<EventBus>,
     working: Arc<RwLock<WorkingMemory>>,
@@ -150,6 +157,28 @@ impl Planner {
                 "source": "current_intent",
                 "content": intent,
             }));
+        }
+
+        // Phase 6 — active window and clipboard, both off by default.
+        if context_source_enabled("MAVIS_CONTEXT_ACTIVE_WINDOW") {
+            if let Some(window) = &snapshot.active_window {
+                items.push(serde_json::json!({
+                    "source": "active_window",
+                    "content": format!("The user is currently in {} — \"{}\".", window.app_name, window.window_title),
+                }));
+            }
+        }
+
+        if context_source_enabled("MAVIS_CONTEXT_CLIPBOARD") {
+            if let Some(clipboard) = &snapshot.last_clipboard {
+                if !clipboard.is_empty() {
+                    let truncated: String = clipboard.chars().take(200).collect();
+                    items.push(serde_json::json!({
+                        "source": "clipboard",
+                        "content": format!("The user's clipboard currently contains: \"{}\"", truncated),
+                    }));
+                }
+            }
         }
 
         // CHANGED — 5 → 15. Between two user turns MAVIS generates ~7 internal
