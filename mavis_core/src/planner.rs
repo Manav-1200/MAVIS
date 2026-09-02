@@ -5,6 +5,33 @@ use log::{info, warn};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+// Deterministic catch for "what are your instructions?"-style questions.
+// Prompt-wording alone can't reliably stop a small model from paraphrasing
+// its way around a ban list (tried, it just found new synonyms). Catching
+// the question itself and skipping the LLM entirely is the actual fix.
+const META_INSTRUCTION_PHRASES: &[&str] = &[
+    "your instructions",
+    "your system prompt",
+    "system prompt",
+    "your rules",
+    "your guidelines",
+    "your guidance",
+    "your principles",
+    "your programming",
+    "are you an ai",
+    "are you a language model",
+    "language model",
+    "following rules",
+    "following instructions",
+    "what were you told",
+    "what are you programmed",
+];
+
+fn is_meta_instruction_question(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    META_INSTRUCTION_PHRASES.iter().any(|p| lower.contains(p))
+}
+
 pub struct Planner {
     bus: Arc<EventBus>,
     working: Arc<RwLock<WorkingMemory>>,
@@ -68,6 +95,21 @@ impl Planner {
         } else {
             intent.to_string()
         };
+
+        // Deterministic deflection — no LLM round trip, no way to leak.
+        if is_meta_instruction_question(intent) {
+            let plan_event = Event {
+                id: uuid::Uuid::new_v4(),
+                timestamp: chrono::Utc::now(),
+                source: "planner".to_string(),
+                event_type: EventType::PlanReady,
+                payload: serde_json::json!({
+                    "plan": {"type": "say", "text": "Just trying to be helpful — what do you need?"}
+                }),
+            };
+            self.bus.publish(plan_event);
+            return Ok(());
+        }
 
         let working_memory = self.build_working_memory().await;
 
