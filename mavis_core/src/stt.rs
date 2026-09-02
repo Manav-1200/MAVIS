@@ -23,7 +23,9 @@ pub struct SttConfig {
     pub silence_duration_ms: u64,
     pub min_speech_duration_ms: u64,
     pub frame_duration_ms: u64,
-    pub max_utterance_duration_ms: u64,
+    pub soft_max_duration_ms: u64,
+    pub grace_silence_ms: u64,
+    pub hard_max_duration_ms: u64,
     pub min_max_energy: f32,
 }
 
@@ -34,7 +36,15 @@ impl Default for SttConfig {
             silence_duration_ms: 600,
             min_speech_duration_ms: 250,
             frame_duration_ms: 30,
-            max_utterance_duration_ms: 15000,
+            // Past this much actual speech, switch to a short grace-period
+            // pause detector instead of waiting for a full 600ms pause —
+            // ends at the next natural gap instead of chopping mid-word.
+            soft_max_duration_ms: 20000,
+            grace_silence_ms: 150,
+            // Absolute ceiling regardless of pauses. Measured in buffered
+            // wall-clock time (not speech-frame count) since that's what
+            // actually bounds memory — a rare last resort, not the normal path.
+            hard_max_duration_ms: 45000,
             min_max_energy: 0.04,
         }
     }
@@ -48,7 +58,10 @@ struct EnergyVad {
     frame_size: usize,
     silence_threshold_frames: usize,
     min_speech_threshold_frames: usize,
-    max_speech_frames: usize,
+    soft_max_frames: usize,
+    grace_silence_frames: usize,
+    hard_max_samples: usize,
+    past_soft_ceiling: bool,
     base_threshold: f32,
     noise_floor: f32,
     buffer: VecDeque<f32>,
@@ -69,8 +82,13 @@ impl EnergyVad {
                 as usize,
             min_speech_threshold_frames: ((cfg.min_speech_duration_ms / cfg.frame_duration_ms)
                 .max(1)) as usize,
-            max_speech_frames: ((cfg.max_utterance_duration_ms / cfg.frame_duration_ms).max(1))
+            soft_max_frames: ((cfg.soft_max_duration_ms / cfg.frame_duration_ms).max(1))
                 as usize,
+            grace_silence_frames: ((cfg.grace_silence_ms / cfg.frame_duration_ms).max(1))
+                as usize,
+            hard_max_samples: (cfg.sample_rate as usize) * (cfg.hard_max_duration_ms as usize)
+                / 1000,
+            past_soft_ceiling: false,
             base_threshold: 0.02,
             noise_floor: 0.005,
             buffer: VecDeque::new(),
@@ -115,16 +133,29 @@ impl EnergyVad {
                         self.is_speaking = true;
                     }
                 }
+                if self.speech_frames >= self.soft_max_frames && !self.past_soft_ceiling {
+                    self.past_soft_ceiling = true;
+                    info!("VAD: past soft ceiling, switching to grace-period pause detection");
+                }
             } else {
                 self.noise_floor = (self.noise_floor * 0.97 + energy * 0.03).min(0.015);
 
                 if self.is_speaking {
                     self.silence_frames += 1;
-                    if self.silence_frames >= self.silence_threshold_frames {
+                    // Once past the soft ceiling, end at the next brief gap
+                    // instead of waiting for a full natural pause.
+                    let required_silence = if self.past_soft_ceiling {
+                        self.grace_silence_frames
+                    } else {
+                        self.silence_threshold_frames
+                    };
+                    if self.silence_frames >= required_silence {
                         let utterance: Vec<f32> = self.buffer.drain(..).collect();
                         self.last_max_energy = self.max_energy_seen;
+                        let reason = if self.past_soft_ceiling { "SPEECH END (grace)" } else { "SPEECH END" };
                         info!(
-                            "VAD: SPEECH END ({} samples, {} frames, max_energy={:.3}, noise_floor={:.4})",
+                            "VAD: {} ({} samples, {} frames, max_energy={:.3}, noise_floor={:.4})",
+                            reason,
                             utterance.len(),
                             self.speech_frames,
                             self.max_energy_seen,
@@ -141,11 +172,13 @@ impl EnergyVad {
                 }
             }
 
-            if self.is_speaking && self.speech_frames >= self.max_speech_frames {
+            // Absolute last resort — fires regardless of pauses, only if
+            // grace-period detection above never found a gap to end on.
+            if self.is_speaking && self.buffer.len() >= self.hard_max_samples {
                 let utterance: Vec<f32> = self.buffer.drain(..).collect();
                 self.last_max_energy = self.max_energy_seen;
                 info!(
-                    "VAD: FORCED END ({} samples, {} frames, max_energy={:.3}, noise_floor={:.4})",
+                    "VAD: FORCED END — hard ceiling ({} samples, {} frames, max_energy={:.3}, noise_floor={:.4})",
                     utterance.len(),
                     self.speech_frames,
                     self.max_energy_seen,
@@ -165,6 +198,7 @@ impl EnergyVad {
         self.is_speaking = false;
         self.max_energy_seen = 0.0;
         self.noise_floor = 0.005;
+        self.past_soft_ceiling = false;
     }
 }
 
