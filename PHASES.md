@@ -18,7 +18,7 @@
 | 2 | Core Runtime | Context engine. Layered memory (SQLite). System integration. Orb states. Graceful shutdown. | Event-driven runtime | :white_check_mark: Complete |
 | 3 | AI Worker | Rust <-> Python bridge. Local LLM loads. First inference. Worker lifecycle. | Local AI pipeline | :white_check_mark: Complete |
 | 4 | Integration | Voice wake -> STT -> LLM -> TTS. Intent system. First automations. | Full voice companion | :white_check_mark: Complete |
-| 5 | Interaction Polish | TTS queue, interruption, session recovery, personality foundation. | Daily polish | :construction: In Progress |
+| 5 | Interaction Polish | TTS queue, interruption, session recovery, personality foundation. | Daily polish | :white_check_mark: Complete |
 | 6 | Context Awareness | Active window, clipboard, browser, IDE, terminal, calendar. | Companion senses | Not started |
 | 7 | Memory & Learning | Episodic -> long-term pipeline, semantic recall, vector embeddings, routine detection. | Persistent memory | Not started |
 | 8 | Safety & Permissions | 5-tier permission model, risk scoring, audit log, dry-run, rollback. | Trust layer | Not started |
@@ -304,7 +304,7 @@
 
 ## Phase 5 — Interaction Polish & Personality Foundation
 
-**Status:** :construction: IN PROGRESS (2026-08-26 — ongoing)
+**Status:** :white_check_mark: COMPLETE (2026-08-26 — 2026-09-02)
 
 **Goal:** Close the gap between "it works" and "it feels good to use every day." Establish the emotional baseline.
 
@@ -334,19 +334,33 @@
 - [x] `MAVIS_AUDIO_DEVICE` env var respected for mic (exact CPAL name match)
 - [x] `MAVIS_AUDIO_DEVICE` env var respected for output (`--device` for pw-play/paplay)
 
-### 5.6 — Bug Fixes (2026-08-29)
-- [x] **Echo cancellation** — VAD reset + 250ms post-TTS cooldown prevents TTS feedback loop
-- [x] **Name extraction** — Fixed offset bug (13->11) + added denylist for false positives
-- [x] **BrokenPipeError** — Rust warmup reads response before close; worker catches disconnects silently
-- [x] **Prompt pollution** — Echo deduplication filters STT-transcribed TTS from working memory
-- [x] **warm_up crash** — Added `warm_up()` method to `LlamaEngine`
-- [x] **VRAM OOM** — Reduced `n_gpu_layers` from -1 to 20 for 6GB stability
+### 5.6 — Bug Fixes (2026-08-29, corrected 2026-09-02)
+- [x] **Echo cancellation** — the 2026-08-29 fix added VAD-reset + 250ms cooldown logic to `stt.rs`, but the `tts_active` flag that logic checked was never connected to the executor's real TTS state — two separate `AtomicBool`s, never wired together. Confirmed via live testing (MAVIS's own TTS output getting transcribed back as new "user" speech) and fixed 2026-09-02: `SttHandle::start()` now takes the shared flag as a parameter instead of creating its own.
+- [x] **Name extraction** — the offset-bug fix + initial denylist held for the words already known, but live testing kept surfacing new false positives (`Not`, `In`, `Looking`, `Mavis` itself) — mostly downstream of the echo bug above feeding MAVIS's own speech back in as fake "user" input. Denylist extended; most of this class of error should disappear now that echo is actually fixed.
+- [x] **BrokenPipeError** — unchanged, still holding.
+- [x] **Prompt pollution** — unchanged, echo dedup in `build_chat_messages()` still holding.
+- [x] **warm_up crash** — unchanged.
+- [x] **VRAM OOM** — `n_gpu_layers` is now actually wired from config instead of silently ignored, but default stays at 20 layers — confirmed 2026-09-02 that `-1` (full offload) causes `Failed to create llama_context` on 6GB VRAM. The `-1` in `config.toml` was aspirational and never verified on this hardware; 20 was the empirically correct value all along.
 
-### 5.7 — Remaining
-- [ ] Conversation style baseline — tighten system prompt + post-processor for warm/concise tone
-- [ ] TTS voice selection — `MAVIS_TTS_VOICE=piper|kokoro` instead of engine-only env var
-- [ ] Hotkey-triggered active listen — DBus/hotkey bypasses confidence gate
-- [ ] E2E verification of all fixes
+### 5.7 — Conversation Style, TTS Abstraction, Push-to-Talk (2026-09-02)
+- [x] **Conversation style baseline** — added warmth/confidence/anti-leakage rules to `SYSTEM_PROMPT`; fixed `LlamaEngine.chat()` to apply style post-processing to every model path (previously only ran for Phi-3/TinyLlama's manually-templated branch — a native-chat-template model would have skipped it entirely).
+- [x] **TTS voice abstraction** — found already implemented (`MAVIS_TTS_ENGINE=piper|kokoro`, one dispatch point in `executor.rs`, rest of the executor untouched by engine choice). Removed a dead, fully disconnected duplicate Piper implementation (`LinuxTts`/`TtsPlayer` trait across `platform/mod.rs`, `linux.rs`, `windows.rs`, `macos.rs`) that nothing ever called.
+- [ ] **Push-to-talk / active listening** — **skipped by decision, not abandoned.** No hotkey is bound; passive always-on listening is the sole interaction model, matching "always present, never intrusive." Candidate for revisiting if a hotkey (e.g. repurposing the laptop's unused Copilot key) gets bound later.
+
+### 5.8 — Full E2E Verification (2026-09-02)
+Real bugs found through live voice testing on target hardware — not simulated, not assumed fixed from code review alone:
+- [x] **TTS echo feedback loop** — root cause and fix under 5.6.
+- [x] **Whisper hallucination on near-silence** — the model invents fluent filler ("thank you for watching", "I don't know what I'm talking about") with *high* confidence on quiet ambient noise, bypassing the confidence gate entirely. Added `HALLUCINATION_DENYLIST` in `stt/engine.py`, with whitespace/apostrophe normalization (segment-join artifacts and curly quotes were breaking exact-match comparisons on the first attempt).
+- [x] **Low-confidence drops were a black box** — logging now includes the actual dropped text, not just the score, so borderline rejections are debuggable instead of silent.
+- [x] **"MAVIS" misheard as baby/movies/moose** — added `initial_prompt="MAVIS"` to bias the Whisper decoder toward the rare proper noun. Measurable improvement (4/6 correct in one test session), not a full fix — expected limitation of a quantized small model on an uncommon name.
+- [x] **Worker logs arriving late / out of order** — Python's stdout was block-buffered when piped (no `PYTHONUNBUFFERED`); prints without explicit `flush=True` queued for seconds before appearing, which had been actively misleading live debugging all session.
+- [x] **Prompt leakage via paraphrase** — tightening `SYSTEM_PROMPT` rule 13's wording did not work; the model swapped "guiding principles" for "my guidance" and leaked the same way. Real fix: deterministic phrase-match in `planner.rs` (`is_meta_instruction_question`) that bypasses the LLM entirely for meta-questions about its own instructions, returning a fixed deflection instead. Verified 3/3 on real hardware, including against a mis-transcribed "Movis, do you have any system prompt?".
+- [x] **Session recovery** — verified working across two consecutive restarts; correct user name persisted both times.
+- [x] **Model path / GPU layer config drift** — `WorkerServer` was constructing `LlamaEngine()` with no arguments, silently ignoring `config.toml` entirely. Now wired through safely — a configured model path is only honored if that file actually exists on disk, otherwise falls back to the existing auto-detection, so a stale/wrong config value can never break a working setup.
+
+**Known gap surfaced, not fixed (carried into Phase 6):** active-window and clipboard capture already run continuously (`ContextEngine: context injected` fires every ~2s) but that data never reaches the LLM — `build_working_memory()` in `planner.rs` doesn't read `active_window` or `last_clipboard`. This is exactly Phase 6's first two planned context sources; the capture half was already built, the wiring wasn't.
+
+**Confirmed absent:** no vision/screen-reading capability exists anywhere in the pipeline. `capture_focused()` is defined in `platform/linux.rs` but never called by anything, and the loaded LLM (Phi-3-mini) is text-only regardless.
 
 ---
 
@@ -644,4 +658,4 @@ Executor proposes action -> Risk score computed
 
 ---
 
-*Last updated: 2026-08-29*
+*Last updated: 2026-09-02*

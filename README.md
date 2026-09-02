@@ -54,17 +54,17 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 
 **Protocol:** JSON over UDS (Unix domain socket). No HTTP. No gRPC.
 
-**Platform layer:** Abstracted traits for window tracking, clipboard, screen capture, TTS. Linux (Wayland/X11) implemented. Windows and macOS stubbed.
+**Platform layer:** Abstracted traits for window tracking, clipboard, screen capture. Linux (Wayland/X11) implemented. Windows and macOS stubbed. TTS engine selection (`MAVIS_TTS_ENGINE=piper|kokoro`) is handled in the executor, not the platform layer.
 
 ## Status
 
 | Phase | What | Status |
 |-------|------|--------|
-| 1 — Foundation | Rust runtime, event bus, orb window | :white_check_mark: Complete |
-| 2 — Core Runtime | Context engine, memory, system integration | :white_check_mark: Complete |
-| 3 — AI Worker | Local LLM, Rust–Python bridge | :white_check_mark: Complete |
-| 4 — Integration | Voice pipeline, intent system, automations | :white_check_mark: Complete |
-| 5 — Interaction Polish | TTS queue, interruption, session recovery, personality | :construction: In Progress |
+| 1 — Foundation | Rust runtime, event bus, orb window | ✅  Complete |
+| 2 — Core Runtime | Context engine, memory, system integration | ✅  Complete |
+| 3 — AI Worker | Local LLM, Rust–Python bridge | ✅  Complete |
+| 4 — Integration | Voice pipeline, intent system, automations | ✅  Complete |
+| 5 — Interaction Polish | TTS queue, interruption, session recovery, personality | ✅  Complete |
 | 6 — Context Awareness | Active window, clipboard, browser, IDE | Not started |
 | 7 — Memory & Learning | Semantic recall, vector embeddings, routines | Not started |
 | 8 — Safety & Permissions | Permission tiers, risk scoring, audit log | Not started |
@@ -101,7 +101,7 @@ cd mavis_worker
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
-python -m mavis.worker
+python -m mavis
 ```
 
 ## Requirements
