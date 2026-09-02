@@ -219,6 +219,7 @@ const NAME_DENYLIST: &[&str] = &[
     "talking", "speaking", "listening", "waiting", "coming", "going",
     "not", "in", "looking", "mavis",
 ];
+
 fn extract_user_name(text: &str) -> Option<String> {
     let lower = text.to_lowercase();
     let patterns = [
@@ -232,7 +233,12 @@ fn extract_user_name(text: &str) -> Option<String> {
     for (prefix, prefix_len) in patterns {
         if let Some(pos) = lower.find(prefix) {
             let start = pos + prefix_len;
-            let rest = &text[start..];
+            // Slice `lower`, not `text` — `start` is a byte offset computed
+            // from `lower`, and lowercasing can change a string's byte
+            // length (e.g. Turkish İ), so using it to slice `text` could
+            // land mid-character and panic. The name gets manually
+            // recapitalized below regardless, so original casing isn't needed.
+            let rest = &lower[start..];
             let name: String = rest
                 .trim_start()
                 .split_whitespace()
@@ -242,12 +248,12 @@ fn extract_user_name(text: &str) -> Option<String> {
             if name.is_empty() || name.len() >= 30 {
                 continue;
             }
-            if NAME_DENYLIST.contains(&name.to_lowercase().as_str()) {
+            if NAME_DENYLIST.contains(&name.as_str()) {
                 continue;
             }
             let mut chars = name.chars();
             let capitalized = match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
                 None => name,
             };
             return Some(capitalized);
