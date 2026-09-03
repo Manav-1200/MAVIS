@@ -25,6 +25,10 @@ pub struct WorkerLifecycle {
     restart_count: u32,
     first_crash: Option<Instant>,
     available: bool,
+    // True when we're using a worker we didn't spawn (e.g. a persistent
+    // background instance already listening on the socket). We never
+    // kill a worker we don't own.
+    external: bool,
 }
 
 impl WorkerLifecycle {
@@ -37,11 +41,12 @@ impl WorkerLifecycle {
             restart_count: 0,
             first_crash: None,
             available: true,
+            external: false,
         }
     }
 
     pub fn is_running(&self) -> bool {
-        self.child.is_some()
+        self.child.is_some() || self.external
     }
 
     pub async fn ensure_running(&mut self) -> Result<()> {
@@ -58,6 +63,30 @@ impl WorkerLifecycle {
                     self.record_crash();
                 }
             }
+        }
+
+        // Using an externally-running worker — verify it's still reachable.
+        // If not, stop treating it as available and take over spawning.
+        if self.external {
+            if UnixStream::connect(SOCKET_PATH).await.is_ok() {
+                return Ok(());
+            }
+            warn!("External worker no longer reachable; spawning our own");
+            self.external = false;
+        }
+
+        // Nothing tracked as running — check if a worker is already
+        // listening (e.g. a persistent background instance) before
+        // spawning our own. We don't take ownership of its lifecycle:
+        // we won't kill it or remove its socket on our own shutdown.
+        if Path::new(SOCKET_PATH).exists() {
+            if UnixStream::connect(SOCKET_PATH).await.is_ok() {
+                info!("Found an already-running worker — using it instead of spawning a new one");
+                self.external = true;
+                return Ok(());
+            }
+            // Stale socket file with nothing listening — clean it up.
+            let _ = tokio::fs::remove_file(SOCKET_PATH).await;
         }
 
         if !self.available {
@@ -220,6 +249,7 @@ impl WorkerLifecycle {
             self.first_crash = Some(Instant::now());
         }
         self.child = None;
+        self.external = false;
     }
 
     pub async fn shutdown(&mut self) {
@@ -227,9 +257,11 @@ impl WorkerLifecycle {
             info!("Killing worker process...");
             let _ = child.kill().await;
             let _ = child.wait().await;
-        }
-        if Path::new(SOCKET_PATH).exists() {
-            let _ = tokio::fs::remove_file(SOCKET_PATH).await;
+            if Path::new(SOCKET_PATH).exists() {
+                let _ = tokio::fs::remove_file(SOCKET_PATH).await;
+            }
+        } else if self.external {
+            info!("Leaving externally-managed worker running");
         }
     }
 }
