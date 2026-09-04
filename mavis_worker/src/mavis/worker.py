@@ -41,7 +41,7 @@ class WorkerServer:
             model_size="small",
             device="cpu",
             compute_type="int8",
-            confidence_threshold=0.6,
+            confidence_threshold=0.45,
         )
         self.tts_engine = TTSEngine()
 
