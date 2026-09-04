@@ -1,7 +1,7 @@
 // mavis_core/src/context_engine.rs
 // Central nervous system. Owns Working Memory and routes all events.
 
-use crate::context_snapshot::ContextSnapshot;
+use crate::context_snapshot::{BrowserTab, ContextSnapshot};
 use crate::event_bus::EventBus;
 use crate::memory::manager::MemoryManager;
 use crate::models::event::{Event, EventType};
@@ -136,6 +136,23 @@ impl ContextEngine {
 
             EventType::TtsInterrupt => {
                 info!("ContextEngine: TTS interrupt observed");
+            }
+
+            EventType::BrowserUpdate => {
+                if let Some(data) = event.payload.as_object() {
+                    match serde_json::from_value::<BrowserTab>(
+                        serde_json::Value::Object(data.clone()),
+                    ) {
+                        Ok(tab) => {
+                            info!("ContextEngine: browser tab updated — {}", tab.domain);
+                            let mut wm = self.memory.working.write().await;
+                            wm.browser_tab = Some(tab);
+                        }
+                        Err(e) => {
+                            warn!("ContextEngine: failed to parse BrowserUpdate payload: {}", e);
+                        }
+                    }
+                }
             }
         }
 

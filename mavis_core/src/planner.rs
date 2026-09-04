@@ -234,6 +234,15 @@ impl Planner {
             }
         }
 
+        if context_source_enabled("MAVIS_CONTEXT_BROWSER") {
+            if let Some(tab) = &snapshot.browser_tab {
+                items.push(serde_json::json!({
+                    "source": "browser",
+                    "content": format!("The user is browsing {} — \"{}\".", tab.domain, tab.title),
+                }));
+            }
+        }
+
         // CHANGED — 5 → 15. Between two user turns MAVIS generates ~7 internal
         // events (WorkerRequest, WorkerResponse, PlanReady, ActionComplete,
         // 2× UiStateChange). A window of 5 drops the prior turn entirely.

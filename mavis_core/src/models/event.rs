@@ -28,6 +28,11 @@ pub enum EventType {
     /// Signal to kill current TTS playback and drain the queue.
     /// Emitted by the intent router when the user speaks during TTS.
     TtsInterrupt,
+    /// Browser tab/URL update from the extension's native messaging host.
+    /// Deliberately separate from ContextUpdate: that one does a full
+    /// replace of active_window/clipboard, and reusing it here would wipe
+    /// those out on every tab switch since browser payloads don't carry them.
+    BrowserUpdate,
 }
 
 #[cfg(test)]

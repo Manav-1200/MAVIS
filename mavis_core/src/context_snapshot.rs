@@ -9,6 +9,13 @@ pub struct WindowInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserTab {
+    pub url: String,
+    pub title: String,
+    pub domain: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextSnapshot {
     pub active_window: Option<WindowInfo>,
     pub clipboard_text: Option<String>,

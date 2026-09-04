@@ -108,6 +108,13 @@ async fn main() -> Result<()> {
         hotkeys.run().await;
     });
 
+    // Browser Manager (Phase 6 — tab/URL awareness via extension)
+    let bus_clone = Arc::clone(&bus);
+    let mut browser = system::browser::BrowserManager::new(bus_clone);
+    let browser_handle = tokio::spawn(async move {
+        browser.run().await;
+    });
+
     // File Watcher
     let bus_clone = Arc::clone(&bus);
     let mut watcher = system::watcher::FileWatcher::new(bus_clone);
@@ -488,6 +495,7 @@ async fn main() -> Result<()> {
         tokio::time::timeout(timeout, exec_handle),
         tokio::time::timeout(timeout, dbus_handle),
         tokio::time::timeout(timeout, hotkeys_handle),
+        tokio::time::timeout(timeout, browser_handle),
         tokio::time::timeout(timeout, watcher_handle),
         tokio::time::timeout(timeout, bridge_handle),
         tokio::time::timeout(timeout, stt_task),

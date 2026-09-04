@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use crate::context_snapshot::WindowInfo;
+use crate::context_snapshot::{BrowserTab, WindowInfo};
 use crate::models::event::Event;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -20,6 +20,7 @@ pub struct WorkingMemory {
     pub last_clipboard: Option<String>,
     pub context_timestamp: Option<u64>,
     pub user_name: Option<String>,
+    pub browser_tab: Option<BrowserTab>,
 }
 
 impl WorkingMemory {
