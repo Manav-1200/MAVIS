@@ -40,10 +40,27 @@ fn context_source_enabled(env_var: &str) -> bool {
     matches!(std::env::var(env_var).as_deref(), Ok("1") | Ok("true"))
 }
 
+// Common code file extensions, used only by the generic fallback below —
+// not needed for exact-matched editors.
+const CODE_EXTENSIONS: &[&str] = &[
+    ".rs", ".py", ".js", ".ts", ".jsx", ".tsx", ".go", ".java", ".c", ".cpp", ".h",
+    ".rb", ".php", ".html", ".css", ".json", ".toml", ".yaml", ".yml", ".md",
+    ".sh", ".lua", ".swift", ".kt", ".cs", ".sql",
+];
+
+fn find_filename_in_title(title: &str) -> Option<&str> {
+    title.split_whitespace().find(|word| CODE_EXTENSIONS.iter().any(|ext| word.ends_with(ext)))
+}
+
 // IDE awareness: known editors get a specific "editing X" message instead
-// of the generic "in app Y" one. Confirmed against real niri output —
-// app_id "antigravity-ide", title format "{workspace} - Antigravity IDE - {filename}".
-// Add more editors here as they're confirmed the same way, not guessed.
+// of the generic "in app Y" one. Both matches below are confirmed against
+// real niri output on this machine, not guessed:
+//   antigravity-ide: "{workspace} - Antigravity IDE - {filename}"
+//   code-oss:        "{filename} - {workspace} - Code - OSS"
+// Anything else falls through to a generic filename-in-title heuristic —
+// approximate (could false-positive on e.g. a file manager), but avoids
+// needing to verify every possible editor's exact title format up front.
+// Browsers are excluded since that's handled by the extension work instead.
 fn describe_active_window(window: &WindowInfo) -> String {
     if window.app_name == "antigravity-ide" {
         if let Some((workspace, filename)) = window.window_title.split_once(" - Antigravity IDE - ") {
@@ -53,6 +70,25 @@ fn describe_active_window(window: &WindowInfo) -> String {
             );
         }
     }
+
+    if window.app_name == "code-oss" {
+        if let Some(prefix) = window.window_title.strip_suffix(" - Code - OSS") {
+            return match prefix.split_once(" - ") {
+                Some((filename, workspace)) => format!(
+                    "The user is editing {} in the {} project using VS Code.",
+                    filename, workspace
+                ),
+                None => format!("The user is editing {} using VS Code.", prefix),
+            };
+        }
+    }
+
+    if window.app_name != "brave-browser" && window.app_name != "firefox" {
+        if let Some(filename) = find_filename_in_title(&window.window_title) {
+            return format!("The user appears to be editing {} in {}.", filename, window.app_name);
+        }
+    }
+
     format!("The user is currently in {} — \"{}\".", window.app_name, window.window_title)
 }
 
