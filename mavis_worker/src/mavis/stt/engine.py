@@ -46,7 +46,7 @@ class STTEngine:
         model_size: str = "base",
         device: str = "cpu",
         compute_type: str = "int8",
-        confidence_threshold: float = 0.6,
+        confidence_threshold: float = 0.45,
     ) -> None:
         self.model_size = model_size
         self.device = device
