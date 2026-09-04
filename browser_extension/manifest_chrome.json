@@ -1,0 +1,9 @@
+{
+    "name": "com.mavis.browser_host",
+    "description": "MAVIS browser tab awareness bridge",
+    "path": "/home/azazel/Projects/MAVIS/browser_extension/native_host.py",
+    "type": "stdio",
+    "allowed_origins": [
+        "chrome-extension://loicfjklkacaniifgjkoajlhjenappjf/"
+    ]
+}
