@@ -1,3 +1,4 @@
+use crate::context_snapshot::WindowInfo;
 use crate::event_bus::EventBus;
 use crate::memory::working::WorkingMemory;
 use crate::models::event::{Event, EventType};
@@ -37,6 +38,22 @@ fn is_meta_instruction_question(text: &str) -> bool {
 // not the fuller 5-tier system Phase 8 builds later.
 fn context_source_enabled(env_var: &str) -> bool {
     matches!(std::env::var(env_var).as_deref(), Ok("1") | Ok("true"))
+}
+
+// IDE awareness: known editors get a specific "editing X" message instead
+// of the generic "in app Y" one. Confirmed against real niri output —
+// app_id "antigravity-ide", title format "{workspace} - Antigravity IDE - {filename}".
+// Add more editors here as they're confirmed the same way, not guessed.
+fn describe_active_window(window: &WindowInfo) -> String {
+    if window.app_name == "antigravity-ide" {
+        if let Some((workspace, filename)) = window.window_title.split_once(" - Antigravity IDE - ") {
+            return format!(
+                "The user is editing {} in the {} project using Antigravity IDE.",
+                filename, workspace
+            );
+        }
+    }
+    format!("The user is currently in {} — \"{}\".", window.app_name, window.window_title)
 }
 
 pub struct Planner {
@@ -164,7 +181,7 @@ impl Planner {
             if let Some(window) = &snapshot.active_window {
                 items.push(serde_json::json!({
                     "source": "active_window",
-                    "content": format!("The user is currently in {} — \"{}\".", window.app_name, window.window_title),
+                    "content": describe_active_window(window),
                 }));
             }
         }
