@@ -45,10 +45,27 @@ impl Default for SttConfig {
             // wall-clock time (not speech-frame count) since that's what
             // actually bounds memory — a rare last resort, not the normal path.
             hard_max_duration_ms: 45000,
-            min_max_energy: 0.04,
+            // Measured speech median is 0.104, silence median 0.033. This
+            // gate rejects whole utterances that never got loud enough to
+            // be real speech.
+            min_max_energy: 0.10,
         }
     }
 }
+
+// Hysteresis thresholds, derived from measured traces on this machine:
+//   silence:  median 0.033, peak 0.058
+//   speech:   median 0.104, quiet dips down to 0.041
+// A single threshold can't serve both jobs — set high enough to avoid
+// false starts and it cuts mid-sentence on quiet syllables; set low
+// enough to survive those and ambient noise reads as speech. So:
+//   START needs a clear signal (0.10 — above every silence frame observed)
+//   END only needs to fall below 0.06, which is above silence peak (0.058)
+//   but below all but the briefest speech dips. At 0.06 the longest
+//   consecutive dip inside real speech was 450ms — under the 600ms
+//   required to end an utterance, so sentences stay intact.
+const SPEECH_START_THRESHOLD: f32 = 0.10;
+const SPEECH_END_THRESHOLD: f32 = 0.06;
 
 // ---------------------------------------------------------------------------
 // VAD — adaptive energy threshold with noise-floor tracking
@@ -62,7 +79,6 @@ struct EnergyVad {
     grace_silence_frames: usize,
     hard_max_samples: usize,
     past_soft_ceiling: bool,
-    base_threshold: f32,
     noise_floor: f32,
     buffer: VecDeque<f32>,
     speech_frames: usize,
@@ -89,8 +105,8 @@ impl EnergyVad {
             hard_max_samples: (cfg.sample_rate as usize) * (cfg.hard_max_duration_ms as usize)
                 / 1000,
             past_soft_ceiling: false,
-            base_threshold: 0.02,
-            noise_floor: 0.005,
+            // Starts at measured silence median; adapts from there.
+            noise_floor: 0.035,
             buffer: VecDeque::new(),
             speech_frames: 0,
             silence_frames: 0,
@@ -101,10 +117,12 @@ impl EnergyVad {
         }
     }
 
-    fn effective_threshold(&self) -> f32 {
-        self.base_threshold
-            .max(self.noise_floor * 1.5)
-            .min(0.022)
+    fn start_threshold(&self) -> f32 {
+        SPEECH_START_THRESHOLD.max(self.noise_floor * 2.0)
+    }
+
+    fn end_threshold(&self) -> f32 {
+        SPEECH_END_THRESHOLD.max(self.noise_floor * 1.2)
     }
 
     fn process(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
@@ -117,9 +135,19 @@ impl EnergyVad {
             let energy =
                 (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
             self.max_energy_seen = self.max_energy_seen.max(energy);
-            let threshold = self.effective_threshold();
 
             self.buffer.extend(chunk);
+
+            // Hysteresis: once speaking, a frame only counts as silence if it
+            // drops below the LOWER end threshold. Before speaking, it takes
+            // the HIGHER start threshold to begin. This is what lets quiet
+            // syllables mid-sentence stay part of the utterance while still
+            // requiring a clear signal to trigger in the first place.
+            let threshold = if self.is_speaking {
+                self.end_threshold()
+            } else {
+                self.start_threshold()
+            };
 
             if energy > threshold {
                 self.speech_frames += 1;
@@ -138,7 +166,10 @@ impl EnergyVad {
                     info!("VAD: past soft ceiling, switching to grace-period pause detection");
                 }
             } else {
-                self.noise_floor = (self.noise_floor * 0.97 + energy * 0.03).min(0.015);
+                // Adaptive floor, clamped below measured silence peak (0.058)
+                // so it can track ambient without ever climbing high enough
+                // to swallow quiet speech.
+                self.noise_floor = (self.noise_floor * 0.97 + energy * 0.03).min(0.045);
 
                 if self.is_speaking {
                     self.silence_frames += 1;
@@ -197,7 +228,7 @@ impl EnergyVad {
         self.silence_frames = 0;
         self.is_speaking = false;
         self.max_energy_seen = 0.0;
-        self.noise_floor = 0.005;
+        self.noise_floor = 0.035;
         self.past_soft_ceiling = false;
     }
 }
