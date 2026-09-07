@@ -95,6 +95,25 @@ impl LinuxWindowTracker {
         None
     }
 
+    /// Same niri call as above, but keeps every window instead of only the
+    /// focused one — niri already returns the full list, we were discarding it.
+    fn parse_niri_all_windows(json: &str) -> Option<Vec<(String, String, u32)>> {
+        let v: Value = serde_json::from_str(json).ok()?;
+        let wins = v.as_array()?;
+        let mut out = Vec::new();
+        for w in wins {
+            let title = w.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+            let app = w
+                .get("app_id")
+                .and_then(|a| a.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let pid = w.get("pid").and_then(|p| p.as_u64()).unwrap_or(0) as u32;
+            out.push((app, title, pid));
+        }
+        Some(out)
+    }
+
     fn parse_sway_tree(json: &str) -> Option<(String, String, u32)> {
         let v: Value = serde_json::from_str(json).ok()?;
         Self::sway_find_focused(&v)
@@ -162,6 +181,22 @@ impl WindowTracker for LinuxWindowTracker {
         }
 
         Err(PlatformError("No window tracker available for this compositor".into()))
+    }
+
+    fn open_windows(&self) -> Result<Vec<(String, String, u32)>, PlatformError> {
+        if self.wayland {
+            if let Some(json) = Self::run_cmd(&["niri", "msg", "--json", "windows"]) {
+                if let Some(list) = Self::parse_niri_all_windows(&json) {
+                    if !list.is_empty() {
+                        return Ok(list);
+                    }
+                }
+            }
+        }
+        // Other compositors don't have an equivalent full-list parser yet;
+        // fall back to the focused window so callers still get something
+        // rather than an error.
+        self.active_window().map(|w| vec![w])
     }
 
     fn subscribe_changes(&self) -> Result<mpsc::Receiver<WindowEvent>, PlatformError> {
