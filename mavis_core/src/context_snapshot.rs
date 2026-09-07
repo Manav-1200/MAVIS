@@ -18,12 +18,16 @@ pub struct BrowserTab {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ContextSnapshot {
     pub active_window: Option<WindowInfo>,
+    #[serde(default)]
+    pub open_windows: Vec<WindowInfo>,
     pub clipboard_text: Option<String>,
     pub captured_at: u64,
 }
 
 impl ContextSnapshot {
     pub fn is_empty(&self) -> bool {
-        self.active_window.is_none() && self.clipboard_text.is_none()
+        self.active_window.is_none()
+            && self.open_windows.is_empty()
+            && self.clipboard_text.is_none()
     }
 }
