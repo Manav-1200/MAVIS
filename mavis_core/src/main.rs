@@ -400,6 +400,7 @@ async fn main() -> Result<()> {
 
             let mut snapshot = ContextSnapshot {
                 active_window: None,
+                open_windows: Vec::new(),
                 clipboard_text: None,
                 captured_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -408,6 +409,16 @@ async fn main() -> Result<()> {
             };
 
             if let Some(tracker) = platform_ctx.windows() {
+                if let Ok(list) = tracker.open_windows() {
+                    snapshot.open_windows = list
+                        .into_iter()
+                        .map(|(app, title, pid)| WindowInfo {
+                            app_name: app,
+                            window_title: title,
+                            pid: Some(pid),
+                        })
+                        .collect();
+                }
                 match tracker.active_window() {
                     Ok((app, title, pid)) => {
                         snapshot.active_window = Some(WindowInfo {
