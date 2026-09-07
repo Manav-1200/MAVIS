@@ -18,6 +18,9 @@ impl WindowTracker for MacOsWindowTracker {
     fn active_window(&self) -> Result<(String, String, u32), PlatformError> {
         Err(PlatformError("macOS window tracking not yet implemented".into()))
     }
+    fn open_windows(&self) -> Result<Vec<(String, String, u32)>, PlatformError> {
+        Err(PlatformError("macOS window tracking not yet implemented".into()))
+    }
     fn subscribe_changes(&self) -> Result<tokio::sync::mpsc::Receiver<WindowEvent>, PlatformError> {
         Err(PlatformError("macOS window tracking not yet implemented".into()))
     }
