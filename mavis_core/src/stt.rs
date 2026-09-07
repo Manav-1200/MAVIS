@@ -53,18 +53,20 @@ impl Default for SttConfig {
     }
 }
 
-// Hysteresis thresholds, derived from measured traces on this machine:
+// Hysteresis thresholds, tuned against measured traces on this machine:
 //   silence:  median 0.033, peak 0.058
-//   speech:   median 0.104, quiet dips down to 0.041
+//   speech:   onset observed at 0.15, quiet portions dip to 0.04
 // A single threshold can't serve both jobs — set high enough to avoid
 // false starts and it cuts mid-sentence on quiet syllables; set low
-// enough to survive those and ambient noise reads as speech. So:
-//   START needs a clear signal (0.10 — above every silence frame observed)
-//   END only needs to fall below 0.06, which is above silence peak (0.058)
-//   but below all but the briefest speech dips. At 0.06 the longest
-//   consecutive dip inside real speech was 450ms — under the 600ms
-//   required to end an utterance, so sentences stay intact.
-const SPEECH_START_THRESHOLD: f32 = 0.10;
+// enough to survive those and ambient noise reads as speech.
+//
+// START at 0.075: above silence peak (0.058) with margin, but low enough
+// to catch speech onset. An earlier 0.10 was derived from a speech median
+// skewed by loud syllables and never triggered at all on real speech.
+// END at 0.06: just above silence peak, below all but the briefest speech
+// dips — the longest sub-0.06 run inside real speech measured 450ms, under
+// the 600ms required to end an utterance, so sentences stay intact.
+const SPEECH_START_THRESHOLD: f32 = 0.075;
 const SPEECH_END_THRESHOLD: f32 = 0.06;
 
 // ---------------------------------------------------------------------------
@@ -87,6 +89,8 @@ struct EnergyVad {
     max_energy_seen: f32,
     pub last_max_energy: f32,
     sample_rate: usize,
+    debug_frame_count: u64,
+    debug_window_max: f32,
 }
 
 impl EnergyVad {
@@ -114,15 +118,23 @@ impl EnergyVad {
             max_energy_seen: 0.0,
             last_max_energy: 0.0,
             sample_rate: cfg.sample_rate as usize,
+            debug_frame_count: 0,
+            debug_window_max: 0.0,
         }
     }
 
     fn start_threshold(&self) -> f32 {
-        SPEECH_START_THRESHOLD.max(self.noise_floor * 2.0)
+        // Multiplier kept low deliberately: with floor capped at 0.045, a
+        // 2.0x multiplier pushed this to 0.090 — above normal speaking
+        // volume, so the VAD stopped triggering entirely once the floor
+        // adapted upward. 1.4x keeps the ceiling at 0.075.
+        SPEECH_START_THRESHOLD.max(self.noise_floor * 1.4)
     }
 
     fn end_threshold(&self) -> f32 {
-        SPEECH_END_THRESHOLD.max(self.noise_floor * 1.2)
+        // Same reasoning: 1.2x would reach 0.054, below the 0.058 silence
+        // peak. 1.15x caps at ~0.052 while the constant floor holds at 0.06.
+        SPEECH_END_THRESHOLD.max(self.noise_floor * 1.15)
     }
 
     fn process(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
@@ -135,6 +147,21 @@ impl EnergyVad {
             let energy =
                 (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
             self.max_energy_seen = self.max_energy_seen.max(energy);
+
+            // TEMPORARY: report what the LIVE audio path actually sees, so we
+            // can compare against arecord measurements. Every 100 frames (~3s).
+            self.debug_frame_count += 1;
+            self.debug_window_max = self.debug_window_max.max(energy);
+            if self.debug_frame_count % 100 == 0 {
+                info!(
+                    "VAD-LIVE: last 100 frames — max_energy={:.4}, current={:.4}, start_thresh={:.4}, speaking={}",
+                    self.debug_window_max,
+                    energy,
+                    self.start_threshold(),
+                    self.is_speaking
+                );
+                self.debug_window_max = 0.0;
+            }
 
             self.buffer.extend(chunk);
 
