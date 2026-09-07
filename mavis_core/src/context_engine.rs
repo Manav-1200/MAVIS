@@ -73,6 +73,7 @@ impl ContextEngine {
                         Ok(snapshot) => {
                             let mut wm = self.memory.working.write().await;
                             wm.active_window = snapshot.active_window;
+                            wm.open_windows = snapshot.open_windows;
                             wm.last_clipboard = snapshot.clipboard_text;
                             wm.context_timestamp = Some(snapshot.captured_at);
                             info!(
