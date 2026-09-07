@@ -17,6 +17,8 @@ pub struct WorkingMemory {
     pub active_plan: Option<serde_json::Value>,
     pub ui_state: Option<String>,
     pub active_window: Option<WindowInfo>,
+    #[serde(default)]
+    pub open_windows: Vec<WindowInfo>,
     pub last_clipboard: Option<String>,
     pub context_timestamp: Option<u64>,
     pub user_name: Option<String>,
