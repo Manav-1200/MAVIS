@@ -25,6 +25,10 @@ pub trait AudioStream: Send {
 pub trait WindowTracker {
     /// Returns the currently focused window: (app_name, window_title, pid)
     fn active_window(&self) -> Result<(String, String, u32), PlatformError>;
+    /// Returns every open window: Vec<(app_name, window_title, pid)>.
+    /// Used to answer "what applications are open" — active_window alone
+    /// only ever knows about the focused one.
+    fn open_windows(&self) -> Result<Vec<(String, String, u32)>, PlatformError>;
     /// Subscribe to window focus changes. Returns a channel receiver.
     fn subscribe_changes(&self) -> Result<tokio::sync::mpsc::Receiver<WindowEvent>, PlatformError>;
 }
