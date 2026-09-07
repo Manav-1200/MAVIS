@@ -220,6 +220,29 @@ impl Planner {
                     "content": describe_active_window(window),
                 }));
             }
+
+            // Distinct list of open apps — answers "what's open?", which the
+            // focused window alone can't. Deduplicated by app name since one
+            // app often has several windows.
+            if !snapshot.open_windows.is_empty() {
+                let mut names: Vec<&str> = snapshot
+                    .open_windows
+                    .iter()
+                    .map(|w| w.app_name.as_str())
+                    .filter(|n| !n.is_empty() && *n != "unknown")
+                    .collect();
+                names.sort_unstable();
+                names.dedup();
+                if !names.is_empty() {
+                    items.push(serde_json::json!({
+                        "source": "open_windows",
+                        "content": format!(
+                            "Applications currently open: {}.",
+                            names.join(", ")
+                        ),
+                    }));
+                }
+            }
         }
 
         if context_source_enabled("MAVIS_CONTEXT_CLIPBOARD") {
