@@ -401,6 +401,8 @@ async fn main() -> Result<()> {
             let mut snapshot = ContextSnapshot {
                 active_window: None,
                 open_windows: Vec::new(),
+                active_workspace: None,
+                project: None,
                 clipboard_text: None,
                 captured_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -410,25 +412,36 @@ async fn main() -> Result<()> {
 
             if let Some(tracker) = platform_ctx.windows() {
                 if let Ok(list) = tracker.open_windows() {
-                    snapshot.open_windows = list
-                        .into_iter()
-                        .map(|(app, title, pid)| WindowInfo {
-                            app_name: app,
-                            window_title: title,
-                            pid: Some(pid),
-                        })
-                        .collect();
-                }
-                match tracker.active_window() {
-                    Ok((app, title, pid)) => {
-                        snapshot.active_window = Some(WindowInfo {
-                            app_name: app,
-                            window_title: title,
-                            pid: Some(pid),
-                        });
+                    // The focused entry already carries workspace + focus
+                    // flags, so derive active_window from it rather than
+                    // making a second compositor call.
+                    if let Some(focused) = list.iter().find(|w| w.is_focused) {
+                        snapshot.active_window = Some(focused.clone());
+                        snapshot.active_workspace = focused.workspace_id;
+                        if let Some(pid) = focused.pid {
+                            snapshot.project = tracker.current_project(pid);
+                        }
                     }
-                    Err(e) => {
-                        log::debug!("Window tracking error: {}", e);
+                    snapshot.open_windows = list;
+                }
+
+                // Fallback for compositors whose full-list path didn't
+                // report a focused window.
+                if snapshot.active_window.is_none() {
+                    match tracker.active_window() {
+                        Ok((app, title, pid)) => {
+                            snapshot.active_window = Some(WindowInfo {
+                                app_name: app,
+                                window_title: title,
+                                pid: Some(pid),
+                                workspace_id: None,
+                                is_focused: true,
+                            });
+                            snapshot.project = tracker.current_project(pid);
+                        }
+                        Err(e) => {
+                            log::debug!("Window tracking error: {}", e);
+                        }
                     }
                 }
             }
