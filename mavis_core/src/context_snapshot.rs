@@ -6,6 +6,21 @@ pub struct WindowInfo {
     pub app_name: String,
     pub window_title: String,
     pub pid: Option<u32>,
+    /// Compositor workspace this window sits on (niri workspace_id).
+    #[serde(default)]
+    pub workspace_id: Option<u64>,
+    #[serde(default)]
+    pub is_focused: bool,
+}
+
+/// Project the user appears to be working in, resolved from the focused
+/// window's process tree: walk children for a cwd outside $HOME, then walk
+/// up from there to the nearest .git directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectInfo {
+    pub name: String,
+    pub path: String,
+    pub git_branch: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -20,6 +35,10 @@ pub struct ContextSnapshot {
     pub active_window: Option<WindowInfo>,
     #[serde(default)]
     pub open_windows: Vec<WindowInfo>,
+    #[serde(default)]
+    pub active_workspace: Option<u64>,
+    #[serde(default)]
+    pub project: Option<ProjectInfo>,
     pub clipboard_text: Option<String>,
     pub captured_at: u64,
 }
