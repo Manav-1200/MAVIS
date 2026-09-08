@@ -18,7 +18,7 @@ impl WindowTracker for WindowsWindowTracker {
     fn active_window(&self) -> Result<(String, String, u32), PlatformError> {
         Err(PlatformError("Windows window tracking not yet implemented".into()))
     }
-    fn open_windows(&self) -> Result<Vec<(String, String, u32)>, PlatformError> {
+    fn open_windows(&self) -> Result<Vec<WindowInfo>, PlatformError> {
         Err(PlatformError("Windows window tracking not yet implemented".into()))
     }
     fn subscribe_changes(&self) -> Result<tokio::sync::mpsc::Receiver<WindowEvent>, PlatformError> {
