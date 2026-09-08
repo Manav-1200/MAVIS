@@ -3,7 +3,7 @@
 
 #![allow(dead_code)]
 
-use crate::context_snapshot::{BrowserTab, WindowInfo};
+use crate::context_snapshot::{BrowserTab, ProjectInfo, WindowInfo};
 use crate::models::event::Event;
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
@@ -19,6 +19,10 @@ pub struct WorkingMemory {
     pub active_window: Option<WindowInfo>,
     #[serde(default)]
     pub open_windows: Vec<WindowInfo>,
+    #[serde(default)]
+    pub active_workspace: Option<u64>,
+    #[serde(default)]
+    pub project: Option<ProjectInfo>,
     pub last_clipboard: Option<String>,
     pub context_timestamp: Option<u64>,
     pub user_name: Option<String>,
