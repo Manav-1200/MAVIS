@@ -221,27 +221,67 @@ impl Planner {
                 }));
             }
 
-            // Distinct list of open apps — answers "what's open?", which the
-            // focused window alone can't. Deduplicated by app name since one
-            // app often has several windows.
+            // Workspace-aware view: what's on the current workspace vs
+            // elsewhere. niri reports workspace_id per window, so this is
+            // read straight from the same data as the window list.
             if !snapshot.open_windows.is_empty() {
-                let mut names: Vec<&str> = snapshot
-                    .open_windows
-                    .iter()
-                    .map(|w| w.app_name.as_str())
-                    .filter(|n| !n.is_empty() && *n != "unknown")
-                    .collect();
-                names.sort_unstable();
-                names.dedup();
-                if !names.is_empty() {
+                let current_ws = snapshot.active_workspace;
+
+                let mut here: Vec<&str> = Vec::new();
+                let mut elsewhere: Vec<String> = Vec::new();
+                for w in &snapshot.open_windows {
+                    if w.app_name.is_empty() || w.app_name == "unknown" || w.is_focused {
+                        continue;
+                    }
+                    if w.workspace_id == current_ws {
+                        here.push(w.app_name.as_str());
+                    } else if let Some(ws) = w.workspace_id {
+                        elsewhere.push(format!("{} (workspace {})", w.app_name, ws));
+                    } else {
+                        elsewhere.push(w.app_name.clone());
+                    }
+                }
+                here.sort_unstable();
+                here.dedup();
+                elsewhere.sort();
+                elsewhere.dedup();
+
+                let mut parts = Vec::new();
+                if let Some(ws) = current_ws {
+                    parts.push(format!("The user is on workspace {}.", ws));
+                }
+                if !here.is_empty() {
+                    parts.push(format!(
+                        "Also open on this workspace: {}.",
+                        here.join(", ")
+                    ));
+                }
+                if !elsewhere.is_empty() {
+                    parts.push(format!("Open elsewhere: {}.", elsewhere.join(", ")));
+                }
+                if !parts.is_empty() {
                     items.push(serde_json::json!({
                         "source": "open_windows",
-                        "content": format!(
-                            "Applications currently open: {}.",
-                            names.join(", ")
-                        ),
+                        "content": parts.join(" "),
                     }));
                 }
+            }
+
+            if let Some(project) = &snapshot.project {
+                let content = match &project.git_branch {
+                    Some(branch) => format!(
+                        "The user is working in the {} project (git branch {}) at {}.",
+                        project.name, branch, project.path
+                    ),
+                    None => format!(
+                        "The user is working in the {} project at {}.",
+                        project.name, project.path
+                    ),
+                };
+                items.push(serde_json::json!({
+                    "source": "project",
+                    "content": content,
+                }));
             }
         }
 
