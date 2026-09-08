@@ -8,6 +8,8 @@ mod linux;
 mod windows;
 mod macos;
 
+pub use crate::context_snapshot::{ProjectInfo, WindowInfo};
+
 // ---------------------------------------------------------------------------
 // Capabilities
 // ---------------------------------------------------------------------------
@@ -25,10 +27,16 @@ pub trait AudioStream: Send {
 pub trait WindowTracker {
     /// Returns the currently focused window: (app_name, window_title, pid)
     fn active_window(&self) -> Result<(String, String, u32), PlatformError>;
-    /// Returns every open window: Vec<(app_name, window_title, pid)>.
-    /// Used to answer "what applications are open" — active_window alone
-    /// only ever knows about the focused one.
-    fn open_windows(&self) -> Result<Vec<(String, String, u32)>, PlatformError>;
+    /// Returns every open window, including which workspace each sits on
+    /// and which is focused. Answers "what applications are open" —
+    /// active_window alone only ever knows about the focused one.
+    fn open_windows(&self) -> Result<Vec<WindowInfo>, PlatformError>;
+    /// Best-effort project detection for a window's process tree.
+    /// Default None: only Linux implements this (via /proc), and the
+    /// default keeps the other platform stubs unchanged.
+    fn current_project(&self, _pid: u32) -> Option<ProjectInfo> {
+        None
+    }
     /// Subscribe to window focus changes. Returns a channel receiver.
     fn subscribe_changes(&self) -> Result<tokio::sync::mpsc::Receiver<WindowEvent>, PlatformError>;
 }
