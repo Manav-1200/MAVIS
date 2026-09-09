@@ -212,6 +212,16 @@ impl Planner {
             }));
         }
 
+        // Date/time is always injected — it's not private, and without it
+        // the model guesses at anything time-related.
+        items.push(serde_json::json!({
+            "source": "datetime",
+            "content": format!(
+                "The current date and time is {}.",
+                chrono::Local::now().format("%A, %-d %B %Y at %-I:%M %p")
+            ),
+        }));
+
         // Phase 6 — active window and clipboard, both off by default.
         if context_source_enabled("MAVIS_CONTEXT_ACTIVE_WINDOW") {
             if let Some(window) = &snapshot.active_window {
@@ -280,6 +290,29 @@ impl Planner {
                 };
                 items.push(serde_json::json!({
                     "source": "project",
+                    "content": content,
+                }));
+            }
+        }
+
+        if context_source_enabled("MAVIS_CONTEXT_CALENDAR") {
+            if let Some(event) = &snapshot.next_event {
+                let content = if event.all_day {
+                    format!("The user's next calendar event is \"{}\" (all day).", event.summary)
+                } else if event.minutes_until < 60 {
+                    format!(
+                        "The user's next calendar event is \"{}\", in {} minutes.",
+                        event.summary, event.minutes_until
+                    )
+                } else {
+                    format!(
+                        "The user's next calendar event is \"{}\", in about {} hours.",
+                        event.summary,
+                        event.minutes_until / 60
+                    )
+                };
+                items.push(serde_json::json!({
+                    "source": "calendar",
                     "content": content,
                 }));
             }
