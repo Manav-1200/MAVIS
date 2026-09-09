@@ -23,6 +23,15 @@ pub struct ProjectInfo {
     pub git_branch: Option<String>,
 }
 
+/// Next upcoming calendar event, read from Evolution's local .ics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CalendarEvent {
+    pub summary: String,
+    pub start: String,
+    pub minutes_until: i64,
+    pub all_day: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BrowserTab {
     pub url: String,
@@ -39,6 +48,8 @@ pub struct ContextSnapshot {
     pub active_workspace: Option<u64>,
     #[serde(default)]
     pub project: Option<ProjectInfo>,
+    #[serde(default)]
+    pub next_event: Option<CalendarEvent>,
     pub clipboard_text: Option<String>,
     pub captured_at: u64,
 }
