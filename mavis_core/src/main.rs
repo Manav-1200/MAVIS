@@ -403,6 +403,7 @@ async fn main() -> Result<()> {
                 open_windows: Vec::new(),
                 active_workspace: None,
                 project: None,
+                next_event: system::calendar::next_event(),
                 clipboard_text: None,
                 captured_at: std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
