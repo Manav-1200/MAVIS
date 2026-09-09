@@ -5,3 +5,4 @@ pub mod browser;
 pub mod dbus;
 pub mod hotkeys;
 pub mod watcher;
+pub mod calendar;
