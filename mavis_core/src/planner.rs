@@ -52,6 +52,40 @@ fn find_filename_in_title(title: &str) -> Option<&str> {
     title.split_whitespace().find(|word| CODE_EXTENSIONS.iter().any(|ext| word.ends_with(ext)))
 }
 
+// Terminals set their title to the running command, which on this setup
+// meant MAVIS reported its own launch line (a wall of MAVIS_CONTEXT_*=1
+// assignments) as "what the user is doing". Strip leading VAR=value tokens
+// so the actual command survives — "cargo run" instead of the env prefix.
+const TERMINAL_APPS: &[&str] = &[
+    "kitty", "alacritty", "foot", "wezterm", "gnome-terminal",
+    "konsole", "xterm", "urxvt", "terminator",
+];
+
+fn strip_env_prefix(title: &str) -> &str {
+    let mut rest = title.trim_start();
+    loop {
+        let token = match rest.split_whitespace().next() {
+            Some(t) => t,
+            None => return rest,
+        };
+        let (key, has_eq) = match token.split_once('=') {
+            Some((k, _)) => (k, true),
+            None => (token, false),
+        };
+        let is_env_assignment = has_eq
+            && !key.is_empty()
+            && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && key.chars().all(|c| !c.is_ascii_lowercase());
+        if !is_env_assignment {
+            return rest;
+        }
+        match rest[token.len()..].trim_start() {
+            "" => return rest, // nothing after the assignment; keep as-is
+            r => rest = r,
+        }
+    }
+}
+
 // IDE awareness: known editors get a specific "editing X" message instead
 // of the generic "in app Y" one. Both matches below are confirmed against
 // real niri output on this machine, not guessed:
@@ -81,6 +115,17 @@ fn describe_active_window(window: &WindowInfo) -> String {
                 None => format!("The user is editing {} using VS Code.", prefix),
             };
         }
+    }
+
+    if TERMINAL_APPS.contains(&window.app_name.as_str()) {
+        let cleaned = strip_env_prefix(&window.window_title);
+        if cleaned.is_empty() {
+            return format!("The user is in a terminal ({}).", window.app_name);
+        }
+        return format!(
+            "The user is in a terminal ({}), running: {}.",
+            window.app_name, cleaned
+        );
     }
 
     if window.app_name != "brave-browser" && window.app_name != "firefox" {
