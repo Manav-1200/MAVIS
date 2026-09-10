@@ -74,6 +74,9 @@ impl ContextEngine {
                             let mut wm = self.memory.working.write().await;
                             wm.active_window = snapshot.active_window;
                             wm.open_windows = snapshot.open_windows;
+                            wm.active_workspace = snapshot.active_workspace;
+                            wm.project = snapshot.project;
+                            wm.next_event = snapshot.next_event;
                             wm.last_clipboard = snapshot.clipboard_text;
                             wm.context_timestamp = Some(snapshot.captured_at);
                             info!(
@@ -236,6 +239,11 @@ const NAME_DENYLIST: &[&str] = &[
     "everyone", "nobody", "anybody", "today", "tomorrow", "yesterday",
     "talking", "speaking", "listening", "waiting", "coming", "going",
     "not", "in", "looking", "mavis",
+    // Interjections and filler that follow "I'm ..." / "... name is ..."
+    // in natural speech but are never names. Added as live testing
+    // surfaced them — "sorry" got stored as the user's name.
+    "sorry", "okay", "hey", "hi", "hello", "thanks", "just", "still",
+    "trying", "wondering", "asking", "curious", "confused", "sup",
 ];
 
 fn extract_user_name(text: &str) -> Option<String> {
