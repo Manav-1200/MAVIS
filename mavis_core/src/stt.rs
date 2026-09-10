@@ -69,6 +69,18 @@ impl Default for SttConfig {
 const SPEECH_START_THRESHOLD: f32 = 0.075;
 const SPEECH_END_THRESHOLD: f32 = 0.06;
 
+/// Ignore audio for this long after the input stream opens. The device
+/// emits a full-scale click on startup (measured max_energy=1.000), which
+/// the VAD would otherwise ship as a 1.3s "utterance" for Whisper to
+/// hallucinate words from.
+const STREAM_SETTLE_TIME: Duration = Duration::from_millis(1500);
+
+/// Shortest utterance worth transcribing. A real spoken phrase runs well
+/// over a second; anything briefer is a click, a keypress or a door — loud
+/// enough to pass the energy gates, but not speech. Whisper responds to
+/// such fragments by inventing fluent text, so they're dropped here.
+const MIN_UTTERANCE_SAMPLES: usize = 24000; // 1.5s at 16kHz
+
 // ---------------------------------------------------------------------------
 // VAD — adaptive energy threshold with noise-floor tracking
 // ---------------------------------------------------------------------------
@@ -415,12 +427,22 @@ impl SttManager {
                 // Echo-cancellation state: track TTS transitions and enforce cooldown
                 let mut was_tts_active = false;
                 let mut post_tts_cooldown: Option<Instant> = None;
+                // Opening the audio stream produces a full-scale click/pop on
+                // this hardware (observed max_energy=1.000 one second after
+                // startup). Ignore audio until the device settles, otherwise
+                // the VAD ships the pop and Whisper invents text from it.
+                let stream_opened_at = Instant::now();
 
                 device
                     .build_input_stream(
                         &stream_config.into(),
                         move |data: &[f32], _: &cpal::InputCallbackInfo| {
                             if !running_stream.load(Ordering::Relaxed) {
+                                return;
+                            }
+
+                            // Discard the device's startup transient entirely.
+                            if stream_opened_at.elapsed() < STREAM_SETTLE_TIME {
                                 return;
                             }
 
@@ -485,6 +507,22 @@ impl SttManager {
                             drop(vad_guard);
 
                             if let Some(utterance) = result {
+                                if utterance.len() < MIN_UTTERANCE_SAMPLES {
+                                    info!(
+                                        "STT: dropping short utterance ({} samples < {})",
+                                        utterance.len(),
+                                        MIN_UTTERANCE_SAMPLES
+                                    );
+                                    let _ = bus_for_ui.publish(Event {
+                                        id: uuid::Uuid::new_v4(),
+                                        timestamp: chrono::Utc::now(),
+                                        source: "stt".to_string(),
+                                        event_type: EventType::UiStateChange,
+                                        payload: serde_json::json!({ "state": "idle" }),
+                                    });
+                                    return;
+                                }
+
                                 if max_energy < config.min_max_energy {
                                     info!(
                                         "STT: dropping noise utterance (max_energy={:.3} < {:.3})",
