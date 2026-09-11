@@ -19,7 +19,7 @@
 | 3 | AI Worker | Rust <-> Python bridge. Local LLM loads. First inference. Worker lifecycle. | Local AI pipeline | :white_check_mark: Complete |
 | 4 | Integration | Voice wake -> STT -> LLM -> TTS. Intent system. First automations. | Full voice companion | :white_check_mark: Complete |
 | 5 | Interaction Polish | TTS queue, interruption, session recovery, personality foundation. | Daily polish | :white_check_mark: Complete |
-| 6 | Context Awareness | Active window, clipboard, browser, IDE, terminal, calendar. | Companion senses | Not started |
+| 6 | Context Awareness | Active window, open windows, workspace, clipboard, IDE, terminal, project, calendar. | Companion senses | :white_check_mark: Complete |
 | 7 | Memory & Learning | Episodic -> long-term pipeline, semantic recall, vector embeddings, routine detection. | Persistent memory | Not started |
 | 8 | Safety & Permissions | 5-tier permission model, risk scoring, audit log, dry-run, rollback. | Trust layer | Not started |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
@@ -366,21 +366,36 @@ Real bugs found through live voice testing on target hardware — not simulated,
 
 ## Phase 6 — Context Awareness Foundation
 
-**Goal:** The companion must know what the user is doing, not just what they are saying. All context sources are **opt-in per-tier** (see Phase 8).
+**Status:** :white_check_mark: COMPLETE (2026-09-02 — 2026-09-11)
 
-| Source | Rust or Python | Implementation |
-|--------|---------------|----------------|
-| Active window | Rust | `zbus` + `org.gnome.Shell` / `niri` IPC / `wlr-foreign-toplevel-management` / `xdotool` |
-| Clipboard | Rust | `wl-clipboard` listener; read-only by default; hashed content |
-| Browser awareness | Rust + Python | Native messaging host or `xdotool` title polling; extract domain/title |
-| IDE awareness | Rust | Window title regex (`code`, `nvim`, `emacs`); project path from cwd |
-| Terminal awareness | Rust | Detect terminal window; capture last command via `PROMPT_COMMAND` hook (opt-in) |
-| Workspace / Project | Rust | Track current working directory of focused terminal/IDE |
-| Calendar / Time context | Python | Read local `.ics` or `calcurse` export; inject "next meeting in 15 min" into context |
+**Goal:** The companion must know what the user is doing, not just what they are saying. Every context source is opt-in via an environment variable, default off.
 
-- [ ] **Context snapshot** — Compact JSON blob injected into `working_memory_snapshot` every 5 s
-- [ ] **Privacy gate** — Each source has a `ContextSource` permission tier; default = off
-- [ ] **Cross-platform abstraction** — `PlatformProvider` trait with Linux/Windows/macOS implementations
+| Source | Status | Implementation |
+|--------|--------|----------------|
+| Active window | :white_check_mark: | `niri msg --json windows`; falls back to sway/hyprland/xdotool |
+| Open windows + workspace | :white_check_mark: | Same niri call — the full list was already being fetched and discarded |
+| Clipboard | :white_check_mark: | `wl-paste` (Wayland) / `xclip` (X11), polled with the context snapshot |
+| IDE awareness | :white_check_mark: | Exact title match for Antigravity IDE and VS Code (code-oss), verified against real window titles; generic filename-in-title fallback for others |
+| Terminal awareness | :white_check_mark: | Terminal apps report the running command; leading `VAR=value` env assignments stripped so the command survives |
+| Workspace / Project | :white_check_mark: | Walks the focused window's `/proc` process tree for a cwd outside `$HOME`, then up to the nearest `.git`; reports repo name, path and branch |
+| Calendar / Time context | :warning: | Date/time always injected. Calendar reads Evolution's `~/.local/share/evolution/calendar/system/calendar.ics`. Parser verified against the real file format; the has-events path is **untested** — the local calendar is empty. Recurring events (`RRULE`) are skipped by design. |
+| Browser awareness | :x: | **Dropped.** Getting real tab URLs requires a browser extension + native messaging host. Decided against shipping a browser extension as part of MAVIS. The `mavis_core` receiving end (`BrowserUpdate` event, `/tmp/mavis_browser.sock` listener) is built and verified, so a future non-extension source could feed it. |
+
+- [x] **Context snapshot** — `ContextSnapshot` published every 2 s from the platform polling loop
+- [x] **Privacy gate** — per-source opt-in, default off: `MAVIS_CONTEXT_ACTIVE_WINDOW`, `MAVIS_CONTEXT_CLIPBOARD`, `MAVIS_CONTEXT_CALENDAR`, `MAVIS_CONTEXT_BROWSER`. Date/time is always on (not private). The fuller 5-tier permission system remains Phase 8.
+- [x] **Cross-platform abstraction** — `PlatformProvider` / `WindowTracker` traits; Linux implemented, Windows and macOS stubbed. `current_project()` has a default `None` impl so non-Linux platforms need no `/proc` equivalent.
+
+### 6.1 — Verified live (2026-09-11)
+Confirmed by real voice interaction, not analysis alone:
+- "How many workspaces do I have open?" → *"You have 2 workspaces open, workspace 1 and workspace 2."*
+- "What's on my screen?" → *"Currently on screen: antigravity-ide, brave-browser, kitty, Firefox."*
+- "Tell me my global context" → *"Friday, 11 September 2026, 9:29 PM, MAVIS project, workspace 1."*
+- "What's on my clipboard?" → *"Clipboard contains project details and log level."*
+
+### 6.2 — Known open issues carried forward
+- **TTS echo leaks into STT.** `pw-play` is spawned fire-and-forget; the executor marks the action complete and the UI returns to idle while audio may still be playing, so the mic unmutes mid-playback. Observed 2026-09-11: a transcription began with MAVIS's own previous reply. This also degrades recognition accuracy, since Whisper receives MAVIS's voice mixed with the user's.
+- **"MAVIS" is frequently misheard** — "Mervis", "Maybes", "Maybe". `initial_prompt="MAVIS"` biases the decoder but not enough.
+- **~600 ms silence wait before an utterance ends**, plus TTS synthesis time, dominates perceived latency. LLM round trip itself measured 1–2 s.
 
 ---
 
@@ -658,4 +673,4 @@ Executor proposes action -> Risk score computed
 
 ---
 
-*Last updated: 2026-09-02*
+*Last updated: 2026-09-11*
