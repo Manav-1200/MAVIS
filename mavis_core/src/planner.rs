@@ -1,4 +1,4 @@
-use crate::context_snapshot::WindowInfo;
+use crate::context_snapshot::{AppEntry, WindowInfo};
 use crate::event_bus::EventBus;
 use crate::memory::working::WorkingMemory;
 use crate::models::event::{Event, EventType};
@@ -150,13 +150,6 @@ fn describe_active_window(window: &WindowInfo) -> String {
 // permissions — an unrestricted `sh -c` driven by voice transcription is
 // exactly the hole the initial audit flagged.
 
-/// An installed application, discovered from a freedesktop .desktop file.
-#[derive(Clone, Debug)]
-pub struct AppEntry {
-    pub name: String,
-    pub exec: String,
-}
-
 /// Normalise for matching: lowercase, keep only alphanumerics and spaces.
 /// "Code - OSS" and "code oss" should compare equal.
 fn normalize(s: &str) -> String {
@@ -167,105 +160,6 @@ fn normalize(s: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// Drop freedesktop field codes (%U, %F, %i ...) from an Exec line.
-fn strip_field_codes(exec: &str) -> String {
-    exec.split_whitespace()
-        .filter(|t| !(t.len() == 2 && t.starts_with('%')))
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-/// Parse one .desktop file. Returns None for anything that isn't a
-/// launchable application: hidden entries, non-Application types, and
-/// sub-actions (the `[Desktop Action ...]` sections that give a browser
-/// its "New Incognito Window" entries — those aren't separate apps).
-fn parse_desktop_file(content: &str) -> Option<AppEntry> {
-    let mut name: Option<String> = None;
-    let mut exec: Option<String> = None;
-    let mut in_entry = false;
-
-    for line in content.lines() {
-        let line = line.trim();
-        if line.starts_with('[') {
-            in_entry = line == "[Desktop Entry]";
-            continue;
-        }
-        if !in_entry {
-            continue;
-        }
-        if let Some(v) = line.strip_prefix("Name=") {
-            if name.is_none() {
-                name = Some(v.to_string());
-            }
-        } else if let Some(v) = line.strip_prefix("Exec=") {
-            if exec.is_none() {
-                exec = Some(v.to_string());
-            }
-        } else if let Some(v) = line.strip_prefix("NoDisplay=") {
-            if v.eq_ignore_ascii_case("true") {
-                return None;
-            }
-        } else if let Some(v) = line.strip_prefix("Hidden=") {
-            if v.eq_ignore_ascii_case("true") {
-                return None;
-            }
-        } else if let Some(v) = line.strip_prefix("Type=") {
-            if v != "Application" {
-                return None;
-            }
-        }
-    }
-
-    match (name, exec) {
-        (Some(n), Some(e)) if !n.is_empty() && !e.is_empty() => Some(AppEntry {
-            name: n,
-            exec: strip_field_codes(&e),
-        }),
-        _ => None,
-    }
-}
-
-/// Scan the standard freedesktop application directories. Replaces what
-/// used to be a hardcoded alias list — that broke the moment the user
-/// installed a different browser or editor. This tracks whatever is
-/// actually on the machine, so new installs work without a code change
-/// (a restart picks them up, since the scan happens once at startup).
-fn scan_installed_apps() -> Vec<AppEntry> {
-    let mut dirs: Vec<std::path::PathBuf> = vec![
-        std::path::PathBuf::from("/usr/share/applications"),
-        std::path::PathBuf::from("/usr/local/share/applications"),
-        std::path::PathBuf::from("/var/lib/flatpak/exports/share/applications"),
-    ];
-    if let Ok(home) = std::env::var("HOME") {
-        dirs.push(std::path::PathBuf::from(&home).join(".local/share/applications"));
-        dirs.push(
-            std::path::PathBuf::from(&home)
-                .join(".local/share/flatpak/exports/share/applications"),
-        );
-    }
-
-    let mut apps = Vec::new();
-    for dir in dirs {
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
-                continue;
-            }
-            if let Ok(content) = std::fs::read_to_string(&path) {
-                if let Some(app) = parse_desktop_file(&content) {
-                    apps.push(app);
-                }
-            }
-        }
-    }
-    info!("Planner: discovered {} installed applications", apps.len());
-    apps
 }
 
 /// Find the app the user asked for, tolerant of how people actually speak.
@@ -419,8 +313,14 @@ pub struct Planner {
 }
 
 impl Planner {
-    pub fn new(bus: Arc<EventBus>, working: Arc<RwLock<WorkingMemory>>) -> Self {
-        let apps = scan_installed_apps();
+    /// `apps` comes from the platform layer — scanning is OS-specific, so
+    /// it lives behind PlatformProvider rather than here.
+    pub fn new(
+        bus: Arc<EventBus>,
+        working: Arc<RwLock<WorkingMemory>>,
+        apps: Vec<AppEntry>,
+    ) -> Self {
+        info!("Planner: {} installed applications available", apps.len());
         Self { bus, working, apps }
     }
 
