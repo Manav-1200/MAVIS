@@ -20,6 +20,7 @@
 | 4 | Integration | Voice wake -> STT -> LLM -> TTS. Intent system. First automations. | Full voice companion | :white_check_mark: Complete |
 | 5 | Interaction Polish | TTS queue, interruption, session recovery, personality foundation. | Daily polish | :white_check_mark: Complete |
 | 6 | Context Awareness | Active window, open windows, workspace, clipboard, IDE, terminal, project, calendar. | Companion senses | :white_check_mark: Complete |
+| 6.5 | Action Execution | App launching, YouTube, web search; cross-platform app discovery. | Companion acts | :white_check_mark: Built |
 | 7 | Memory & Learning | Episodic -> long-term pipeline, semantic recall, vector embeddings, routine detection. | Persistent memory | Not started |
 | 8 | Safety & Permissions | 5-tier permission model, risk scoring, audit log, dry-run, rollback. | Trust layer | Not started |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
@@ -392,10 +393,52 @@ Confirmed by real voice interaction, not analysis alone:
 - "Tell me my global context" → *"Friday, 11 September 2026, 9:29 PM, MAVIS project, workspace 1."*
 - "What's on my clipboard?" → *"Clipboard contains project details and log level."*
 
-### 6.2 — Known open issues carried forward
-- **TTS echo leaks into STT.** `pw-play` is spawned fire-and-forget; the executor marks the action complete and the UI returns to idle while audio may still be playing, so the mic unmutes mid-playback. Observed 2026-09-11: a transcription began with MAVIS's own previous reply. This also degrades recognition accuracy, since Whisper receives MAVIS's voice mixed with the user's.
-- **"MAVIS" is frequently misheard** — "Mervis", "Maybes", "Maybe". `initial_prompt="MAVIS"` biases the decoder but not enough.
-- **~600 ms silence wait before an utterance ends**, plus TTS synthesis time, dominates perceived latency. LLM round trip itself measured 1–2 s.
+### 6.2 — Voice pipeline tuning (2026-09-11 — 2026-09-12)
+
+A run of VAD problems, each found and fixed against measured data rather than guesswork. Recording the causes because several of them looked like different bugs than they were.
+
+- **Silence was undetectable.** The adaptive threshold was capped at 0.022, but measured silence on this machine's mic sits at median 0.033 / peak 0.058 — the cap sat *below* the noise floor, so every frame read as speech and utterances only ever ended at a hard ceiling. Thresholds re-derived from `arecord` traces of real silence and real speech.
+- **Single threshold couldn't serve both jobs.** High enough to avoid false starts meant cutting mid-sentence on quiet syllables. Replaced with hysteresis: start 0.075, end 0.06. The longest sub-0.06 dip measured inside real speech was 450 ms, which sets the floor for the silence wait.
+- **Audio-stream startup transient.** Opening the input stream emits a full-scale click (`max_energy=1.000`), shipped as a ~1.3 s "utterance" that Whisper turned into fluent invented sentences. Fixed with a 1.5 s settle window plus a minimum utterance length of 1.5 s.
+- **Silence wait 600 ms → 500 ms.** Dead time on every exchange. Floored by the 450 ms measurement above; going lower needs the end threshold raised first.
+- **Whisper hallucination on near-silence** — invents filler with *high* confidence, so the confidence gate can't catch it. Denylist of known phrases, with whitespace/apostrophe normalisation.
+- **Confidence threshold 0.6 → 0.45.** Correct transcriptions were being silently dropped at 0.590 and 0.499.
+
+**Result (measured 2026-09-12, 12 exchanges):** 9 of 12 replies in 1–2 s from end of speech. 9 of 10 transcriptions accurate, "MAVIS" recognised correctly in five separate utterances. No speech detected during any TTS playback — the suspected echo leak did not reproduce, and the earlier "fire-and-forget playback" diagnosis was wrong: the executor does await `child.wait()`.
+
+**Still open:** cold start is 15–30 s while models load (mitigated by leaving the worker running between `mavis_core` restarts). Calendar's has-events path remains untested.
+
+---
+
+## Phase 6.5 — Action Execution
+
+**Status:** :white_check_mark: Built 2026-09-12, pending live test
+
+MAVIS could previously only ever `say` things — `executor.rs` had `shell`, `app`, `notify` and `system` implemented, but `planner.rs` emitted nothing but `say`, so none of it was reachable.
+
+- [x] **Deterministic action intents** — phrase matching in `planner.rs`, not LLM tool-calling. A 3.8B model has been unreliable at following even simple format rules here, and putting it in charge of emitting actions would make its mistakes consequential rather than merely wrong. Same approach as the meta-instruction deflection, which tested 3/3.
+- [x] **App launching** — "open firefox", "launch terminal"
+- [x] **YouTube** — "play lofi hip hop" → opens a search
+- [x] **Web search** — "google rust async traits"
+- [x] **URLs** — "open https://github.com"
+- [x] Actions emit `say` + action together, so there's spoken confirmation.
+- [x] Unrecognised commands fall through to the LLM rather than being guessed at.
+
+**`shell` is deliberately unreachable from voice.** An unrestricted `sh -c` driven by speech transcription is the hole the initial audit flagged; it stays closed until Phase 8 builds real permissions.
+
+### 6.5.1 — Installed application discovery
+
+First implementation used a hardcoded alias list, which broke the moment the user changed browser or editor. Replaced with discovery from what's actually installed, so swapping to LibreWolf, Zen, or any other app works with no code change.
+
+| Platform | Source | Launch | Status |
+|----------|--------|--------|--------|
+| Linux | `.desktop` files across 5 dirs incl. Flatpak exports | binary from `Exec=`, field codes stripped | :white_check_mark: 104 apps discovered |
+| Windows | Start Menu `.lnk`, recursed 3 levels | `cmd /c start "" "<path>"` | :warning: **Untested** |
+| macOS | `.app` bundles in 4 standard dirs | `open -a "<Name>"` | :warning: **Untested** |
+
+Discovery lives behind `PlatformProvider::installed_apps()` with an empty default, so an unimplemented platform degrades to "no apps found" rather than failing. Matching is deliberately loose for speech — "code" finds Code - OSS, "notepad" finds DMS Notepad, "calculator" finds GNOME Calculator — and returns nothing rather than guessing at a binary that doesn't exist. Scanned once at startup; new installs need a restart.
+
+**Not yet reachable from voice:** the executor's `notify` and `system` actions (volume, brightness, media control via DBus) are implemented but have no intent patterns yet.
 
 ---
 
@@ -673,4 +716,4 @@ Executor proposes action -> Risk score computed
 
 ---
 
-*Last updated: 2026-09-11*
+*Last updated: 2026-09-12*
