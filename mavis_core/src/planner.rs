@@ -150,23 +150,159 @@ fn describe_active_window(window: &WindowInfo) -> String {
 // permissions — an unrestricted `sh -c` driven by voice transcription is
 // exactly the hole the initial audit flagged.
 
-/// Spoken app names → the binary to launch. Only apps confirmed present on
-/// this machine plus common desktop defaults; unknown names fall through to
-/// the LLM rather than being guessed at and failing to spawn.
-const APP_ALIASES: &[(&str, &str)] = &[
-    ("firefox", "firefox"),
-    ("brave", "brave"),
-    ("terminal", "kitty"),
-    ("kitty", "kitty"),
-    ("code", "code-oss"),
-    ("vs code", "code-oss"),
-    ("vscode", "code-oss"),
-    ("antigravity", "antigravity"),
-    ("files", "nautilus"),
-    ("file manager", "nautilus"),
-    ("calculator", "gnome-calculator"),
-    ("calendar", "gnome-calendar"),
-];
+/// An installed application, discovered from a freedesktop .desktop file.
+#[derive(Clone, Debug)]
+pub struct AppEntry {
+    pub name: String,
+    pub exec: String,
+}
+
+/// Normalise for matching: lowercase, keep only alphanumerics and spaces.
+/// "Code - OSS" and "code oss" should compare equal.
+fn normalize(s: &str) -> String {
+    s.to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric() || *c == ' ')
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Drop freedesktop field codes (%U, %F, %i ...) from an Exec line.
+fn strip_field_codes(exec: &str) -> String {
+    exec.split_whitespace()
+        .filter(|t| !(t.len() == 2 && t.starts_with('%')))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Parse one .desktop file. Returns None for anything that isn't a
+/// launchable application: hidden entries, non-Application types, and
+/// sub-actions (the `[Desktop Action ...]` sections that give a browser
+/// its "New Incognito Window" entries — those aren't separate apps).
+fn parse_desktop_file(content: &str) -> Option<AppEntry> {
+    let mut name: Option<String> = None;
+    let mut exec: Option<String> = None;
+    let mut in_entry = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_entry {
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("Name=") {
+            if name.is_none() {
+                name = Some(v.to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("Exec=") {
+            if exec.is_none() {
+                exec = Some(v.to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("NoDisplay=") {
+            if v.eq_ignore_ascii_case("true") {
+                return None;
+            }
+        } else if let Some(v) = line.strip_prefix("Hidden=") {
+            if v.eq_ignore_ascii_case("true") {
+                return None;
+            }
+        } else if let Some(v) = line.strip_prefix("Type=") {
+            if v != "Application" {
+                return None;
+            }
+        }
+    }
+
+    match (name, exec) {
+        (Some(n), Some(e)) if !n.is_empty() && !e.is_empty() => Some(AppEntry {
+            name: n,
+            exec: strip_field_codes(&e),
+        }),
+        _ => None,
+    }
+}
+
+/// Scan the standard freedesktop application directories. Replaces what
+/// used to be a hardcoded alias list — that broke the moment the user
+/// installed a different browser or editor. This tracks whatever is
+/// actually on the machine, so new installs work without a code change
+/// (a restart picks them up, since the scan happens once at startup).
+fn scan_installed_apps() -> Vec<AppEntry> {
+    let mut dirs: Vec<std::path::PathBuf> = vec![
+        std::path::PathBuf::from("/usr/share/applications"),
+        std::path::PathBuf::from("/usr/local/share/applications"),
+        std::path::PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(std::path::PathBuf::from(&home).join(".local/share/applications"));
+        dirs.push(
+            std::path::PathBuf::from(&home)
+                .join(".local/share/flatpak/exports/share/applications"),
+        );
+    }
+
+    let mut apps = Vec::new();
+    for dir in dirs {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Some(app) = parse_desktop_file(&content) {
+                    apps.push(app);
+                }
+            }
+        }
+    }
+    info!("Planner: discovered {} installed applications", apps.len());
+    apps
+}
+
+/// Find the app the user asked for, tolerant of how people actually speak.
+/// Tries progressively looser matches; returns None rather than guessing,
+/// so "open my heart" falls through to the LLM instead of failing to spawn.
+fn find_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
+    let s = normalize(spoken);
+    if s.is_empty() {
+        return None;
+    }
+
+    // Exact application name.
+    if let Some(a) = apps.iter().find(|a| normalize(&a.name) == s) {
+        return Some(a);
+    }
+    // Exact binary name — "code-oss" as spoken.
+    if let Some(a) = apps.iter().find(|a| {
+        a.exec
+            .split_whitespace()
+            .next()
+            .and_then(|b| b.rsplit('/').next())
+            .map(|b| normalize(b) == s)
+            .unwrap_or(false)
+    }) {
+        return Some(a);
+    }
+    // Name begins with what was said — "code" finds "Code - OSS".
+    if let Some(a) = apps.iter().find(|a| normalize(&a.name).starts_with(&s)) {
+        return Some(a);
+    }
+    // Every spoken word appears in the name — "notepad" finds "DMS Notepad".
+    let words: Vec<&str> = s.split_whitespace().collect();
+    apps.iter().find(|a| {
+        let n = normalize(&a.name);
+        words.iter().all(|w| n.contains(w))
+    })
+}
 
 /// Percent-encode a search query. Hand-rolled to avoid pulling in a URL
 /// crate for one use; encodes everything outside the unreserved set.
@@ -198,7 +334,7 @@ fn strip_address(text: &str) -> &str {
 
 /// Returns a plan (say + action) when the utterance is a clear command.
 /// None means "not a command" — the utterance goes to the LLM as normal.
-fn match_action_intent(text: &str) -> Option<serde_json::Value> {
+fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Value> {
     let lower = text.to_lowercase();
     let t = strip_address(&lower)
         .trim()
@@ -239,8 +375,16 @@ fn match_action_intent(text: &str) -> Option<serde_json::Value> {
             if target.contains("://") {
                 return say_then_open(format!("Opening {}.", target), target.to_string());
             }
-            if let Some((_, bin)) = APP_ALIASES.iter().find(|(name, _)| *name == target) {
-                return say_then_open(format!("Opening {}.", target), bin.to_string());
+            if let Some(app) = find_app(target, apps) {
+                // Exec may carry flags ("code-oss --unity-launch"); the
+                // executor's app action takes a binary plus args.
+                let mut parts = app.exec.split_whitespace();
+                let bin = parts.next().unwrap_or_default().to_string();
+                let args: Vec<String> = parts.map(String::from).collect();
+                return Some(serde_json::json!([
+                    {"type": "say", "text": format!("Opening {}.", app.name)},
+                    {"type": "app", "target": bin, "args": args},
+                ]));
             }
             // Unknown app — don't guess at a binary that probably doesn't
             // exist. Fall through and let the LLM respond instead.
@@ -268,11 +412,16 @@ fn match_action_intent(text: &str) -> Option<serde_json::Value> {
 pub struct Planner {
     bus: Arc<EventBus>,
     working: Arc<RwLock<WorkingMemory>>,
+    /// Scanned once at startup rather than per utterance — 100+ file reads
+    /// on every spoken word would be wasteful. New installs are picked up
+    /// on restart.
+    apps: Vec<AppEntry>,
 }
 
 impl Planner {
     pub fn new(bus: Arc<EventBus>, working: Arc<RwLock<WorkingMemory>>) -> Self {
-        Self { bus, working }
+        let apps = scan_installed_apps();
+        Self { bus, working, apps }
     }
 
     pub async fn run(&mut self) {
@@ -346,7 +495,7 @@ impl Planner {
 
         // Action intents — deterministic, no LLM round trip. Emitted as a
         // say+action plan so the user gets spoken confirmation.
-        if let Some(plan) = match_action_intent(intent) {
+        if let Some(plan) = match_action_intent(intent, &self.apps) {
             info!("Planner: matched action intent — {}", plan);
             let plan_event = Event {
                 id: uuid::Uuid::new_v4(),
