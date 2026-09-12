@@ -33,7 +33,14 @@ impl Default for SttConfig {
     fn default() -> Self {
         Self {
             sample_rate: 16000,
-            silence_duration_ms: 600,
+            // 600ms → 500ms. This is dead time on every exchange: the user
+            // has stopped talking and MAVIS is still waiting to be sure.
+            // Floor is set by measurement, not preference — the longest
+            // sub-threshold dip observed *inside* real speech was 450ms at
+            // the current 0.06 end threshold, so anything at or below that
+            // splits sentences mid-thought. 500ms keeps a 50ms margin.
+            // Going lower means raising SPEECH_END_THRESHOLD first.
+            silence_duration_ms: 500,
             min_speech_duration_ms: 250,
             frame_duration_ms: 30,
             // Past this much actual speech, switch to a short grace-period
