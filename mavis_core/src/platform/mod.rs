@@ -8,7 +8,7 @@ mod linux;
 mod windows;
 mod macos;
 
-pub use crate::context_snapshot::{ProjectInfo, WindowInfo};
+pub use crate::context_snapshot::{AppEntry, ProjectInfo, WindowInfo};
 
 // ---------------------------------------------------------------------------
 // Capabilities
@@ -126,6 +126,12 @@ impl Platform {
 /// Aggregates all platform capabilities. Individual methods return None if
 /// the capability is unavailable on this DE / OS / permission tier.
 pub trait PlatformProvider: Send + Sync {
+    /// Every application installed on this machine. Used to turn "open
+    /// firefox" into a launch. Default empty so a platform without an
+    /// implementation degrades to "no apps found" rather than failing.
+    fn installed_apps(&self) -> Vec<AppEntry> {
+        Vec::new()
+    }
     fn audio(&self) -> Option<&dyn AudioCapture>;
     fn windows(&self) -> Option<&dyn WindowTracker>;
     fn clipboard(&self) -> Option<&dyn ClipboardReader>;
