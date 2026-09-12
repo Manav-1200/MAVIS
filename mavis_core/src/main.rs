@@ -81,7 +81,8 @@ async fn main() -> Result<()> {
 
     // Planner
     let bus_clone = Arc::clone(&bus);
-    let mut planner = planner::Planner::new(bus_clone, working_memory);
+    let installed_apps = platform.installed_apps();
+    let mut planner = planner::Planner::new(bus_clone, working_memory, installed_apps);
     let planner_handle = tokio::spawn(async move {
         planner.run().await;
     });
