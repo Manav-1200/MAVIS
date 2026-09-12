@@ -23,6 +23,16 @@ pub struct ProjectInfo {
     pub git_branch: Option<String>,
 }
 
+/// An installed application, discovered from whatever the platform uses
+/// to register apps: .desktop files on Linux, Start Menu shortcuts on
+/// Windows, .app bundles on macOS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppEntry {
+    pub name: String,
+    /// Command line to launch it, binary first then any fixed args.
+    pub exec: String,
+}
+
 /// Next upcoming calendar event, read from Evolution's local .ics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CalendarEvent {
