@@ -45,6 +45,9 @@ impl LinuxProvider {
 }
 
 impl PlatformProvider for LinuxProvider {
+    fn installed_apps(&self) -> Vec<AppEntry> {
+        scan_linux_apps()
+    }
     fn audio(&self) -> Option<&dyn AudioCapture> {
         None
     }
@@ -366,7 +369,6 @@ fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
     let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
     Some((w, h))
 }
-
 // ---------------------------------------------------------------------------
 // Project detection helpers (Linux /proc)
 // ---------------------------------------------------------------------------
@@ -441,4 +443,102 @@ fn read_git_branch(git_root: &std::path::Path) -> Option<String> {
     } else {
         Some(head.chars().take(8).collect())
     }
+}
+
+// ---------------------------------------------------------------------------
+// Installed application discovery (freedesktop .desktop files)
+// ---------------------------------------------------------------------------
+
+/// Drop freedesktop field codes (%U, %F, %i ...) from an Exec line.
+fn strip_field_codes(exec: &str) -> String {
+    exec.split_whitespace()
+        .filter(|t| !(t.len() == 2 && t.starts_with('%')))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Parse one .desktop file. Returns None for anything that isn't a
+/// launchable application: hidden entries, non-Application types, and
+/// sub-actions (the `[Desktop Action ...]` sections that give a browser
+/// its "New Incognito Window" entries — those aren't separate apps).
+fn parse_desktop_file(content: &str) -> Option<AppEntry> {
+    let mut name: Option<String> = None;
+    let mut exec: Option<String> = None;
+    let mut in_entry = false;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_entry = line == "[Desktop Entry]";
+            continue;
+        }
+        if !in_entry {
+            continue;
+        }
+        if let Some(v) = line.strip_prefix("Name=") {
+            if name.is_none() {
+                name = Some(v.to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("Exec=") {
+            if exec.is_none() {
+                exec = Some(v.to_string());
+            }
+        } else if let Some(v) = line.strip_prefix("NoDisplay=") {
+            if v.eq_ignore_ascii_case("true") {
+                return None;
+            }
+        } else if let Some(v) = line.strip_prefix("Hidden=") {
+            if v.eq_ignore_ascii_case("true") {
+                return None;
+            }
+        } else if let Some(v) = line.strip_prefix("Type=") {
+            if v != "Application" {
+                return None;
+            }
+        }
+    }
+
+    match (name, exec) {
+        (Some(n), Some(e)) if !n.is_empty() && !e.is_empty() => Some(AppEntry {
+            name: n,
+            exec: strip_field_codes(&e),
+        }),
+        _ => None,
+    }
+}
+
+fn scan_linux_apps() -> Vec<AppEntry> {
+    let mut dirs: Vec<std::path::PathBuf> = vec![
+        std::path::PathBuf::from("/usr/share/applications"),
+        std::path::PathBuf::from("/usr/local/share/applications"),
+        std::path::PathBuf::from("/var/lib/flatpak/exports/share/applications"),
+    ];
+    if let Ok(home) = std::env::var("HOME") {
+        dirs.push(std::path::PathBuf::from(&home).join(".local/share/applications"));
+        dirs.push(
+            std::path::PathBuf::from(&home)
+                .join(".local/share/flatpak/exports/share/applications"),
+        );
+    }
+
+    let mut apps = Vec::new();
+    for dir in dirs {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                if let Some(app) = parse_desktop_file(&content) {
+                    apps.push(app);
+                }
+            }
+        }
+    }
+    info!("LinuxProvider: discovered {} installed applications", apps.len());
+    apps
 }
