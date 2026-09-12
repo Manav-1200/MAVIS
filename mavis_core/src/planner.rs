@@ -137,6 +137,134 @@ fn describe_active_window(window: &WindowInfo) -> String {
     format!("The user is currently in {} — \"{}\".", window.app_name, window.window_title)
 }
 
+// ---------------------------------------------------------------------
+// Action intents
+// ---------------------------------------------------------------------
+// Deterministic phrase matching, deliberately not LLM tool-calling: a 3.8B
+// model has been unreliable at following even simple format rules here, and
+// putting it in charge of emitting actions would make its mistakes
+// consequential rather than just wrong.
+//
+// Note what's absent: there is no path from speech to the executor's
+// `shell` action. That stays unreachable until Phase 8 builds real
+// permissions — an unrestricted `sh -c` driven by voice transcription is
+// exactly the hole the initial audit flagged.
+
+/// Spoken app names → the binary to launch. Only apps confirmed present on
+/// this machine plus common desktop defaults; unknown names fall through to
+/// the LLM rather than being guessed at and failing to spawn.
+const APP_ALIASES: &[(&str, &str)] = &[
+    ("firefox", "firefox"),
+    ("brave", "brave"),
+    ("terminal", "kitty"),
+    ("kitty", "kitty"),
+    ("code", "code-oss"),
+    ("vs code", "code-oss"),
+    ("vscode", "code-oss"),
+    ("antigravity", "antigravity"),
+    ("files", "nautilus"),
+    ("file manager", "nautilus"),
+    ("calculator", "gnome-calculator"),
+    ("calendar", "gnome-calendar"),
+];
+
+/// Percent-encode a search query. Hand-rolled to avoid pulling in a URL
+/// crate for one use; encodes everything outside the unreserved set.
+fn urlencode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() * 2);
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
+/// Strip a leading address to MAVIS so "MAVIS, open firefox" matches the
+/// same as "open firefox".
+fn strip_address(text: &str) -> &str {
+    let t = text.trim_start();
+    for prefix in ["hey mavis", "ok mavis", "okay mavis", "mavis"] {
+        if t.len() >= prefix.len() && t[..prefix.len()].eq_ignore_ascii_case(prefix) {
+            return t[prefix.len()..].trim_start_matches([',', ' ', '.']);
+        }
+    }
+    t
+}
+
+/// Returns a plan (say + action) when the utterance is a clear command.
+/// None means "not a command" — the utterance goes to the LLM as normal.
+fn match_action_intent(text: &str) -> Option<serde_json::Value> {
+    let lower = text.to_lowercase();
+    let t = strip_address(&lower)
+        .trim()
+        .trim_end_matches(|c: char| c.is_ascii_punctuation())
+        .trim();
+
+    let say_then_open = |spoken: String, target: String| {
+        Some(serde_json::json!([
+            {"type": "say", "text": spoken},
+            {"type": "app", "target": target},
+        ]))
+    };
+
+    // "play X on youtube" / "play X"
+    for prefix in ["play ", "put on ", "search youtube for "] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            let query = rest.trim_end_matches(" on youtube").trim();
+            if query.is_empty() {
+                continue;
+            }
+            return say_then_open(
+                format!("Searching YouTube for {}.", query),
+                format!(
+                    "https://www.youtube.com/results?search_query={}",
+                    urlencode(query)
+                ),
+            );
+        }
+    }
+
+    // "open / launch / start / run <app or url>"
+    for prefix in ["open ", "launch ", "start ", "run "] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            let target = rest.trim();
+            if target.is_empty() {
+                continue;
+            }
+            if target.contains("://") {
+                return say_then_open(format!("Opening {}.", target), target.to_string());
+            }
+            if let Some((_, bin)) = APP_ALIASES.iter().find(|(name, _)| *name == target) {
+                return say_then_open(format!("Opening {}.", target), bin.to_string());
+            }
+            // Unknown app — don't guess at a binary that probably doesn't
+            // exist. Fall through and let the LLM respond instead.
+            return None;
+        }
+    }
+
+    // "google X" / "search for X" / "look up X"
+    for prefix in ["google ", "search for ", "look up "] {
+        if let Some(rest) = t.strip_prefix(prefix) {
+            let query = rest.trim();
+            if query.is_empty() {
+                continue;
+            }
+            return say_then_open(
+                format!("Searching for {}.", query),
+                format!("https://www.google.com/search?q={}", urlencode(query)),
+            );
+        }
+    }
+
+    None
+}
+
 pub struct Planner {
     bus: Arc<EventBus>,
     working: Arc<RwLock<WorkingMemory>>,
@@ -211,6 +339,21 @@ impl Planner {
                 payload: serde_json::json!({
                     "plan": {"type": "say", "text": "Just trying to be helpful — what do you need?"}
                 }),
+            };
+            self.bus.publish(plan_event);
+            return Ok(());
+        }
+
+        // Action intents — deterministic, no LLM round trip. Emitted as a
+        // say+action plan so the user gets spoken confirmation.
+        if let Some(plan) = match_action_intent(intent) {
+            info!("Planner: matched action intent — {}", plan);
+            let plan_event = Event {
+                id: uuid::Uuid::new_v4(),
+                timestamp: chrono::Utc::now(),
+                source: "planner".to_string(),
+                event_type: EventType::PlanReady,
+                payload: serde_json::json!({ "plan": plan }),
             };
             self.bus.publish(plan_event);
             return Ok(());
