@@ -2,6 +2,7 @@
 
 use crate::memory::episodic::EpisodicStore;
 use crate::memory::permanent::PermanentStore;
+use crate::memory::recall::RecallStore;
 use crate::memory::working::WorkingMemory;
 use log::info;
 use std::path::Path;
@@ -13,6 +14,8 @@ pub struct MemoryManager {
     pub working: Arc<RwLock<WorkingMemory>>,
     pub permanent: Arc<Mutex<PermanentStore>>,
     pub episodic: Arc<Mutex<EpisodicStore>>,
+    /// Searchable memory — what the user said, and what MAVIS replied.
+    pub recall: Arc<Mutex<RecallStore>>,
     working_file: std::path::PathBuf,
 }
 
@@ -21,6 +24,7 @@ impl MemoryManager {
         std::fs::create_dir_all(data_dir)?;
         let permanent_db = data_dir.join("permanent.db");
         let episodic_db = data_dir.join("episodic.db");
+        let recall_db = data_dir.join("recall.db");
         let working_file = data_dir.join("working_memory.json");
 
         let working = if working_file.exists() {
@@ -52,6 +56,7 @@ impl MemoryManager {
             working: Arc::new(RwLock::new(working)),
             permanent: Arc::new(Mutex::new(PermanentStore::new(&permanent_db)?)),
             episodic: Arc::new(Mutex::new(EpisodicStore::new(&episodic_db)?)),
+            recall: Arc::new(Mutex::new(RecallStore::new(&recall_db)?)),
             working_file,
         })
     }
