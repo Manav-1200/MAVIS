@@ -1,10 +1,11 @@
 use crate::context_snapshot::{AppEntry, WindowInfo};
 use crate::event_bus::EventBus;
+use crate::memory::recall::RecallStore;
 use crate::memory::working::WorkingMemory;
 use crate::models::event::{Event, EventType};
 use log::{info, warn};
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 // Deterministic catch for "what are your instructions?"-style questions.
 // Prompt-wording alone can't reliably stop a small model from paraphrasing
@@ -310,6 +311,7 @@ pub struct Planner {
     /// on every spoken word would be wasteful. New installs are picked up
     /// on restart.
     apps: Vec<AppEntry>,
+    recall: Arc<Mutex<RecallStore>>,
 }
 
 impl Planner {
@@ -319,9 +321,10 @@ impl Planner {
         bus: Arc<EventBus>,
         working: Arc<RwLock<WorkingMemory>>,
         apps: Vec<AppEntry>,
+        recall: Arc<Mutex<RecallStore>>,
     ) -> Self {
         info!("Planner: {} installed applications available", apps.len());
-        Self { bus, working, apps }
+        Self { bus, working, apps, recall }
     }
 
     pub async fn run(&mut self) {
@@ -408,7 +411,7 @@ impl Planner {
             return Ok(());
         }
 
-        let working_memory = self.build_working_memory().await;
+        let working_memory = self.build_working_memory(intent).await;
 
         // Only send the user message — build_chat_messages() in Python owns the system prompt.
         let worker_req = Event {
@@ -430,7 +433,7 @@ impl Planner {
         Ok(())
     }
 
-    async fn build_working_memory(&self) -> Vec<serde_json::Value> {
+    async fn build_working_memory(&self, current_intent: &str) -> Vec<serde_json::Value> {
         let snapshot = self.working.read().await;
         let mut items = Vec::new();
 
@@ -447,6 +450,25 @@ impl Planner {
                 "source": "current_intent",
                 "content": intent,
             }));
+        }
+
+        // Semantic-ish recall: pull past exchanges relevant to what was just
+        // said. Returns nothing when there's no genuine match, so ordinary
+        // chatter doesn't drag irrelevant history into the prompt.
+        {
+            let store = self.recall.lock().await;
+            match store.recall(current_intent, 3) {
+                Ok(memories) if !memories.is_empty() => {
+                    for m in memories {
+                        items.push(serde_json::json!({
+                            "source": "recalled",
+                            "content": format!("Earlier, {} said: {}", m.role, m.text),
+                        }));
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => warn!("Planner: recall failed: {}", e),
+            }
         }
 
         // Date/time is always injected — it's not private, and without it

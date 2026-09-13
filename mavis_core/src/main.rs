@@ -54,6 +54,7 @@ async fn main() -> Result<()> {
     let memory = memory::manager::MemoryManager::new(data_dir)?;
     let memory_for_shutdown = memory.clone();
     let working_memory = memory.working.clone();
+    let recall_for_planner = memory.recall.clone();
     info!("Memory: initialized (working events={})", memory.working.read().await.events.len());
 
     // Context Engine
@@ -82,7 +83,8 @@ async fn main() -> Result<()> {
     // Planner
     let bus_clone = Arc::clone(&bus);
     let installed_apps = platform.installed_apps();
-    let mut planner = planner::Planner::new(bus_clone, working_memory, installed_apps);
+    let mut planner =
+        planner::Planner::new(bus_clone, working_memory, installed_apps, recall_for_planner);
     let planner_handle = tokio::spawn(async move {
         planner.run().await;
     });
