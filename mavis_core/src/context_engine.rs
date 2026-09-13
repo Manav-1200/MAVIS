@@ -60,6 +60,17 @@ impl ContextEngine {
                         }
                     }
                 }
+
+                // Persist to searchable memory. Low-importance chatter is
+                // dropped inside record() rather than filtered here.
+                {
+                    let recall = self.memory.recall.lock().await;
+                    if let Err(e) =
+                        recall.record("user", intent, &event.timestamp.to_rfc3339())
+                    {
+                        warn!("ContextEngine: failed to record memory: {}", e);
+                    }
+                }
             }
 
             EventType::WorkerResponse => {
@@ -97,8 +108,19 @@ impl ContextEngine {
             EventType::PlanReady => {
                 info!("ContextEngine: PlanReady — updating working memory");
                 if let Some(plan) = event.payload.get("plan") {
-                    let mut wm = self.memory.working.write().await;
-                    wm.set_active_plan(plan.clone());
+                    {
+                        let mut wm = self.memory.working.write().await;
+                        wm.set_active_plan(plan.clone());
+                    }
+                    // What MAVIS actually said, for later recall.
+                    if let Some(text) = plan.get("text").and_then(|t| t.as_str()) {
+                        let recall = self.memory.recall.lock().await;
+                        if let Err(e) =
+                            recall.record("mavis", text, &event.timestamp.to_rfc3339())
+                        {
+                            warn!("ContextEngine: failed to record memory: {}", e);
+                        }
+                    }
                 }
             }
 
