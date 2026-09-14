@@ -304,6 +304,66 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
     None
 }
 
+/// Recognise "yesterday", "this morning", "last week" and friends, mapping
+/// them to a concrete time window. Returns None for anything without a time
+/// reference, which is most utterances.
+///
+/// Deliberately a small fixed set rather than general date parsing: these
+/// cover what people actually ask a desktop assistant, and a wrong window is
+/// worse than no window — it would inject unrelated history into the prompt.
+fn parse_time_reference(
+    text: &str,
+) -> Option<(chrono::DateTime<chrono::Local>, chrono::DateTime<chrono::Local>, String)> {
+    use chrono::{Duration, Local, TimeZone, Timelike};
+
+    let t = text.to_lowercase();
+    let now = Local::now();
+    // Midnight today, derived from the date rather than picking apart
+    // year/month/day by hand.
+    let today = Local
+        .from_local_datetime(&now.date_naive().and_hms_opt(0, 0, 0)?)
+        .single()?;
+
+    let part_range = |base: chrono::DateTime<Local>, part: &str| {
+        let (from_h, to_h) = match part {
+            "morning" => (5, 12),
+            "afternoon" => (12, 17),
+            _ => (17, 23),
+        };
+        (
+            base.with_hour(from_h).unwrap_or(base),
+            base.with_hour(to_h).unwrap_or(base),
+        )
+    };
+
+    for part in ["morning", "afternoon", "evening"] {
+        if t.contains(&format!("yesterday {}", part)) {
+            let base = today - Duration::days(1);
+            let (a, b) = part_range(base, part);
+            return Some((a, b, format!("yesterday {}", part)));
+        }
+        if t.contains(&format!("this {}", part)) {
+            let (a, b) = part_range(today, part);
+            return Some((a, b, format!("this {}", part)));
+        }
+    }
+
+    if t.contains("yesterday") {
+        return Some((today - Duration::days(1), today, "yesterday".into()));
+    }
+    if t.contains("today") || t.contains("so far") {
+        return Some((today, today + Duration::days(1), "today".into()));
+    }
+    if t.contains("last week") {
+        return Some((today - Duration::days(7), today, "last week".into()));
+    }
+    if t.contains("this week") {
+        return Some((today - Duration::days(7), now, "this week".into()));
+    }
+
+    None
+}
+
 pub struct Planner {
     bus: Arc<EventBus>,
     working: Arc<RwLock<WorkingMemory>>,
@@ -457,17 +517,44 @@ impl Planner {
         // chatter doesn't drag irrelevant history into the prompt.
         {
             let store = self.recall.lock().await;
-            match store.recall(current_intent, 3) {
-                Ok(memories) if !memories.is_empty() => {
-                    for m in memories {
+
+            // A question about a time period ("what was I doing yesterday")
+            // wants that whole window, not keyword matches scattered across
+            // months — so replay takes precedence when a time reference is
+            // present.
+            if let Some((start, end, label)) = parse_time_reference(current_intent) {
+                match store.recall_between(&start.to_rfc3339(), &end.to_rfc3339(), 12) {
+                    Ok(memories) if !memories.is_empty() => {
+                        let lines: Vec<String> = memories
+                            .iter()
+                            .map(|m| format!("{}: {}", m.role, m.text))
+                            .collect();
                         items.push(serde_json::json!({
-                            "source": "recalled",
-                            "content": format!("Earlier, {} said: {}", m.role, m.text),
+                            "source": "replay",
+                            "content": format!("What happened {}: {}", label, lines.join(" | ")),
                         }));
                     }
+                    Ok(_) => {
+                        items.push(serde_json::json!({
+                            "source": "replay",
+                            "content": format!("Nothing was recorded {}.", label),
+                        }));
+                    }
+                    Err(e) => warn!("Planner: replay failed: {}", e),
                 }
-                Ok(_) => {}
-                Err(e) => warn!("Planner: recall failed: {}", e),
+            } else {
+                match store.recall(current_intent, 3) {
+                    Ok(memories) if !memories.is_empty() => {
+                        for m in memories {
+                            items.push(serde_json::json!({
+                                "source": "recalled",
+                                "content": format!("Earlier, {} said: {}", m.role, m.text),
+                            }));
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => warn!("Planner: recall failed: {}", e),
+                }
             }
         }
 
