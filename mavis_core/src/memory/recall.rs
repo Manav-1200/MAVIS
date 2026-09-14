@@ -111,6 +111,61 @@ impl RecallStore {
             .query_row("SELECT COUNT(*) FROM memory_fts", [], |r| r.get(0))?;
         Ok(n)
     }
+
+    /// Everything recorded between two RFC3339 timestamps, oldest first.
+    /// Answers "what was I doing yesterday afternoon" — the data was always
+    /// there, nothing ever read it back by time.
+    pub fn recall_between(&self, start: &str, end: &str, limit: usize) -> Result<Vec<Memory>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT text, role, timestamp, importance
+             FROM memory_fts
+             WHERE timestamp >= ?1 AND timestamp <= ?2
+             ORDER BY timestamp ASC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(params![start, end, limit as i64], |row| {
+            Ok(Memory {
+                text: row.get(0)?,
+                role: row.get(1)?,
+                timestamp: row.get(2)?,
+                importance: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
+    /// Drop memories that have outlived their usefulness.
+    ///
+    /// Retention scales with importance rather than a flat 30 days: a stated
+    /// preference is worth keeping indefinitely, while "what time is it"
+    /// stops being useful almost immediately. Without this the store grows
+    /// without bound and old chatter starts crowding real matches out of
+    /// search results.
+    pub fn purge_expired(&self) -> Result<usize> {
+        let now = chrono::Utc::now();
+        let cutoff = |days: i64| (now - chrono::Duration::days(days)).to_rfc3339();
+
+        // (max importance for this bucket, retention in days)
+        let policy = [
+            (2, 7),   // MAVIS's own replies — context, not knowledge
+            (4, 30),  // questions and passing remarks
+            (7, 90),  // ordinary statements
+                      // importance >= 8 (stated facts, preferences) never expires
+        ];
+
+        let mut removed = 0usize;
+        for (max_importance, days) in policy {
+            removed += self.conn.execute(
+                "DELETE FROM memory_fts WHERE importance <= ?1 AND timestamp < ?2",
+                params![max_importance, cutoff(days)],
+            )?;
+        }
+
+        if removed > 0 {
+            log::info!("RecallStore: purged {} expired memories", removed);
+        }
+        Ok(removed)
+    }
 }
 
 /// Turn arbitrary speech into a valid FTS5 MATCH expression.
