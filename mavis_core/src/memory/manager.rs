@@ -2,6 +2,7 @@
 
 use crate::memory::episodic::EpisodicStore;
 use crate::memory::permanent::PermanentStore;
+use crate::memory::long_term::LongTermMemory;
 use crate::memory::recall::RecallStore;
 use crate::memory::working::WorkingMemory;
 use log::info;
@@ -16,6 +17,8 @@ pub struct MemoryManager {
     pub episodic: Arc<Mutex<EpisodicStore>>,
     /// Searchable memory — what the user said, and what MAVIS replied.
     pub recall: Arc<Mutex<RecallStore>>,
+    /// Daily summaries, consolidated from recall before decay removes it.
+    pub long_term: Arc<Mutex<LongTermMemory>>,
     working_file: std::path::PathBuf,
 }
 
@@ -25,6 +28,7 @@ impl MemoryManager {
         let permanent_db = data_dir.join("permanent.db");
         let episodic_db = data_dir.join("episodic.db");
         let recall_db = data_dir.join("recall.db");
+        let long_term_db = data_dir.join("long_term.db");
         let working_file = data_dir.join("working_memory.json");
 
         let working = if working_file.exists() {
@@ -64,6 +68,7 @@ impl MemoryManager {
             permanent: Arc::new(Mutex::new(PermanentStore::new(&permanent_db)?)),
             episodic: Arc::new(Mutex::new(EpisodicStore::new(&episodic_db)?)),
             recall: Arc::new(Mutex::new(recall_store)),
+            long_term: Arc::new(Mutex::new(LongTermMemory::new(&long_term_db)?)),
             working_file,
         })
     }
