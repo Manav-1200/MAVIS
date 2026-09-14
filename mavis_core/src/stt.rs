@@ -108,8 +108,6 @@ struct EnergyVad {
     max_energy_seen: f32,
     pub last_max_energy: f32,
     sample_rate: usize,
-    debug_frame_count: u64,
-    debug_window_max: f32,
 }
 
 impl EnergyVad {
@@ -137,8 +135,6 @@ impl EnergyVad {
             max_energy_seen: 0.0,
             last_max_energy: 0.0,
             sample_rate: cfg.sample_rate as usize,
-            debug_frame_count: 0,
-            debug_window_max: 0.0,
         }
     }
 
@@ -166,21 +162,6 @@ impl EnergyVad {
             let energy =
                 (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
             self.max_energy_seen = self.max_energy_seen.max(energy);
-
-            // TEMPORARY: report what the LIVE audio path actually sees, so we
-            // can compare against arecord measurements. Every 100 frames (~3s).
-            self.debug_frame_count += 1;
-            self.debug_window_max = self.debug_window_max.max(energy);
-            if self.debug_frame_count % 100 == 0 {
-                info!(
-                    "VAD-LIVE: last 100 frames — max_energy={:.4}, current={:.4}, start_thresh={:.4}, speaking={}",
-                    self.debug_window_max,
-                    energy,
-                    self.start_threshold(),
-                    self.is_speaking
-                );
-                self.debug_window_max = 0.0;
-            }
 
             self.buffer.extend(chunk);
 
