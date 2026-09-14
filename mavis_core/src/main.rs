@@ -55,6 +55,9 @@ async fn main() -> Result<()> {
     let memory_for_shutdown = memory.clone();
     let working_memory = memory.working.clone();
     let recall_for_planner = memory.recall.clone();
+    let recall_for_consolidation = memory.recall.clone();
+    let long_term_for_consolidation = memory.long_term.clone();
+    let long_term_for_planner = memory.long_term.clone();
     info!("Memory: initialized (working events={})", memory.working.read().await.events.len());
 
     // Context Engine
@@ -84,7 +87,13 @@ async fn main() -> Result<()> {
     let bus_clone = Arc::clone(&bus);
     let installed_apps = platform.installed_apps();
     let mut planner =
-        planner::Planner::new(bus_clone, working_memory, installed_apps, recall_for_planner);
+        planner::Planner::new(
+        bus_clone,
+        working_memory,
+        installed_apps,
+        recall_for_planner,
+        long_term_for_planner,
+    );
     let planner_handle = tokio::spawn(async move {
         planner.run().await;
     });
@@ -482,6 +491,123 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
+    });
+
+    // Nightly consolidation — compress each completed day's important
+    // memories into a single summary before decay removes the originals.
+    //
+    // Runs hourly rather than on a cron schedule: MAVIS isn't guaranteed to
+    // be running at any particular time, so "check whether yesterday still
+    // needs summarizing" is more robust than "fire at 3am". Already-summarized
+    // days are skipped without an LLM call.
+    let _consolidation_handle = tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::UnixStream;
+        use tokio::time::{sleep, timeout, Duration};
+
+        // Wait for the worker to be up before the first attempt.
+        sleep(Duration::from_secs(60)).await;
+
+        loop {
+            // Look back a week so days MAVIS wasn't running still get picked up.
+            for days_ago in 1..=7 {
+                let date = (chrono::Local::now() - chrono::Duration::days(days_ago))
+                    .format("%Y-%m-%d")
+                    .to_string();
+
+                let already = {
+                    let lt = long_term_for_consolidation.lock().await;
+                    lt.has_summary(&date).unwrap_or(false)
+                };
+                if already {
+                    continue;
+                }
+
+                let memories = {
+                    let recall = recall_for_consolidation.lock().await;
+                    // Importance >= 4 skips MAVIS's own replies and passing
+                    // questions — a summary of those would be noise.
+                    recall.memories_for_day(&date, 4).unwrap_or_default()
+                };
+                // Not worth an LLM call for a couple of stray lines.
+                if memories.len() < 3 {
+                    continue;
+                }
+
+                let transcript: Vec<String> = memories
+                    .iter()
+                    .map(|m| format!("{}: {}", m.role, m.text))
+                    .collect();
+                let prompt = format!(
+                    "Summarize what the user did and said on {} in two or three \
+                     sentences. Focus on decisions, preferences, and what they \
+                     worked on. Write plainly, no bullet points.\n\n{}",
+                    date,
+                    transcript.join("\n")
+                );
+
+                let request = serde_json::json!({
+                    "type": "WorkerRequest",
+                    "payload": {
+                        "request_type": "chat",
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 200,
+                        "temperature": 0.3,
+                    }
+                });
+                let req_bytes = request.to_string().into_bytes();
+
+                let result = timeout(Duration::from_secs(120), async {
+                    let mut stream = UnixStream::connect(WORKER_SOCKET).await?;
+                    stream
+                        .write_all(&(req_bytes.len() as u32).to_le_bytes())
+                        .await?;
+                    stream.write_all(&req_bytes).await?;
+                    stream.flush().await?;
+
+                    let mut len_buf = [0u8; 4];
+                    stream.read_exact(&mut len_buf).await?;
+                    let resp_len = u32::from_le_bytes(len_buf) as usize;
+                    if resp_len == 0 || resp_len > 10_000_000 {
+                        return Ok::<Option<String>, std::io::Error>(None);
+                    }
+                    let mut buf = vec![0u8; resp_len];
+                    stream.read_exact(&mut buf).await?;
+                    let text = String::from_utf8_lossy(&buf);
+                    Ok(serde_json::from_str::<serde_json::Value>(&text)
+                        .ok()
+                        .and_then(|v| {
+                            v.get("payload")
+                                .and_then(|p| p.get("result"))
+                                .and_then(|r| r.get("content"))
+                                .and_then(|c| c.as_str())
+                                .map(String::from)
+                        }))
+                })
+                .await;
+
+                match result {
+                    Ok(Ok(Some(summary))) if !summary.trim().is_empty() => {
+                        let lt = long_term_for_consolidation.lock().await;
+                        if let Err(e) =
+                            lt.store_summary(&date, summary.trim(), memories.len() as i64)
+                        {
+                            warn!("Consolidation: failed to store summary: {}", e);
+                        }
+                    }
+                    Ok(Ok(_)) => {
+                        info!("Consolidation: empty summary for {}, skipping", date);
+                    }
+                    Ok(Err(e)) => warn!("Consolidation: worker I/O error: {}", e),
+                    Err(_) => warn!("Consolidation: worker timed out for {}", date),
+                }
+
+                // One day per pass — no reason to tie up the worker.
+                break;
+            }
+
+            sleep(Duration::from_secs(3600)).await;
         }
     });
 
