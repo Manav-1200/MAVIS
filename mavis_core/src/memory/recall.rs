@@ -134,6 +134,28 @@ impl RecallStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
     }
 
+    /// Memories from a single day worth consolidating. Filters out the
+    /// low-value chatter so the summary is built from things that mattered.
+    pub fn memories_for_day(&self, date: &str, min_importance: i64) -> Result<Vec<Memory>> {
+        let start = format!("{}T00:00:00+00:00", date);
+        let end = format!("{}T23:59:59+00:00", date);
+        let mut stmt = self.conn.prepare(
+            "SELECT text, role, timestamp, importance
+             FROM memory_fts
+             WHERE timestamp >= ?1 AND timestamp <= ?2 AND importance >= ?3
+             ORDER BY timestamp ASC",
+        )?;
+        let rows = stmt.query_map(params![start, end, min_importance], |row| {
+            Ok(Memory {
+                text: row.get(0)?,
+                role: row.get(1)?,
+                timestamp: row.get(2)?,
+                importance: row.get(3)?,
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+    }
+
     /// Drop memories that have outlived their usefulness.
     ///
     /// Retention scales with importance rather than a flat 30 days: a stated
@@ -174,7 +196,7 @@ impl RecallStore {
 /// that routinely appear in transcribed speech (quotes, hyphens, colons,
 /// asterisks) are operators there. Rather than escape them, extract plain
 /// alphanumeric terms and OR them together.
-fn build_fts_query(raw: &str) -> Option<String> {
+pub fn build_fts_query(raw: &str) -> Option<String> {
     let terms: Vec<String> = raw
         .to_lowercase()
         .split(|c: char| !c.is_ascii_alphanumeric())
