@@ -52,11 +52,18 @@ impl MemoryManager {
             WorkingMemory::new()
         };
 
+        // Prune expired memories once at startup — cheap, and keeps old
+        // chatter from crowding out real matches in search results.
+        let recall_store = RecallStore::new(&recall_db)?;
+        if let Err(e) = recall_store.purge_expired() {
+            log::warn!("Memory: purge failed: {}", e);
+        }
+
         Ok(Self {
             working: Arc::new(RwLock::new(working)),
             permanent: Arc::new(Mutex::new(PermanentStore::new(&permanent_db)?)),
             episodic: Arc::new(Mutex::new(EpisodicStore::new(&episodic_db)?)),
-            recall: Arc::new(Mutex::new(RecallStore::new(&recall_db)?)),
+            recall: Arc::new(Mutex::new(recall_store)),
             working_file,
         })
     }
