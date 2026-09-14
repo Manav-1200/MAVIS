@@ -1,6 +1,7 @@
 use crate::context_snapshot::{AppEntry, WindowInfo};
 use crate::event_bus::EventBus;
-use crate::memory::recall::RecallStore;
+use crate::memory::long_term::LongTermMemory;
+use crate::memory::recall::{build_fts_query, RecallStore};
 use crate::memory::working::WorkingMemory;
 use crate::models::event::{Event, EventType};
 use log::{info, warn};
@@ -372,6 +373,7 @@ pub struct Planner {
     /// on restart.
     apps: Vec<AppEntry>,
     recall: Arc<Mutex<RecallStore>>,
+    long_term: Arc<Mutex<LongTermMemory>>,
 }
 
 impl Planner {
@@ -382,9 +384,10 @@ impl Planner {
         working: Arc<RwLock<WorkingMemory>>,
         apps: Vec<AppEntry>,
         recall: Arc<Mutex<RecallStore>>,
+        long_term: Arc<Mutex<LongTermMemory>>,
     ) -> Self {
         info!("Planner: {} installed applications available", apps.len());
-        Self { bus, working, apps, recall }
+        Self { bus, working, apps, recall, long_term }
     }
 
     pub async fn run(&mut self) {
@@ -523,6 +526,22 @@ impl Planner {
             // months — so replay takes precedence when a time reference is
             // present.
             if let Some((start, end, label)) = parse_time_reference(current_intent) {
+                // Daily summaries first — they survive decay, so for older
+                // periods they may be all that's left.
+                {
+                    let lt = self.long_term.lock().await;
+                    let from = start.format("%Y-%m-%d").to_string();
+                    let to = end.format("%Y-%m-%d").to_string();
+                    if let Ok(summaries) = lt.summaries_between(&from, &to) {
+                        for s in summaries {
+                            items.push(serde_json::json!({
+                                "source": "daily_summary",
+                                "content": format!("On {}: {}", s.date, s.summary),
+                            }));
+                        }
+                    }
+                }
+
                 match store.recall_between(&start.to_rfc3339(), &end.to_rfc3339(), 12) {
                     Ok(memories) if !memories.is_empty() => {
                         let lines: Vec<String> = memories
@@ -552,7 +571,21 @@ impl Planner {
                             }));
                         }
                     }
-                    Ok(_) => {}
+                    Ok(_) => {
+                        // Nothing in raw memory — the originals may have
+                        // decayed, so try the daily summaries.
+                        if let Some(fts) = build_fts_query(current_intent) {
+                            let lt = self.long_term.lock().await;
+                            if let Ok(summaries) = lt.search(&fts, 2) {
+                                for s in summaries {
+                                    items.push(serde_json::json!({
+                                        "source": "daily_summary",
+                                        "content": format!("On {}: {}", s.date, s.summary),
+                                    }));
+                                }
+                            }
+                        }
+                    }
                     Err(e) => warn!("Planner: recall failed: {}", e),
                 }
             }
