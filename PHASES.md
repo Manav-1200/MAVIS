@@ -21,7 +21,7 @@
 | 5 | Interaction Polish | TTS queue, interruption, session recovery, personality foundation. | Daily polish | :white_check_mark: Complete |
 | 6 | Context Awareness | Active window, open windows, workspace, clipboard, IDE, terminal, project, calendar. | Companion senses | :white_check_mark: Complete |
 | 6.5 | Action Execution | App launching, YouTube, web search; cross-platform app discovery. | Companion acts | :white_check_mark: Built |
-| 7 | Memory & Learning | Episodic -> long-term pipeline, semantic recall, vector embeddings, routine detection. | Persistent memory | Not started |
+| 7 | Memory & Learning | Recall with decay, daily consolidation, episodic replay, entity graph. | Persistent memory | :white_check_mark: 7.1–7.2 complete |
 | 8 | Safety & Permissions | 5-tier permission model, risk scoring, audit log, dry-run, rollback. | Trust layer | Not started |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
 | 10 | Automation & Proactive Intelligence | Rule engine, predictive suggestions, workflow recording, wellness reminders, daily briefing. | Proactive assistant | Not started |
@@ -444,42 +444,54 @@ Discovery lives behind `PlatformProvider::installed_apps()` with an empty defaul
 
 ## Phase 7 — Memory & Learning Layer
 
+**Status:** :white_check_mark: 7.1 and 7.2 complete (2026-09-13 — 2026-09-15). 7.3 deferred — see below.
+
 **Goal:** Move from session-scoped working memory to persistent, growing memory.
+
+Two deliberate departures from the original plan, both made to avoid dependencies this project doesn't need. Each is noted against the item it replaces.
+
+### Memory tiers as built
+
+| Tier | Contents | Lifetime | Store |
+|------|----------|----------|-------|
+| Working | current session state, context snapshot | in-RAM, JSON snapshot on shutdown | `working_memory.json` |
+| Episodic | raw event log | indefinite | `episodic.db` |
+| Recall | user utterances and MAVIS replies, importance-scored | decays by importance | `recall.db` (FTS5) |
+| Long-term | one compressed summary per day | permanent | `long_term.db` (FTS5) |
+| Entities | projects, apps, files and their co-occurrence | permanent | `entities.db` |
 
 ### 7.1 Intelligent Memory Pipeline
 
-```
-Working Memory (session) ---> Episodic (sqlite, 30 days) ---> Long-Term (sqlite + embeddings)
-                                    |                              |
-                                    v                              v
-                            Importance scoring              Consolidation (nightly)
-                            (LLM rates 1-10)                (summarize, compress, embed)
-```
-
-- [ ] **Importance scoring** — After each interaction, lightweight LLM call rates memory importance
-- [ ] **Episodic store** — SQLite table: `(timestamp, role, content, importance, tags_json)`
-- [ ] **Forgetting / decay** — Episodic entries below threshold importance auto-purge after 30 days
-- [ ] **Automatic summaries** — Nightly cron-like task (Rust scheduler) compresses high-importance episodes into summaries
-- [ ] **Long-term consolidation** — Summaries promoted to Long-Term memory with vector embeddings
-- [ ] **Context compression** — When working memory grows too large, older entries are compressed into summary bullets before eviction
-- [ ] **Episodic replay** — Ability to reconstruct "what happened on Tuesday afternoon" from timestamped episodic chain
+- [x] **Importance scoring** — heuristic, not an LLM call. The plan specified "lightweight LLM call rates memory importance", but the model is already the latency bottleneck and scoring every interaction would add a round trip to every exchange. Stated facts ("my name is", "I prefer") score 9, questions 3, bare commands 1 and are dropped entirely.
+- [x] **Episodic store** — `recall.db`, FTS5 virtual table over `(text, role, timestamp, importance)`.
+- [x] **Forgetting / decay** — retention scales with importance rather than a flat 30 days: MAVIS's own replies 7 days, questions 30, statements 90, stated facts never. Purged once at startup.
+- [x] **Automatic summaries** — consolidation task runs hourly, looking back 7 days for any completed day not yet summarized. Hourly rather than a fixed-time cron because MAVIS isn't guaranteed to be running at 3am; "check whether yesterday still needs doing" is more robust. Skips already-summarized days without an LLM call, and skips days with fewer than 3 meaningful memories.
+- [x] **Long-term consolidation** — summaries stored in `long_term.db` with FTS5 search. No vector embeddings (see 7.2).
+- [x] **Episodic replay** — "what was I doing yesterday afternoon" maps to a concrete time window. Recognised: `yesterday`, `today`, `this/yesterday morning|afternoon|evening`, `last week`, `this week`. Deliberately a small fixed set rather than general date parsing — a wrong window is worse than none, since it would inject unrelated history into the prompt.
+- [ ] **Context compression** — not built. Working memory is capped at 50 events and evicts oldest-first rather than compressing.
 
 ### 7.2 Advanced Memory
 
-- [ ] **Vector embeddings** — `sentence-transformers` (all-MiniLM-L6-v2, local, CPU, ~80 MB)
-- [ ] **FAISS / hnswlib** — Local vector index for fast similarity search
-- [ ] **Semantic recall** — Before Planner generates a plan, search episodic + long-term for semantic matches to current intent + context
-- [ ] **Memory graph** — Lightweight entity extraction (spaCy or regex) linking people, projects, files, concepts in a navigable graph
-- [ ] **Relationship graph** — Track relationships between entities over time
+- [x] **Semantic recall** — implemented with SQLite **FTS5**, not embeddings. The plan called for `sentence-transformers` (~80 MB model) plus FAISS: three new dependencies for a project whose rule is to add only what's necessary. Full-text search covers a large share of the same ground — verified that "audio" finds a memory about "VAD thresholds", and "text to speech engine" finds "piper over kokoro". **If recall proves too literal in daily use, embeddings become an evidence-backed decision rather than an assumed one.**
+- [ ] **Vector embeddings** — deliberately not added, see above.
+- [ ] **FAISS / hnswlib** — deliberately not added, see above.
+- [x] **Memory graph** — entities derived from data the context layer already resolves with certainty: git repository names, compositor app IDs, filenames from IDE window titles. No spaCy: it's a heavy dependency plus a language model, and it's poor at exactly these entities — it won't tag `mavis_core` as a project or `stt.rs` as a file. These are observations rather than predictions, so nothing can be misidentified. **Known gap:** people mentioned in conversation ("meeting with Sarah") are not captured; that is what spaCy would have added.
+- [x] **Relationship graph** — co-occurrence weights between entities, so "what's usually open alongside the MAVIS project" has an answer. Recorded only when the app/project/file combination *changes* — context updates arrive every 2 s, and recording each one would measure idle time rather than work.
 
 ### 7.3 Learning Engine
 
-- [ ] **Routine detection** — Time-series pattern matching on user actions (e.g., opens Spotify at 9 AM)
-- [ ] **Preferred apps** — Track most-launched applications per context (work hours vs. evening)
-- [ ] **Learn coding schedule** — Detect when user typically codes; pre-warm context with relevant projects
-- [ ] **Learn workflows** — Recognize recurring sequences of actions
-- [ ] **Learn frequently used commands** — Build per-project command history; suggest completions
-- [ ] **Adapt suggestions over time** — If user consistently rejects a suggestion type, down-weight it in Planner scoring
+**Deferred, deliberately.** Routine detection needs months of accumulated behaviour to find anything real; MAVIS has days. Building a pattern detector with no patterns to detect would produce confident nonsense, and the entity graph from 7.2 is precisely the data that will eventually feed it. Revisit once `entities.db` has meaningful history.
+
+- [ ] Routine detection
+- [ ] Preferred apps per context
+- [ ] Learn coding schedule
+- [ ] Learn workflows
+- [ ] Learn frequently used commands
+- [ ] Adapt suggestions over time
+
+### 7.4 — Not yet verified
+
+Everything above compiles and its logic is unit-verified, but none of it has run in a live session. Consolidation in particular cannot be confirmed until MAVIS has been left running across a day boundary. Recall and replay only become meaningful after several sessions of accumulated history.
 
 ---
 
@@ -716,4 +728,4 @@ Executor proposes action -> Risk score computed
 
 ---
 
-*Last updated: 2026-09-12*
+*Last updated: 2026-09-15*

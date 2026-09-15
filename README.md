@@ -66,7 +66,7 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 | 4 — Integration | Voice pipeline, intent system, automations | :white_check_mark: Complete |
 | 5 — Interaction Polish | TTS queue, interruption, session recovery, personality | :white_check_mark: Complete |
 | 6 — Context Awareness | Active window, workspace, clipboard, IDE, terminal, project, calendar | :white_check_mark: Complete |
-| 7 — Memory & Learning | Semantic recall, vector embeddings, routines | Not started |
+| 7 — Memory & Learning | Recall with decay, daily consolidation, replay, entity graph | :white_check_mark: 7.1–7.2 complete |
 | 8 — Safety & Permissions | Permission tiers, risk scoring, audit log | Not started |
 | 9 — Skills Platform | Plugin API, manifest, sandboxing | Not started |
 | 10 — Automation & Wellness | Rule engine, proactive suggestions, wellness | Not started |
@@ -103,6 +103,37 @@ source .venv/bin/activate
 pip install -e .
 python -m mavis
 ```
+
+### Voice commands
+
+Some phrases are handled directly by the planner without an LLM round trip, so they respond near-instantly:
+
+| Say | MAVIS does |
+|-----|------------|
+| "open firefox", "launch terminal" | Launches the app |
+| "play lofi hip hop" | Opens a YouTube search |
+| "google rust async traits" | Opens a web search |
+| "volume up", "louder", "mute" | Adjusts volume |
+| "pause", "next song" | Media control |
+| "brighter", "dim the screen" | Adjusts brightness |
+
+Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. Anything else goes to the local model with context attached.
+
+`shell` execution exists in the executor but is **deliberately unreachable from voice** until Phase 8 adds a permission layer.
+
+### Memory
+
+MAVIS remembers across sessions. Five tiers, all local SQLite:
+
+| Tier | Contents | Lifetime |
+|------|----------|----------|
+| Working | current session, context snapshot | in-RAM + JSON |
+| Episodic | raw event log | indefinite |
+| Recall | what was said, importance-scored | 7–90 days by importance; stated facts kept |
+| Long-term | one summary per day | permanent |
+| Entities | projects, apps, files and what co-occurs | permanent |
+
+Search uses SQLite FTS5 rather than vector embeddings — no extra dependency, no model download. Entities come from observed facts (git repo names, app IDs, filenames), not inference.
 
 ### Context sources
 
