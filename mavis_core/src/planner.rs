@@ -228,6 +228,100 @@ fn strip_address(text: &str) -> &str {
     t
 }
 
+// System control intents. The executor already forwards `system` actions to
+// the DBus subsystem, which implements all eight ops below — none of them
+// were reachable from speech until now.
+//
+// Phrases are matched whole rather than by keyword: "what's the volume
+// policy at work" contains "volume" but is a question, not a command.
+const SYSTEM_INTENTS: &[(&[&str], &str, &str)] = &[
+    (
+        &["volume up", "turn up the volume", "turn the volume up", "louder",
+          "increase the volume", "raise the volume"],
+        "volume_up",
+        "Volume up.",
+    ),
+    (
+        &["volume down", "turn down the volume", "turn the volume down", "quieter",
+          "decrease the volume", "lower the volume"],
+        "volume_down",
+        "Volume down.",
+    ),
+    (
+        &["mute", "unmute", "mute the volume", "mute the sound"],
+        "volume_mute",
+        "Muted.",
+    ),
+    (
+        &["pause the music", "resume the music", "play the music", "pause",
+          "resume", "pause music", "stop the music"],
+        "media_play_pause",
+        "Done.",
+    ),
+    (
+        &["next track", "next song", "skip the song", "skip this song", "skip track"],
+        "media_next",
+        "Next track.",
+    ),
+    (
+        &["previous track", "previous song", "last song", "go back a song"],
+        "media_previous",
+        "Previous track.",
+    ),
+    (
+        &["brightness up", "turn up the brightness", "brighter", "increase the brightness"],
+        "brightness_up",
+        "Brightness up.",
+    ),
+    (
+        &["brightness down", "turn down the brightness", "dimmer", "darker",
+          "decrease the brightness", "dim the screen"],
+        "brightness_down",
+        "Brightness down.",
+    ),
+];
+
+/// Match a whole-phrase system command. Returns the longest match so
+/// "turn up the volume" wins over the bare "volume up" substring inside it.
+///
+/// Returns None when the utterance opens with an explicit action prefix:
+/// "google how to mute a tab" contains "mute", but muting the machine is
+/// plainly not what was asked for.
+fn match_system_intent(text: &str) -> Option<serde_json::Value> {
+    let lower = text.to_lowercase();
+    let t = strip_address(&lower)
+        .trim()
+        .trim_end_matches(|c: char| c.is_ascii_punctuation())
+        .trim();
+
+    const OVERRIDING_PREFIXES: &[&str] = &[
+        "google ", "search for ", "look up ", "open ", "launch ", "start ", "run ",
+        "play ", "put on ", "search youtube for ",
+    ];
+    if OVERRIDING_PREFIXES.iter().any(|p| t.starts_with(p)) {
+        return None;
+    }
+
+    let padded = format!(" {} ", t);
+    let mut best: Option<(usize, &str, &str)> = None;
+
+    for (phrases, op, spoken) in SYSTEM_INTENTS {
+        for p in *phrases {
+            let is_match = t == *p || padded.contains(&format!(" {} ", p));
+            if is_match && best.map(|(len, _, _)| p.len() > len).unwrap_or(true) {
+                best = Some((p.len(), op, spoken));
+            }
+        }
+    }
+
+    best.map(|(_, op, spoken)| {
+        serde_json::json!([
+            {"type": "say", "text": spoken},
+            {"type": "system", "op": op},
+        ])
+    })
+}
+
 /// Returns a plan (say + action) when the utterance is a clear command.
 /// None means "not a command" — the utterance goes to the LLM as normal.
 fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Value> {
@@ -236,6 +330,10 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
         .trim()
         .trim_end_matches(|c: char| c.is_ascii_punctuation())
         .trim();
+
+    if let Some(plan) = match_system_intent(text) {
+        return Some(plan);
+    }
 
     let say_then_open = |spoken: String, target: String| {
         Some(serde_json::json!([
