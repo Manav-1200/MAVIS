@@ -2,6 +2,7 @@
 
 use crate::memory::episodic::EpisodicStore;
 use crate::memory::permanent::PermanentStore;
+use crate::memory::entities::EntityStore;
 use crate::memory::long_term::LongTermMemory;
 use crate::memory::recall::RecallStore;
 use crate::memory::working::WorkingMemory;
@@ -19,6 +20,8 @@ pub struct MemoryManager {
     pub recall: Arc<Mutex<RecallStore>>,
     /// Daily summaries, consolidated from recall before decay removes it.
     pub long_term: Arc<Mutex<LongTermMemory>>,
+    /// Projects, apps and files the user works with, and what co-occurs.
+    pub entities: Arc<Mutex<EntityStore>>,
     working_file: std::path::PathBuf,
 }
 
@@ -29,6 +32,7 @@ impl MemoryManager {
         let episodic_db = data_dir.join("episodic.db");
         let recall_db = data_dir.join("recall.db");
         let long_term_db = data_dir.join("long_term.db");
+        let entities_db = data_dir.join("entities.db");
         let working_file = data_dir.join("working_memory.json");
 
         let working = if working_file.exists() {
@@ -69,6 +73,7 @@ impl MemoryManager {
             episodic: Arc::new(Mutex::new(EpisodicStore::new(&episodic_db)?)),
             recall: Arc::new(Mutex::new(recall_store)),
             long_term: Arc::new(Mutex::new(LongTermMemory::new(&long_term_db)?)),
+            entities: Arc::new(Mutex::new(EntityStore::new(&entities_db)?)),
             working_file,
         })
     }
