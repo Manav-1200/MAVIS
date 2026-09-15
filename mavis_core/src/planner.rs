@@ -1,5 +1,6 @@
 use crate::context_snapshot::{AppEntry, WindowInfo};
 use crate::event_bus::EventBus;
+use crate::memory::entities::{EntityKind, EntityStore};
 use crate::memory::long_term::LongTermMemory;
 use crate::memory::recall::{build_fts_query, RecallStore};
 use crate::memory::working::WorkingMemory;
@@ -472,6 +473,7 @@ pub struct Planner {
     apps: Vec<AppEntry>,
     recall: Arc<Mutex<RecallStore>>,
     long_term: Arc<Mutex<LongTermMemory>>,
+    entities: Arc<Mutex<EntityStore>>,
 }
 
 impl Planner {
@@ -483,9 +485,10 @@ impl Planner {
         apps: Vec<AppEntry>,
         recall: Arc<Mutex<RecallStore>>,
         long_term: Arc<Mutex<LongTermMemory>>,
+        entities: Arc<Mutex<EntityStore>>,
     ) -> Self {
         info!("Planner: {} installed applications available", apps.len());
-        Self { bus, working, apps, recall, long_term }
+        Self { bus, working, apps, recall, long_term, entities }
     }
 
     pub async fn run(&mut self) {
@@ -769,6 +772,52 @@ impl Planner {
                     "source": "project",
                     "content": content,
                 }));
+            }
+        }
+
+        // Entity graph — what the user habitually works on. Only surfaced
+        // for questions that actually ask, since it's background knowledge
+        // rather than current state.
+        {
+            let lower = current_intent.to_lowercase();
+            let asks_about_work = ["working on", "work on", "projects", "usually",
+                                   "what do i", "my projects", "been doing"]
+                .iter()
+                .any(|p| lower.contains(p));
+            if asks_about_work {
+                let store = self.entities.lock().await;
+                if let Ok(projects) = store.top(EntityKind::Project, 4) {
+                    if !projects.is_empty() {
+                        let names: Vec<String> =
+                            projects.iter().map(|p| p.name.clone()).collect();
+                        items.push(serde_json::json!({
+                            "source": "known_projects",
+                            "content": format!(
+                                "Projects the user works in, most frequent first: {}.",
+                                names.join(", ")
+                            ),
+                        }));
+                    }
+                }
+                // What tends to be open alongside the current project.
+                if let Some(project) = &snapshot.project {
+                    if let Ok(related) = store.related(&project.name, EntityKind::Project, 5) {
+                        if !related.is_empty() {
+                            let names: Vec<String> = related
+                                .iter()
+                                .map(|e| format!("{} ({})", e.name, e.kind))
+                                .collect();
+                            items.push(serde_json::json!({
+                                "source": "related_entities",
+                                "content": format!(
+                                    "Usually alongside {}: {}.",
+                                    project.name,
+                                    names.join(", ")
+                                ),
+                            }));
+                        }
+                    }
+                }
             }
         }
 

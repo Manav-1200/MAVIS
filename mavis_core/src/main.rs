@@ -58,6 +58,7 @@ async fn main() -> Result<()> {
     let recall_for_consolidation = memory.recall.clone();
     let long_term_for_consolidation = memory.long_term.clone();
     let long_term_for_planner = memory.long_term.clone();
+    let entities_for_planner = memory.entities.clone();
     info!("Memory: initialized (working events={})", memory.working.read().await.events.len());
 
     // Context Engine
@@ -93,6 +94,7 @@ async fn main() -> Result<()> {
         installed_apps,
         recall_for_planner,
         long_term_for_planner,
+        entities_for_planner,
     );
     let planner_handle = tokio::spawn(async move {
         planner.run().await;
