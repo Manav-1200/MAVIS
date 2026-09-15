@@ -2,6 +2,7 @@
 // Central nervous system. Owns Working Memory and routes all events.
 
 use crate::context_snapshot::{BrowserTab, ContextSnapshot};
+use crate::memory::entities::EntityKind;
 use crate::event_bus::EventBus;
 use crate::memory::manager::MemoryManager;
 use crate::models::event::{Event, EventType};
@@ -15,6 +16,10 @@ pub struct ContextEngine {
     memory: MemoryManager,
     bus: Arc<EventBus>,
     last_save: Mutex<Instant>,
+    /// Last observed app/project/file combination. Context updates arrive
+    /// every 2 s, so recording every one would count idle seconds rather
+    /// than actual work — entities are only recorded when this changes.
+    last_entity_signature: Mutex<Option<String>>,
 }
 
 impl ContextEngine {
@@ -23,6 +28,7 @@ impl ContextEngine {
             memory,
             bus,
             last_save: Mutex::new(Instant::now() - Duration::from_secs(10)),
+            last_entity_signature: Mutex::new(None),
         })
     }
 
@@ -82,19 +88,31 @@ impl ContextEngine {
                 if let Some(payload) = event.payload.as_object() {
                     match serde_json::from_value::<ContextSnapshot>(serde_json::Value::Object(payload.clone())) {
                         Ok(snapshot) => {
-                            let mut wm = self.memory.working.write().await;
-                            wm.active_window = snapshot.active_window;
-                            wm.open_windows = snapshot.open_windows;
-                            wm.active_workspace = snapshot.active_workspace;
-                            wm.project = snapshot.project;
-                            wm.next_event = snapshot.next_event;
-                            wm.last_clipboard = snapshot.clipboard_text;
-                            wm.context_timestamp = Some(snapshot.captured_at);
+                            let (log_app, log_clip) = {
+                                let mut wm = self.memory.working.write().await;
+                                wm.active_window = snapshot.active_window;
+                                wm.open_windows = snapshot.open_windows;
+                                wm.active_workspace = snapshot.active_workspace;
+                                wm.project = snapshot.project;
+                                wm.next_event = snapshot.next_event;
+                                wm.last_clipboard = snapshot.clipboard_text;
+                                wm.context_timestamp = Some(snapshot.captured_at);
+                                (
+                                    wm.active_window
+                                        .as_ref()
+                                        .map(|w| w.app_name.clone())
+                                        .unwrap_or_else(|| "none".to_string()),
+                                    wm.last_clipboard
+                                        .as_ref()
+                                        .map(|s| s[..s.len().min(20)].to_string())
+                                        .unwrap_or_else(|| "none".to_string()),
+                                )
+                            };
                             info!(
                                 "ContextEngine: context injected — app={}, clipboard={}",
-                                wm.active_window.as_ref().map(|w| w.app_name.as_str()).unwrap_or("none"),
-                                wm.last_clipboard.as_ref().map(|s| &s[..s.len().min(20)]).unwrap_or("none")
+                                log_app, log_clip
                             );
+                            self.observe_entities(&event.timestamp.to_rfc3339()).await;
                         }
                         Err(e) => {
                             warn!("ContextEngine: failed to parse ContextUpdate payload: {}", e);
@@ -218,6 +236,54 @@ impl ContextEngine {
         }
 
         Ok(())
+    }
+
+    /// Record the projects, apps and files currently in play, and link them
+    /// to each other. Only fires when the combination changes — otherwise a
+    /// 2 s poll would inflate every count by 30 a minute.
+    async fn observe_entities(&self, when: &str) {
+        let (app, project, file) = {
+            let wm = self.memory.working.read().await;
+            let app = wm.active_window.as_ref().map(|w| w.app_name.clone());
+            let project = wm.project.as_ref().map(|p| p.name.clone());
+            // Filenames only come from editors, where the title parsing is
+            // verified; anything else would be guesswork.
+            let file = wm.active_window.as_ref().and_then(|w| {
+                w.window_title
+                    .split_whitespace()
+                    .find(|t| t.contains('.') && !t.contains('/') && t.len() > 3)
+                    .map(|t| t.trim_matches(|c: char| c.is_ascii_punctuation()).to_string())
+            });
+            (app, project, file)
+        };
+
+        let signature = format!("{:?}|{:?}|{:?}", app, project, file);
+        {
+            let mut last = self.last_entity_signature.lock().await;
+            if last.as_deref() == Some(signature.as_str()) {
+                return;
+            }
+            *last = Some(signature);
+        }
+
+        let store = self.memory.entities.lock().await;
+        if let Some(a) = &app {
+            let _ = store.observe(a, EntityKind::App, when);
+        }
+        if let Some(p) = &project {
+            let _ = store.observe(p, EntityKind::Project, when);
+        }
+        if let Some(f) = &file {
+            let _ = store.observe(f, EntityKind::File, when);
+        }
+        // Co-occurrence is the useful part: which app, project and file are
+        // in play together.
+        if let (Some(p), Some(a)) = (&project, &app) {
+            let _ = store.link((p, EntityKind::Project), (a, EntityKind::App), when);
+        }
+        if let (Some(p), Some(f)) = (&project, &file) {
+            let _ = store.link((p, EntityKind::Project), (f, EntityKind::File), when);
+        }
     }
 
     async fn maybe_persist(&self, event: &Event) {
