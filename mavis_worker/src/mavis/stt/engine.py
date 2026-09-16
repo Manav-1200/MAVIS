@@ -160,7 +160,17 @@ class STTEngine:
             language="en",
             condition_on_previous_text=False,
             vad_filter=False,  # Rust VAD already segmented; don't double-filter
-            initial_prompt="MAVIS",  # bias decoder toward this rare proper noun
+            # Bias the decoder toward the vocabulary actually used when
+            # talking to a desktop assistant. Whisper leans on its language
+            # model when the signal is weak, and without this it substitutes
+            # common near-homophones — observed: "clayboard" for clipboard,
+            # "Ladies" and "Clayport" for MAVIS. Listing the real words makes
+            # them likelier than the invented ones.
+            initial_prompt=(
+                "MAVIS. clipboard, workspace, terminal, window, desktop "
+                "environment, application, browser, Firefox, Brave, GNOME, "
+                "niri, project, repository, volume, brightness."
+            ),
         )
 
         # Consume generator so we can inspect per-segment confidence
