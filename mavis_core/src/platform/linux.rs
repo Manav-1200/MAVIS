@@ -91,50 +91,87 @@ impl LinuxWindowTracker {
         Self { wayland, compositor }
     }
 
-    /// Probe each backend once. Prefers the compositor named by the
-    /// environment before falling back to actually running anything.
+    /// Probe each backend once, at startup.
+    ///
+    /// Environment variables are used only to decide what to *try first* —
+    /// never as proof. `NIRI_SOCKET` and friends leak into other sessions
+    /// (observed: a GNOME login inheriting `NIRI_SOCKET`, which made MAVIS
+    /// commit to niri and then fail every poll forever). Each candidate is
+    /// confirmed by actually running it.
     fn detect(wayland: bool) -> Compositor {
         if wayland {
-            // niri and Hyprland both advertise themselves; sway sets
-            // SWAYSOCK. Checking these avoids spawning anything at all.
+            // Order the attempts by what the environment hints at, then
+            // verify. A hint that turns out wrong just costs one failed
+            // spawn at startup rather than one every 2 seconds thereafter.
+            let mut candidates: Vec<Compositor> = Vec::new();
             if std::env::var("NIRI_SOCKET").is_ok() {
-                return Compositor::Niri;
+                candidates.push(Compositor::Niri);
             }
             if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
-                return Compositor::Hyprland;
+                candidates.push(Compositor::Hyprland);
             }
             if std::env::var("SWAYSOCK").is_ok() {
-                return Compositor::Sway;
+                candidates.push(Compositor::Sway);
             }
-            // Env vars absent — probe once rather than every poll.
-            if Self::run_cmd(&["niri", "msg", "--json", "windows"]).is_some() {
-                return Compositor::Niri;
+            for c in [Compositor::Niri, Compositor::Hyprland, Compositor::Sway] {
+                if !candidates.contains(&c) {
+                    candidates.push(c);
+                }
             }
-            if Self::run_cmd(&["swaymsg", "-t", "get_tree"]).is_some() {
-                return Compositor::Sway;
-            }
-            if Self::run_cmd(&["hyprctl", "activewindow", "-j"]).is_some() {
-                return Compositor::Hyprland;
+
+            for candidate in candidates {
+                let works = match candidate {
+                    Compositor::Niri => {
+                        Self::run_cmd(&["niri", "msg", "--json", "windows"])
+                            .filter(|o| o.starts_with('[') || o.starts_with('{'))
+                            .is_some()
+                    }
+                    Compositor::Hyprland => {
+                        Self::run_cmd(&["hyprctl", "activewindow", "-j"])
+                            .filter(|o| o.starts_with('{'))
+                            .is_some()
+                    }
+                    Compositor::Sway => Self::run_cmd(&["swaymsg", "-t", "get_tree"])
+                        .filter(|o| o.starts_with('{'))
+                        .is_some(),
+                    _ => false,
+                };
+                if works {
+                    return candidate;
+                }
             }
         }
+
         if std::env::var("DISPLAY").is_ok()
-            && Self::run_cmd(&["xdotool", "getactivewindow"]).is_some()
+            && Self::run_cmd(&["xdotool", "getactivewindow"])
+                .filter(|o| !o.is_empty())
+                .is_some()
         {
             return Compositor::X11;
         }
+
         // GNOME Wayland and other unsupported compositors land here. Window
         // tracking is simply unavailable rather than retried forever.
         warn!("No supported window tracker found; window context disabled");
         Compositor::None
     }
 
+    /// Run a command and return its stdout, or None if it failed.
+    ///
+    /// Checks the exit status: previously a command that existed but errored
+    /// (niri outside a niri session, say) returned `Some("")`, which reads
+    /// as success to every caller.
     fn run_cmd(args: &[&str]) -> Option<String> {
-        Command::new(args[0])
-            .args(&args[1..])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
+        let output = Command::new(args[0]).args(&args[1..]).output().ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        let s = String::from_utf8(output.stdout).ok()?.trim().to_string();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s)
+        }
     }
 
     fn parse_niri_windows(json: &str) -> Option<(String, String, u32)> {
