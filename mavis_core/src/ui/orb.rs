@@ -64,6 +64,26 @@ impl Orb {
                 }
             };
 
+            // MAVIS_ORB_POS=x,y places the orb at startup — e.g. "1750,60"
+            // for the top-right corner. Dragging depends on the windowing
+            // backend honouring set_position (X11/XWayland do; native
+            // Wayland forbids a client positioning itself), so this gives a
+            // way to park it out of the way regardless.
+            if let Ok(pos) = std::env::var("MAVIS_ORB_POS") {
+                match pos.split_once(',') {
+                    Some((x, y)) => {
+                        match (x.trim().parse::<isize>(), y.trim().parse::<isize>()) {
+                            (Ok(x), Ok(y)) => {
+                                window.set_position(x, y);
+                                log::info!("Orb: positioned at {},{}", x, y);
+                            }
+                            _ => log::warn!("Orb: MAVIS_ORB_POS must be two integers, e.g. 1750,60"),
+                        }
+                    }
+                    None => log::warn!("Orb: MAVIS_ORB_POS must be 'x,y', e.g. 1750,60"),
+                }
+            }
+
             window.limit_update_rate(Some(Duration::from_millis(16))); // ~60 FPS
 
             let mut buffer: Vec<u32> = vec![0; BUFFER_LEN];
