@@ -66,13 +66,66 @@ impl PlatformProvider for LinuxProvider {
 // Window Tracker
 // ---------------------------------------------------------------------------
 
+/// Which window-query tool actually works here. Resolved once at startup:
+/// previously every poll spawned `niri`, then `swaymsg`, then `hyprctl`,
+/// then up to three `xdotool` processes, most of which fail on any given
+/// desktop. On GNOME that was a dozen doomed process spawns every 2 seconds.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Compositor {
+    Niri,
+    Sway,
+    Hyprland,
+    X11,
+    None,
+}
+
 struct LinuxWindowTracker {
     wayland: bool,
+    compositor: Compositor,
 }
 
 impl LinuxWindowTracker {
     fn new(wayland: bool) -> Self {
-        Self { wayland }
+        let compositor = Self::detect(wayland);
+        info!("LinuxWindowTracker: using {:?}", compositor);
+        Self { wayland, compositor }
+    }
+
+    /// Probe each backend once. Prefers the compositor named by the
+    /// environment before falling back to actually running anything.
+    fn detect(wayland: bool) -> Compositor {
+        if wayland {
+            // niri and Hyprland both advertise themselves; sway sets
+            // SWAYSOCK. Checking these avoids spawning anything at all.
+            if std::env::var("NIRI_SOCKET").is_ok() {
+                return Compositor::Niri;
+            }
+            if std::env::var("HYPRLAND_INSTANCE_SIGNATURE").is_ok() {
+                return Compositor::Hyprland;
+            }
+            if std::env::var("SWAYSOCK").is_ok() {
+                return Compositor::Sway;
+            }
+            // Env vars absent — probe once rather than every poll.
+            if Self::run_cmd(&["niri", "msg", "--json", "windows"]).is_some() {
+                return Compositor::Niri;
+            }
+            if Self::run_cmd(&["swaymsg", "-t", "get_tree"]).is_some() {
+                return Compositor::Sway;
+            }
+            if Self::run_cmd(&["hyprctl", "activewindow", "-j"]).is_some() {
+                return Compositor::Hyprland;
+            }
+        }
+        if std::env::var("DISPLAY").is_ok()
+            && Self::run_cmd(&["xdotool", "getactivewindow"]).is_some()
+        {
+            return Compositor::X11;
+        }
+        // GNOME Wayland and other unsupported compositors land here. Window
+        // tracking is simply unavailable rather than retried forever.
+        warn!("No supported window tracker found; window context disabled");
+        Compositor::None
     }
 
     fn run_cmd(args: &[&str]) -> Option<String> {
@@ -165,33 +218,21 @@ impl LinuxWindowTracker {
 
 impl WindowTracker for LinuxWindowTracker {
     fn active_window(&self) -> Result<(String, String, u32), PlatformError> {
-        if self.wayland {
-            if let Some(json) = Self::run_cmd(&["niri", "msg", "--json", "windows"]) {
-                if let Some(r) = Self::parse_niri_windows(&json) {
-                    return Ok(r);
-                }
-            }
-            if let Some(json) = Self::run_cmd(&["swaymsg", "-t", "get_tree"]) {
-                if let Some(r) = Self::parse_sway_tree(&json) {
-                    return Ok(r);
-                }
-            }
-            if let Some(json) = Self::run_cmd(&["hyprctl", "activewindow", "-j"]) {
-                if let Some(r) = Self::parse_hypr_active(&json) {
-                    return Ok(r);
-                }
-            }
+        match self.compositor {
+            Compositor::Niri => Self::run_cmd(&["niri", "msg", "--json", "windows"])
+                .and_then(|j| Self::parse_niri_windows(&j)),
+            Compositor::Sway => Self::run_cmd(&["swaymsg", "-t", "get_tree"])
+                .and_then(|j| Self::parse_sway_tree(&j)),
+            Compositor::Hyprland => Self::run_cmd(&["hyprctl", "activewindow", "-j"])
+                .and_then(|j| Self::parse_hypr_active(&j)),
+            Compositor::X11 => Self::xdotool_active(),
+            Compositor::None => None,
         }
-
-        if let Some(r) = Self::xdotool_active() {
-            return Ok(r);
-        }
-
-        Err(PlatformError("No window tracker available for this compositor".into()))
+        .ok_or_else(|| PlatformError("No window tracker available".into()))
     }
 
     fn open_windows(&self) -> Result<Vec<WindowInfo>, PlatformError> {
-        if self.wayland {
+        if self.compositor == Compositor::Niri {
             if let Some(json) = Self::run_cmd(&["niri", "msg", "--json", "windows"]) {
                 if let Some(list) = Self::parse_niri_all_windows(&json) {
                     if !list.is_empty() {
@@ -199,6 +240,9 @@ impl WindowTracker for LinuxWindowTracker {
                     }
                 }
             }
+        }
+        if self.compositor == Compositor::None {
+            return Ok(Vec::new());
         }
         // Other compositors don't have an equivalent full-list parser yet;
         // fall back to the focused window so callers still get something
@@ -220,9 +264,24 @@ impl WindowTracker for LinuxWindowTracker {
     /// directory. Browser subprocesses report junk paths under /proc/*,
     /// which the filter below discards.
     fn current_project(&self, pid: u32) -> Option<ProjectInfo> {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        // Even with a single /proc pass this is the most expensive thing in
+        // the poll. The answer changes when the user switches window, not
+        // every 2 s, so cache per-pid and refresh at most every 30 s.
+        static CACHE: Mutex<Option<(u32, Instant, Option<ProjectInfo>)>> = Mutex::new(None);
+        if let Ok(cache) = CACHE.lock() {
+            if let Some((cached_pid, at, result)) = cache.as_ref() {
+                if *cached_pid == pid && at.elapsed() < Duration::from_secs(30) {
+                    return result.clone();
+                }
+            }
+        }
+
         let home = std::env::var("HOME").unwrap_or_default();
+        let tree = build_process_tree();
         let mut candidates = vec![pid];
-        candidates.extend(collect_descendants(pid, 0));
+        candidates.extend(descendants_from_tree(&tree, pid));
 
         for p in candidates {
             let cwd = match std::fs::read_link(format!("/proc/{}/cwd", p)) {
@@ -238,12 +297,21 @@ impl WindowTracker for LinuxWindowTracker {
                     .file_name()
                     .map(|n| n.to_string_lossy().to_string())
                     .unwrap_or_else(|| root.to_string_lossy().to_string());
-                return Some(ProjectInfo {
+                let found = Some(ProjectInfo {
                     name,
                     path: root.to_string_lossy().to_string(),
                     git_branch: read_git_branch(&root),
                 });
+                if let Ok(mut cache) = CACHE.lock() {
+                    *cache = Some((pid, Instant::now(), found.clone()));
+                }
+                return found;
             }
+        }
+        // Cache the negative too — otherwise a browser window (which never
+        // has a project) would redo the whole walk on every poll.
+        if let Ok(mut cache) = CACHE.lock() {
+            *cache = Some((pid, Instant::now(), None));
         }
         None
     }
@@ -373,49 +441,73 @@ fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
 // Project detection helpers (Linux /proc)
 // ---------------------------------------------------------------------------
 
-/// Direct children of `pid`, read from /proc/*/stat. The stat format puts
-/// the (possibly space-containing) comm field in parens, so we split on the
-/// LAST ") " to get at the fields after it; ppid is the 2nd field there.
-fn collect_children(pid: u32) -> Vec<u32> {
-    let mut out = Vec::new();
+/// Snapshot of every process's parent, built from one pass over /proc.
+///
+/// This replaces a recursive `collect_children` that rescanned all of /proc
+/// for each descendant: at depth 3 with a few hundred processes that meant
+/// well over a hundred full directory walks and tens of thousands of file
+/// reads — every 2 seconds. It was survivable on a light compositor and
+/// took down a GNOME session, which runs far more processes.
+///
+/// One scan, O(processes). The map is then walked in memory.
+fn build_process_tree() -> std::collections::HashMap<u32, Vec<u32>> {
+    let mut tree: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
     let entries = match std::fs::read_dir("/proc") {
         Ok(e) => e,
-        Err(_) => return out,
+        Err(_) => return tree,
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        let child_pid: u32 = match name.parse() {
+        let pid: u32 = match name.parse() {
             Ok(p) => p,
             Err(_) => continue,
         };
-        let stat = match std::fs::read_to_string(format!("/proc/{}/stat", child_pid)) {
+        let stat = match std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
             Ok(s) => s,
             Err(_) => continue,
         };
-        if let Some(after) = stat.rsplit_once(") ") {
-            let mut fields = after.1.split_whitespace();
+        // The comm field can contain spaces and is parenthesised, so split
+        // on the LAST ") " to reach the fields after it; ppid is the 2nd.
+        if let Some((_, after)) = stat.rsplit_once(") ") {
+            let mut fields = after.split_whitespace();
             let _state = fields.next();
             if let Some(ppid) = fields.next().and_then(|p| p.parse::<u32>().ok()) {
-                if ppid == pid {
-                    out.push(child_pid);
-                }
+                tree.entry(ppid).or_default().push(pid);
             }
         }
     }
-    out
+    tree
 }
 
-/// Descendants up to 3 levels deep — enough to reach a shell inside a
-/// terminal or IDE without scanning unbounded process trees every poll.
-fn collect_descendants(pid: u32, depth: u8) -> Vec<u32> {
-    if depth >= 3 {
-        return Vec::new();
-    }
+/// Descendants of `pid` from a prebuilt tree, breadth-first, bounded in both
+/// depth and total count so a pathological process tree can't stall the poll.
+fn descendants_from_tree(
+    tree: &std::collections::HashMap<u32, Vec<u32>>,
+    pid: u32,
+) -> Vec<u32> {
+    const MAX_DEPTH: u8 = 3;
+    const MAX_NODES: usize = 64;
+
     let mut out = Vec::new();
-    for child in collect_children(pid) {
-        out.push(child);
-        out.extend(collect_descendants(child, depth + 1));
+    let mut frontier = vec![pid];
+    for _ in 0..MAX_DEPTH {
+        let mut next = Vec::new();
+        for p in frontier {
+            if let Some(children) = tree.get(&p) {
+                for &c in children {
+                    if out.len() >= MAX_NODES {
+                        return out;
+                    }
+                    out.push(c);
+                    next.push(c);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
     }
     out
 }

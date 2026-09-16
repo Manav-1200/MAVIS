@@ -23,10 +23,40 @@ pub fn default_calendar_path() -> Option<std::path::PathBuf> {
 }
 
 /// Read the calendar file and return the soonest event that hasn't started yet.
+///
+/// Re-parses only when the file's modification time changes. The context
+/// poll runs every 2 s and a calendar changes maybe once a day, so parsing
+/// it 43,000 times a day was pure waste. `minutes_until` is recomputed on
+/// every call so the cached event doesn't go stale.
 pub fn next_event() -> Option<CalendarEvent> {
+    use std::sync::Mutex;
+    use std::time::SystemTime;
+    static CACHE: Mutex<Option<(SystemTime, Option<CalendarEvent>)>> = Mutex::new(None);
+
     let path = default_calendar_path()?;
-    let raw = std::fs::read_to_string(path).ok()?;
-    next_event_from_ics(&raw, Local::now())
+    let mtime = std::fs::metadata(&path).and_then(|m| m.modified()).ok()?;
+
+    let mut cache = CACHE.lock().ok()?;
+    let cached_event = match cache.as_ref() {
+        Some((cached_mtime, event)) if *cached_mtime == mtime => event.clone(),
+        _ => {
+            let raw = std::fs::read_to_string(&path).ok()?;
+            let parsed = next_event_from_ics(&raw, Local::now());
+            *cache = Some((mtime, parsed.clone()));
+            parsed
+        }
+    };
+
+    // Recompute the countdown against now, and drop the event once it has
+    // started — otherwise a cached "in 5 minutes" would persist all day.
+    let mut event = cached_event?;
+    let start = chrono::DateTime::parse_from_rfc3339(&event.start).ok()?;
+    let minutes = (start.with_timezone(&Local) - Local::now()).num_minutes();
+    if minutes < 0 {
+        return None;
+    }
+    event.minutes_until = minutes;
+    Some(event)
 }
 
 /// Pure parsing, split out so it can be reasoned about (and tested) without
