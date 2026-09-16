@@ -26,6 +26,24 @@ impl Orb {
         let (shutdown_tx, shutdown_rx) = channel::<()>();
         let (energy_tx, energy_rx) = channel::<f32>();
 
+        // MAVIS_ORB=off runs headless. Useful on compositors where the orb
+        // can't be placed sensibly — MAVIS still listens, thinks and speaks,
+        // it just has no visible indicator.
+        if matches!(std::env::var("MAVIS_ORB").as_deref(), Ok("off") | Ok("0")) {
+            log::info!("Orb: disabled via MAVIS_ORB=off");
+            // Drain the channels so senders never block on a full queue.
+            thread::spawn(move || {
+                loop {
+                    let _ = state_rx.recv_timeout(Duration::from_secs(1));
+                    while energy_rx.try_recv().is_ok() {}
+                    if shutdown_rx.try_recv().is_ok() {
+                        break;
+                    }
+                }
+            });
+            return Self { state_tx, shutdown_tx, energy_tx };
+        }
+
         thread::spawn(move || {
             let mut window = match Window::new(
                 "MAVIS",
@@ -76,9 +94,20 @@ impl Orb {
                     break;
                 }
 
-                // Drag-to-move
+                // Drag-to-move.
+                //
+                // MouseMode::Pass, not Clamp: Clamp restricts the reported
+                // cursor to the window's own 80×80 bounds, so the moment the
+                // pointer left the orb the reading saturated and the window
+                // stopped tracking it — the "only moves a few pixels" bug.
+                //
+                // Note this only works where the backend honours
+                // set_position (X11/XWayland). On native Wayland the
+                // protocol forbids a client positioning its own window, so
+                // placement is the compositor's job — use its own move
+                // binding (typically Mod+drag) or a window rule instead.
                 let mouse_down = window.get_mouse_down(MouseButton::Left);
-                let mouse_pos = window.get_mouse_pos(MouseMode::Clamp).unwrap_or((0.0, 0.0));
+                let mouse_pos = window.get_mouse_pos(MouseMode::Pass).unwrap_or((0.0, 0.0));
 
                 if mouse_down && !was_mouse_down {
                     is_dragging = true;
@@ -90,11 +119,13 @@ impl Orb {
 
                 if is_dragging {
                     let win_pos = window.get_position();
-                    let cursor_screen_x = win_pos.0 as f32 + mouse_pos.0;
-                    let cursor_screen_y = win_pos.1 as f32 + mouse_pos.1;
-                    let new_x = (cursor_screen_x - drag_anchor.0) as isize;
-                    let new_y = (cursor_screen_y - drag_anchor.1) as isize;
-                    if (new_x, new_y) != win_pos {
+                    // Move by how far the pointer has travelled since the
+                    // grab, relative to where it grabbed.
+                    let dx = mouse_pos.0 - drag_anchor.0;
+                    let dy = mouse_pos.1 - drag_anchor.1;
+                    if dx.abs() >= 1.0 || dy.abs() >= 1.0 {
+                        let new_x = win_pos.0 + dx as isize;
+                        let new_y = win_pos.1 + dy as isize;
                         window.set_position(new_x, new_y);
                     }
                 }
