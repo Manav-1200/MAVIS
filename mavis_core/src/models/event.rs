@@ -28,6 +28,9 @@ pub enum EventType {
     /// Signal to kill current TTS playback and drain the queue.
     /// Emitted by the intent router when the user speaks during TTS.
     TtsInterrupt,
+    /// A plan that has passed the permission gate. The executor listens
+    /// for this rather than PlanReady, so nothing runs unreviewed.
+    PlanApproved,
     /// Browser tab/URL update from the extension's native messaging host.
     /// Deliberately separate from ContextUpdate: that one does a full
     /// replace of active_window/clipboard, and reusing it here would wipe
