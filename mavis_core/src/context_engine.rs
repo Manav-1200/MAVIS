@@ -37,7 +37,22 @@ impl ContextEngine {
 
         {
             let mut wm = self.memory.working.write().await;
-            wm.push_event(event.clone());
+            // Only conversational events go in the ring. ContextUpdate fires
+            // every 2 s and UiStateChange on every transition, so storing
+            // them filled all 50 slots with polling noise inside two minutes
+            // and evicted the actual conversation — which is the only thing
+            // the planner reads back. The context itself isn't lost: it
+            // lives in dedicated fields (active_window, clipboard, project).
+            if matches!(
+                event.event_type,
+                EventType::UserIntent
+                    | EventType::WorkerResponse
+                    | EventType::PlanReady
+                    | EventType::ActionComplete
+                    | EventType::SystemWake
+            ) {
+                wm.push_event(event.clone());
+            }
         }
 
         let event_type = event.event_type.clone();
@@ -180,6 +195,12 @@ impl ContextEngine {
 
             EventType::TtsInterrupt => {
                 info!("ContextEngine: TTS interrupt observed");
+            }
+
+            EventType::PlanApproved => {
+                // The gate's verdict, not a new decision — working memory
+                // already recorded the plan when it was proposed.
+                info!("ContextEngine: plan approved for execution");
             }
 
             EventType::BrowserUpdate => {
