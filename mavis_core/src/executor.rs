@@ -1,6 +1,8 @@
 // mavis_core/src/executor.rs
 // Executes plans: shell commands, app launching, notifications, TTS.
-// Listens for PlanReady + TtsInterrupt, emits ActionComplete + UiStateChange.
+// Listens for PlanApproved + TtsInterrupt, emits ActionComplete + UiStateChange.
+// Only approved plans arrive here — the permission gate stands between this
+// and the planner, so nothing runs without being scored and recorded.
 //
 // CHANGELOG 2026-08-25 (Phase 5):
 //   - TTS queue: non-blocking say() with sequential playback
@@ -55,7 +57,7 @@ impl Executor {
 
     async fn handle_event(&self, event: Event) -> Result<()> {
         match event.event_type {
-            EventType::PlanReady => self.execute_plan(event).await,
+            EventType::PlanApproved => self.execute_plan(event).await,
             EventType::TtsInterrupt => {
                 info!("Executor: TTS interrupt received — draining queue");
                 self.tts_queue.interrupt().await;
@@ -72,7 +74,7 @@ impl Executor {
         let actions = Self::extract_actions(&plan_value);
 
         if actions.is_empty() {
-            warn!("Executor: PlanReady contained no executable actions");
+            warn!("Executor: approved plan contained no executable actions");
             self.emit_ui_state("idle").await;
             return Ok(());
         }
