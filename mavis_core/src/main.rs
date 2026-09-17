@@ -22,6 +22,7 @@ mod executor;
 mod memory;
 mod models;
 mod planner;
+mod safety;
 mod platform;
 mod stt;
 mod system;
@@ -59,6 +60,11 @@ async fn main() -> Result<()> {
     let long_term_for_consolidation = memory.long_term.clone();
     let long_term_for_planner = memory.long_term.clone();
     let entities_for_planner = memory.entities.clone();
+
+    // Audit log — every proposed action is recorded before it runs.
+    let audit = Arc::new(tokio::sync::Mutex::new(
+        safety::audit::AuditLog::new(&data_dir.join("audit.db"))?,
+    ));
     info!("Memory: initialized (working events={})", memory.working.read().await.events.len());
 
     // Context Engine
@@ -98,6 +104,15 @@ async fn main() -> Result<()> {
     );
     let planner_handle = tokio::spawn(async move {
         planner.run().await;
+    });
+
+    // Permission gate — sits between planner and executor. The executor
+    // only ever sees plans that have passed through here.
+    let bus_clone = Arc::clone(&bus);
+    let audit_for_gate = audit.clone();
+    let mut gate = safety::PermissionGate::new(bus_clone, audit_for_gate);
+    let gate_handle = tokio::spawn(async move {
+        gate.run().await;
     });
 
     // Executor
@@ -649,6 +664,7 @@ async fn main() -> Result<()> {
         tokio::time::timeout(timeout, ctx_handle),
         tokio::time::timeout(timeout, planner_handle),
         tokio::time::timeout(timeout, exec_handle),
+        tokio::time::timeout(timeout, gate_handle),
         tokio::time::timeout(timeout, dbus_handle),
         tokio::time::timeout(timeout, hotkeys_handle),
         tokio::time::timeout(timeout, browser_handle),
