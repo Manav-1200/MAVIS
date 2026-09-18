@@ -276,3 +276,4 @@ fn is_affirmative(said: &str) -> bool {
             || normalised.ends_with(&format!(" {}", a))
     })
 }
+
