@@ -108,6 +108,13 @@ struct EnergyVad {
     max_energy_seen: f32,
     pub last_max_energy: f32,
     sample_rate: usize,
+    /// MAVIS_VAD_DEBUG=1 reports what the microphone is actually producing.
+    /// Off by default (it logs every ~3 s), but the one diagnostic that
+    /// distinguishes "MAVIS is broken" from "the mic is muted" — which
+    /// cost a whole debugging session when it wasn't available.
+    debug_energy: bool,
+    debug_frames: u64,
+    debug_window_max: f32,
 }
 
 impl EnergyVad {
@@ -135,6 +142,12 @@ impl EnergyVad {
             max_energy_seen: 0.0,
             last_max_energy: 0.0,
             sample_rate: cfg.sample_rate as usize,
+            debug_energy: matches!(
+                std::env::var("MAVIS_VAD_DEBUG").as_deref(),
+                Ok("1") | Ok("true")
+            ),
+            debug_frames: 0,
+            debug_window_max: 0.0,
         }
     }
 
@@ -162,6 +175,23 @@ impl EnergyVad {
             let energy =
                 (chunk.iter().map(|s| s * s).sum::<f32>() / chunk.len() as f32).sqrt();
             self.max_energy_seen = self.max_energy_seen.max(energy);
+
+            if self.debug_energy {
+                self.debug_frames += 1;
+                self.debug_window_max = self.debug_window_max.max(energy);
+                if self.debug_frames % 100 == 0 {
+                    info!(
+                        "VAD-DEBUG: peak={:.4} current={:.4} start_threshold={:.4} \
+                         noise_floor={:.4} speaking={}",
+                        self.debug_window_max,
+                        energy,
+                        self.start_threshold(),
+                        self.noise_floor,
+                        self.is_speaking
+                    );
+                    self.debug_window_max = 0.0;
+                }
+            }
 
             self.buffer.extend(chunk);
 
