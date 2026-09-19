@@ -1,7 +1,6 @@
 // mavis_core/src/memory/manager.rs
 
 use crate::memory::episodic::EpisodicStore;
-use crate::memory::permanent::PermanentStore;
 use crate::memory::entities::EntityStore;
 use crate::memory::long_term::LongTermMemory;
 use crate::memory::recall::RecallStore;
@@ -14,7 +13,6 @@ use tokio::sync::{Mutex, RwLock};
 #[derive(Clone)]
 pub struct MemoryManager {
     pub working: Arc<RwLock<WorkingMemory>>,
-    pub permanent: Arc<Mutex<PermanentStore>>,
     pub episodic: Arc<Mutex<EpisodicStore>>,
     /// Searchable memory — what the user said, and what MAVIS replied.
     pub recall: Arc<Mutex<RecallStore>>,
@@ -28,7 +26,6 @@ pub struct MemoryManager {
 impl MemoryManager {
     pub fn new(data_dir: &Path) -> anyhow::Result<Self> {
         std::fs::create_dir_all(data_dir)?;
-        let permanent_db = data_dir.join("permanent.db");
         let episodic_db = data_dir.join("episodic.db");
         let recall_db = data_dir.join("recall.db");
         let long_term_db = data_dir.join("long_term.db");
@@ -69,7 +66,6 @@ impl MemoryManager {
 
         Ok(Self {
             working: Arc::new(RwLock::new(working)),
-            permanent: Arc::new(Mutex::new(PermanentStore::new(&permanent_db)?)),
             episodic: Arc::new(Mutex::new(EpisodicStore::new(&episodic_db)?)),
             recall: Arc::new(Mutex::new(recall_store)),
             long_term: Arc::new(Mutex::new(LongTermMemory::new(&long_term_db)?)),

@@ -383,12 +383,18 @@ impl SttManager {
         Self { config }
     }
 
+    /// Start listening.
+    ///
+    /// Returns Err rather than panicking when audio is unavailable: a
+    /// missing or busy microphone should cost MAVIS its ears, not its life.
+    /// Previously any of these failures aborted the whole process, taking
+    /// memory, context and the orb down with them.
     pub fn start(
         self,
         bus: Arc<EventBus>,
         speech_start_tx: Option<mpsc::Sender<()>>,
         tts_active: Arc<AtomicBool>,
-    ) -> (SttHandle, mpsc::Receiver<Vec<f32>>, mpsc::Receiver<f32>) {
+    ) -> anyhow::Result<(SttHandle, mpsc::Receiver<Vec<f32>>, mpsc::Receiver<f32>)> {
         let running = Arc::new(AtomicBool::new(true));
         let running_stream = running.clone();
         let tts_active_stream = tts_active.clone();
@@ -401,11 +407,11 @@ impl SttManager {
         let host = cpal::default_host();
 
         let device = select_input_device(&host)
-            .expect("No input device available");
+            .ok_or_else(|| anyhow::anyhow!("no audio input device available"))?;
 
         let mut supported_configs = device
             .supported_input_configs()
-            .expect("Error querying input configs");
+            .map_err(|e| anyhow::anyhow!("could not query input configs: {}", e))?;
 
         let stream_config: SupportedStreamConfig = supported_configs
             .find(|c| {
@@ -424,7 +430,7 @@ impl SttManager {
                 let mut configs = device.supported_input_configs().ok()?;
                 configs.next().map(|c| c.with_max_sample_rate())
             })
-            .expect("No supported input config");
+            .ok_or_else(|| anyhow::anyhow!("no supported input configuration"))?;
 
         info!("STT stream config: {:?}", stream_config);
 
@@ -488,8 +494,13 @@ impl SttManager {
                             // -----------------------------------------------------------------
                             if is_tts_active {
                                 was_tts_active = true;
-                                let mut vad_guard = vad.lock().unwrap();
-                                vad_guard.reset();
+                                // A poisoned lock must not kill the audio
+                                // thread — recover the guard and carry on.
+                                if let Ok(mut g) = vad.lock() {
+                                    g.reset();
+                                } else if let Err(p) = vad.lock() {
+                                    p.into_inner().reset();
+                                }
                                 return;
                             }
 
@@ -497,11 +508,12 @@ impl SttManager {
                             // TTS just ended — reset VAD and enter cooldown so room echo decays
                             // -----------------------------------------------------------------
                             if was_tts_active {
-                                let mut vad_guard = vad.lock().unwrap();
-                                vad_guard.reset();
+                                match vad.lock() {
+                                    Ok(mut g) => g.reset(),
+                                    Err(p) => p.into_inner().reset(),
+                                }
                                 was_tts_active = false;
                                 post_tts_cooldown = Some(Instant::now());
-                                drop(vad_guard);
                             }
 
                             if let Some(start) = post_tts_cooldown {
@@ -517,7 +529,10 @@ impl SttManager {
                                 let _ = energy_tx.try_send(frame_energy);
                             }
 
-                            let mut vad_guard = vad.lock().unwrap();
+                            let mut vad_guard = match vad.lock() {
+                                Ok(g) => g,
+                                Err(p) => p.into_inner(),
+                            };
                             let was_speaking = vad_guard.is_speaking;
                             let result = vad_guard.process(&resampled);
                             let max_energy = vad_guard.last_max_energy;
@@ -581,16 +596,20 @@ impl SttManager {
                         err_fn,
                         None,
                     )
-                    .expect("Failed to build input stream")
+                    .map_err(|e| anyhow::anyhow!("could not build input stream: {}", e))?
             }
-            _ => panic!("Unsupported sample format: {:?}", sample_format),
+            other => {
+                return Err(anyhow::anyhow!("unsupported sample format: {:?}", other));
+            }
         };
 
-        stream.play().expect("Failed to start audio stream");
+        stream
+            .play()
+            .map_err(|e| anyhow::anyhow!("could not start audio stream: {}", e))?;
         info!("STT listening active. Speak for 1-2 seconds, then pause.");
 
         let handle = SttHandle { running, tts_active, _stream: stream };
-        (handle, rx, energy_rx)
+        Ok((handle, rx, energy_rx))
     }
 }
 

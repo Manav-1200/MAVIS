@@ -89,25 +89,4 @@ impl EpisodicStore {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
     }
 
-    pub fn search(&self, query: &str, n: usize) -> Result<Vec<Episode>> {
-        let pattern = format!("%{}%", query);
-        let mut stmt = self.conn.prepare(
-            "SELECT id, event_id, event_type, source, payload, timestamp, summary
-             FROM episodes
-             WHERE summary LIKE ?1 OR payload LIKE ?1 OR event_type LIKE ?1
-             ORDER BY timestamp DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![pattern, n as i64], |row| {
-            Ok(Episode {
-                id: row.get(0)?,
-                event_id: row.get(1)?,
-                event_type: row.get(2)?,
-                source: row.get(3)?,
-                payload: row.get(4)?,
-                timestamp: row.get(5)?,
-                summary: row.get(6)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
-    }
 }

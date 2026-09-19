@@ -167,8 +167,29 @@ async fn main() -> Result<()> {
     // STT Pipeline
     let bus_for_stt_start = Arc::clone(&bus);
     let (speech_start_tx, mut speech_start_rx) = mpsc::channel::<()>(8);
-    let (stt_handle, mut utterance_rx, mut energy_rx) = stt::SttManager::new(stt::SttConfig::default())
-        .start(bus_for_stt_start, Some(speech_start_tx), tts_active.clone());
+    // Voice input is optional. If the microphone is missing or busy, MAVIS
+    // runs without ears rather than refusing to start — memory, context and
+    // the orb are all still useful, and the failure is stated plainly
+    // instead of appearing as a silent non-response.
+    let (stt_handle, mut utterance_rx, mut energy_rx) =
+        match stt::SttManager::new(stt::SttConfig::default()).start(
+            bus_for_stt_start,
+            Some(speech_start_tx),
+            tts_active.clone(),
+        ) {
+            Ok(parts) => {
+                let (h, u, e) = parts;
+                (Some(h), u, e)
+            }
+            Err(e) => {
+                warn!("Voice input unavailable: {}. MAVIS will run without listening.", e);
+                // Dead channels: the downstream tasks below simply never
+                // receive anything, rather than needing to be conditional.
+                let (_utx, urx) = mpsc::channel::<Vec<f32>>(1);
+                let (_etx, erx) = mpsc::channel::<f32>(1);
+                (None, urx, erx)
+            }
+        };
     let bus_for_stt = Arc::clone(&bus);
 
     // Voice activity LED — pipe real-time VAD energy into the orb
@@ -656,8 +677,10 @@ async fn main() -> Result<()> {
     bus.close();
     info!("EventBus closed — signaling all subsystems to shut down");
 
-    stt_handle.stop();
-    drop(stt_handle);
+    if let Some(h) = stt_handle {
+        h.stop();
+        drop(h);
+    }
 
     let timeout = std::time::Duration::from_secs(5);
     let _ = tokio::join!(
