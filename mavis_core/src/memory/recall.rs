@@ -81,6 +81,14 @@ impl RecallStore {
     /// Find memories relevant to what the user just said. Returns empty when
     /// nothing genuinely matches — recall should stay quiet rather than pad
     /// the prompt with loosely-related noise.
+    ///
+    /// Only the user's own words are recalled. MAVIS's replies are still
+    /// stored (replay and consolidation need them), but feeding them back as
+    /// context created a loop: a vague guess was recorded, later recalled,
+    /// then treated as established fact, producing more of the same.
+    /// Observed 2026-09-16 — 10 of 17 recalled entries were MAVIS quoting
+    /// its own speculation, one carrying a mistranscription forward as
+    /// though it were real.
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<Memory>> {
         let fts = match build_fts_query(query) {
             Some(q) => q,
@@ -90,7 +98,7 @@ impl RecallStore {
         let mut stmt = self.conn.prepare(
             "SELECT text, role, timestamp, importance
              FROM memory_fts
-             WHERE memory_fts MATCH ?1
+             WHERE memory_fts MATCH ?1 AND role = 'user'
              ORDER BY rank
              LIMIT ?2",
         )?;
