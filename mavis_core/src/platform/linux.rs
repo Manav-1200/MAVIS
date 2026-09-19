@@ -80,7 +80,6 @@ enum Compositor {
 }
 
 struct LinuxWindowTracker {
-    wayland: bool,
     compositor: Compositor,
 }
 
@@ -88,7 +87,7 @@ impl LinuxWindowTracker {
     fn new(wayland: bool) -> Self {
         let compositor = Self::detect(wayland);
         info!("LinuxWindowTracker: using {:?}", compositor);
-        Self { wayland, compositor }
+        Self { compositor }
     }
 
     /// Probe each backend once, at startup.
@@ -355,7 +354,7 @@ impl WindowTracker for LinuxWindowTracker {
 
     fn subscribe_changes(&self) -> Result<mpsc::Receiver<WindowEvent>, PlatformError> {
         let (tx, rx) = mpsc::channel(32);
-        let tracker = LinuxWindowTracker::new(self.wayland);
+        let tracker = LinuxWindowTracker { compositor: self.compositor };
         let mut last = String::new();
 
         tokio::spawn(async move {
@@ -637,28 +636,59 @@ fn parse_desktop_file(content: &str) -> Option<AppEntry> {
 }
 
 fn scan_linux_apps() -> Vec<AppEntry> {
-    let mut dirs: Vec<std::path::PathBuf> = vec![
-        std::path::PathBuf::from("/usr/share/applications"),
-        std::path::PathBuf::from("/usr/local/share/applications"),
-        std::path::PathBuf::from("/var/lib/flatpak/exports/share/applications"),
-    ];
-    if let Ok(home) = std::env::var("HOME") {
-        dirs.push(std::path::PathBuf::from(&home).join(".local/share/applications"));
-        dirs.push(
-            std::path::PathBuf::from(&home)
-                .join(".local/share/flatpak/exports/share/applications"),
-        );
+    // Read the spec-defined locations *in addition to* the usual defaults,
+    // not instead of them. XDG_DATA_DIRS varies between desktop sessions and
+    // is sometimes narrower than reality, so relying on it alone can find
+    // fewer applications than a plain hardcoded list would.
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+
+    if let Ok(data_dirs) = std::env::var("XDG_DATA_DIRS") {
+        for d in data_dirs.split(':').filter(|d| !d.is_empty()) {
+            dirs.push(std::path::PathBuf::from(d).join("applications"));
+        }
+    }
+    if let Ok(data_home) = std::env::var("XDG_DATA_HOME") {
+        dirs.push(std::path::PathBuf::from(data_home).join("applications"));
     }
 
+    for fallback in [
+        "/usr/share/applications",
+        "/usr/local/share/applications",
+        "/var/lib/flatpak/exports/share/applications",
+        "/snap/bin",
+    ] {
+        dirs.push(std::path::PathBuf::from(fallback));
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let home = std::path::PathBuf::from(&home);
+        dirs.push(home.join(".local/share/applications"));
+        dirs.push(home.join(".local/share/flatpak/exports/share/applications"));
+        dirs.push(home.join(".nix-profile/share/applications"));
+    }
+
+    dirs.sort();
+    dirs.dedup();
+
     let mut apps = Vec::new();
-    for dir in dirs {
-        let entries = match std::fs::read_dir(&dir) {
+    // Dedupe by .desktop filename: the same app often appears in several
+    // directories, and a user override should shadow the system copy.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for dir in &dirs {
+        let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(_) => continue,
         };
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("desktop") {
+                continue;
+            }
+            let stem = match path.file_stem().and_then(|s| s.to_str()) {
+                Some(s) => s.to_string(),
+                None => continue,
+            };
+            if !seen.insert(stem) {
                 continue;
             }
             if let Ok(content) = std::fs::read_to_string(&path) {
@@ -668,6 +698,10 @@ fn scan_linux_apps() -> Vec<AppEntry> {
             }
         }
     }
-    info!("LinuxProvider: discovered {} installed applications", apps.len());
+    info!(
+        "LinuxProvider: discovered {} applications across {} directories",
+        apps.len(),
+        dirs.len()
+    );
     apps
 }
