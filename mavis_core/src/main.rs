@@ -150,6 +150,21 @@ async fn main() -> Result<()> {
         }
     });
 
+    // System Sentinel (Phase 8.5) — notices what changed on the machine.
+    // Opt-in via MAVIS_SENTINEL=1; run() returns immediately when off.
+    let bus_for_sentinel = Arc::clone(&bus);
+    let sentinel_dir = data_dir.to_path_buf();
+    let sentinel_handle = supervise("Sentinel", Arc::clone(&bus), move || {
+        let bus = Arc::clone(&bus_for_sentinel);
+        let dir = sentinel_dir.clone();
+        async move {
+            match sentinel::Sentinel::new(bus, &dir) {
+                Ok(mut s) => s.run().await,
+                Err(e) => error!("Sentinel: could not start: {}", e),
+            }
+        }
+    });
+
     // DBus Integration
     let bus_clone = Arc::clone(&bus);
     let mut dbus = system::dbus::DbusIntegration::new(bus_clone);
@@ -743,6 +758,7 @@ async fn main() -> Result<()> {
         tokio::time::timeout(timeout, router_handle),
         tokio::time::timeout(timeout, energy_handle),
         tokio::time::timeout(timeout, ctx_poll_handle),
+        tokio::time::timeout(timeout, sentinel_handle),
     );
 
     info!("MAVIS shutdown complete.");
