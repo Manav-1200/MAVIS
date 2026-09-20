@@ -496,10 +496,20 @@ impl SttManager {
                                 was_tts_active = true;
                                 // A poisoned lock must not kill the audio
                                 // thread — recover the guard and carry on.
-                                if let Ok(mut g) = vad.lock() {
-                                    g.reset();
-                                } else if let Err(p) = vad.lock() {
-                                    p.into_inner().reset();
+                                //
+                                // This MUST be a `match`, not
+                                // `if let Ok(..) {} else if let Err(..) {}`.
+                                // On edition 2021 the scrutinee temporary of
+                                // an `if let` lives until the end of the whole
+                                // if/else chain, so in the Err arm the first
+                                // `lock()`'s PoisonError — which owns the
+                                // guard — was still alive when the second
+                                // `lock()` ran. std::sync::Mutex is not
+                                // reentrant: that deadlocked the audio
+                                // callback thread outright.
+                                match vad.lock() {
+                                    Ok(mut g) => g.reset(),
+                                    Err(p) => p.into_inner().reset(),
                                 }
                                 return;
                             }
