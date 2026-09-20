@@ -533,6 +533,50 @@ fn is_probable_downgrade(old: &str, new: &str) -> bool {
     compare_versions(new, old) == Some(std::cmp::Ordering::Less)
 }
 
+/// Ask the package manager which packages the user actually requested,
+/// as opposed to those dragged in as dependencies.
+///
+/// Returns an empty set on any failure. `to_changes` treats an empty set
+/// as "intent unknown" and reports everything as requested, so a missing
+/// or broken package manager produces silence rather than a flood of
+/// false "you didn't ask for this" alerts.
+pub fn explicitly_installed(manager: PackageManager) -> HashSet<String> {
+    let (bin, args): (&str, &[&str]) = match manager {
+        PackageManager::Pacman => ("pacman", &["-Qeq"]),
+        PackageManager::Dpkg => ("apt-mark", &["showmanual"]),
+        // --cacheonly so this can never block on the network; a sentinel
+        // scan must not stall because a mirror is slow.
+        PackageManager::Rpm => (
+            "dnf",
+            &["repoquery", "--userinstalled", "--cacheonly", "--qf", "%{name}"],
+        ),
+        PackageManager::Unknown => return HashSet::new(),
+    };
+
+    let output = match std::process::Command::new(bin).args(args).output() {
+        Ok(o) if o.status.success() => o,
+        Ok(_) => {
+            log::warn!(
+                "Sentinel: `{}` failed; treating package intent as unknown",
+                bin
+            );
+            return HashSet::new();
+        }
+        Err(e) => {
+            log::warn!("Sentinel: could not run `{}` ({}); intent unknown", bin, e);
+            return HashSet::new();
+        }
+    };
+
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        // dpkg output can carry an architecture suffix.
+        .map(|l| l.split(':').next().unwrap_or(l).to_string())
+        .collect()
+}
+
 // ---------------------------------------------------------------------
 // Turning log entries into changes
 // ---------------------------------------------------------------------
