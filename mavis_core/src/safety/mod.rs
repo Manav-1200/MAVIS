@@ -80,13 +80,19 @@ impl PermissionGate {
             .unwrap_or("unknown")
             .to_string();
 
+        // The audit log is the record of what actually happened, so these
+        // strings have to say what actually happened. This previously read
+        // "blocked_pending_confirmation" alongside a comment claiming the
+        // confirmation flow wasn't built — but it is built, just below, and
+        // a held action can go on to run. An append-only log that misreports
+        // its own outcomes is worse than no log.
+        //
+        // "held_for_confirmation" is followed by a second entry from
+        // `record()` — "confirmed", "declined" or "expired" — which is what
+        // closes the story for that action.
         let outcome = match &assessment.verdict {
             Verdict::Allow => "allowed",
-            // Confirmation flow isn't built yet, so anything needing it is
-            // refused rather than run unreviewed. Deliberately the safe
-            // default: shell actions aren't reachable from voice today, so
-            // in practice nothing legitimate is blocked by this.
-            Verdict::Confirm => "blocked_pending_confirmation",
+            Verdict::Confirm => "held_for_confirmation",
             Verdict::Deny(_) => "denied",
         };
 
@@ -231,7 +237,11 @@ fn summarise(plan: &serde_json::Value) -> String {
                 .or_else(|| a.get("text"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            format!("{}:{}", kind, &what[..what.len().min(120)])
+            // truncate_bytes, not `&what[..120]`: `what` can be spoken text
+            // (a `say` action), and slicing mid-character panicked inside
+            // the permission gate — which is the one subsystem that must
+            // never stop running.
+            format!("{}:{}", kind, crate::util::truncate_bytes(what, 120))
         })
         .collect::<Vec<_>>()
         .join(" | ")
@@ -277,3 +287,101 @@ fn is_affirmative(said: &str) -> bool {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // summarise — regression tests for the UTF-8 panic
+    // ---------------------------------------------------------------
+
+    /// `&what[..120]` panicked whenever byte 120 landed inside a
+    /// multi-byte character. A panic here took out the permission gate,
+    /// after which nothing reached the executor at all.
+    #[test]
+    fn summarise_survives_long_non_ascii_text() {
+        let long = "日本語".repeat(200);
+        let plan = serde_json::json!([{ "type": "say", "text": long }]);
+        let out = summarise(&plan);
+        assert!(out.starts_with("say:"));
+    }
+
+    #[test]
+    fn summarise_survives_every_length_of_multibyte_text() {
+        for n in 1..80 {
+            let text = "é".repeat(n) + &"x".repeat(n);
+            let plan = serde_json::json!([{ "type": "say", "text": text }]);
+            let _ = summarise(&plan);
+        }
+    }
+
+    #[test]
+    fn summarise_handles_plans_and_bare_actions() {
+        let bare = serde_json::json!({ "type": "system", "op": "volume_up" });
+        assert_eq!(summarise(&bare), "system:volume_up");
+
+        let multi = serde_json::json!([
+            { "type": "say", "text": "Volume up." },
+            { "type": "system", "op": "volume_up" },
+        ]);
+        assert_eq!(summarise(&multi), "say:Volume up. | system:volume_up");
+    }
+
+    #[test]
+    fn summarise_handles_missing_fields() {
+        let plan = serde_json::json!([{ "nothing": "useful" }]);
+        assert_eq!(summarise(&plan), "?:");
+    }
+
+    // ---------------------------------------------------------------
+    // is_affirmative
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn clear_agreement_is_affirmative() {
+        for said in [
+            "yes", "yeah", "yep", "sure", "go ahead", "do it",
+            "yes please", "yes, administrator", "confirmed",
+        ] {
+            assert!(is_affirmative(said), "should be affirmative: {:?}", said);
+        }
+    }
+
+    #[test]
+    fn negation_always_wins() {
+        for said in [
+            "no", "no thanks", "nope, cancel", "yes no", "no, yes",
+            "actually no, cancel that", "don't", "dont do it", "stop",
+            "wait", "cancel", "never",
+        ] {
+            assert!(!is_affirmative(said), "should NOT be affirmative: {:?}", said);
+        }
+    }
+
+    #[test]
+    fn ambiguous_answers_are_not_consent() {
+        for said in ["maybe", "i think so", "what", "", "hmm", "probably"] {
+            assert!(!is_affirmative(said), "should NOT be affirmative: {:?}", said);
+        }
+    }
+
+    #[test]
+    fn is_affirmative_survives_non_ascii() {
+        for said in ["日本語", "é", "yes — administrator", "\u{2019}yes\u{2019}"] {
+            let _ = is_affirmative(said);
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Gate wiring
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn low_risk_plans_are_allowed_without_asking() {
+        let plan = serde_json::json!([
+            { "type": "say", "text": "Volume up." },
+            { "type": "system", "op": "volume_up" },
+        ]);
+        assert_eq!(risk::assess_plan(&plan).verdict, risk::Verdict::Allow);
+    }
+}

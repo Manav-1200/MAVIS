@@ -117,9 +117,14 @@ impl ContextEngine {
                                         .as_ref()
                                         .map(|w| w.app_name.clone())
                                         .unwrap_or_else(|| "none".to_string()),
+                                    // truncate_bytes, not `s[..20]`: the
+                                    // clipboard holds arbitrary user text,
+                                    // and slicing mid-character panicked —
+                                    // which killed the context engine
+                                    // silently for the rest of the run.
                                     wm.last_clipboard
                                         .as_ref()
-                                        .map(|s| s[..s.len().min(20)].to_string())
+                                        .map(|s| crate::util::truncate_bytes(s, 20).to_string())
                                         .unwrap_or_else(|| "none".to_string()),
                                 )
                             };
