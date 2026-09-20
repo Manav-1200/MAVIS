@@ -9,7 +9,7 @@
 //   - Shutdown save: working_memory.json written before bus.close()
 
 use anyhow::Result;
-use log::{info, warn};
+use log::{error, info, warn};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -23,17 +23,21 @@ mod memory;
 mod models;
 mod planner;
 mod safety;
+mod sentinel;
 mod platform;
 mod stt;
 mod system;
 mod ui;
 mod tts;
+mod util;
 
 use context_snapshot::{ContextSnapshot, WindowInfo};
 use event_bus::EventBus;
 use models::event::{Event, EventType};
 
 const WORKER_SOCKET: &str = "/tmp/mavis_worker.sock";
+
+use util::supervise;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -68,59 +72,82 @@ async fn main() -> Result<()> {
     info!("Memory: initialized (working events={})", memory.working.read().await.events.len());
 
     // Context Engine
-    let bus_pub = Arc::clone(&bus);
-    let bus_sub = Arc::clone(&bus);
-    let mut ctx_engine = context_engine::ContextEngine::new(bus_pub, memory)?;
-    let ctx_handle = tokio::spawn(async move {
-        let mut rx = bus_sub.subscribe();
-        info!("ContextEngine: listening for events");
-        loop {
-            match rx.recv().await {
-                Ok(event) => {
-                    if let Err(e) = ctx_engine.process_event(event).await {
-                        warn!("ContextEngine error: {}", e);
+    // Constructed once here so a bad data directory still fails at startup
+    // with a clear error, rather than silently inside the supervisor.
+    drop(context_engine::ContextEngine::new(Arc::clone(&bus), memory.clone())?);
+    let memory_for_ctx = memory;
+    let bus_for_ctx = Arc::clone(&bus);
+    let ctx_handle = supervise("ContextEngine", Arc::clone(&bus), move || {
+        let bus = Arc::clone(&bus_for_ctx);
+        let memory = memory_for_ctx.clone();
+        async move {
+            let mut ctx_engine = match context_engine::ContextEngine::new(
+                Arc::clone(&bus),
+                memory,
+            ) {
+                Ok(engine) => engine,
+                Err(e) => {
+                    error!("ContextEngine: could not start: {}", e);
+                    return;
+                }
+            };
+            let mut rx = bus.subscribe();
+            info!("ContextEngine: listening for events");
+            loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if let Err(e) = ctx_engine.process_event(event).await {
+                            warn!("ContextEngine error: {}", e);
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                        warn!("ContextEngine lagged by {} events", n);
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                    warn!("ContextEngine lagged by {} events", n);
-                }
             }
+            info!("ContextEngine: shutting down");
         }
-        info!("ContextEngine: shutting down");
     });
 
     // Planner
-    let bus_clone = Arc::clone(&bus);
+    let bus_for_planner = Arc::clone(&bus);
     let installed_apps = platform.installed_apps();
-    let mut planner =
-        planner::Planner::new(
-        bus_clone,
-        working_memory,
-        installed_apps,
-        recall_for_planner,
-        long_term_for_planner,
-        entities_for_planner,
-    );
-    let planner_handle = tokio::spawn(async move {
-        planner.run().await;
+    let planner_handle = supervise("Planner", Arc::clone(&bus), move || {
+        let mut planner = planner::Planner::new(
+            Arc::clone(&bus_for_planner),
+            working_memory.clone(),
+            installed_apps.clone(),
+            recall_for_planner.clone(),
+            long_term_for_planner.clone(),
+            entities_for_planner.clone(),
+        );
+        async move {
+            planner.run().await;
+        }
     });
 
     // Permission gate — sits between planner and executor. The executor
     // only ever sees plans that have passed through here.
-    let bus_clone = Arc::clone(&bus);
+    let bus_for_gate = Arc::clone(&bus);
     let audit_for_gate = audit.clone();
-    let mut gate = safety::PermissionGate::new(bus_clone, audit_for_gate);
-    let gate_handle = tokio::spawn(async move {
-        gate.run().await;
+    let gate_handle = supervise("PermissionGate", Arc::clone(&bus), move || {
+        let mut gate =
+            safety::PermissionGate::new(Arc::clone(&bus_for_gate), audit_for_gate.clone());
+        async move {
+            gate.run().await;
+        }
     });
 
     // Executor
-    let bus_clone = Arc::clone(&bus);
+    let bus_for_exec = Arc::clone(&bus);
     let tts_active_for_exec = tts_active.clone();
-    let mut executor = executor::Executor::new(bus_clone, tts_active_for_exec);
-    let exec_handle = tokio::spawn(async move {
-        executor.run().await;
+    let exec_handle = supervise("Executor", Arc::clone(&bus), move || {
+        let mut executor =
+            executor::Executor::new(Arc::clone(&bus_for_exec), tts_active_for_exec.clone());
+        async move {
+            executor.run().await;
+        }
     });
 
     // DBus Integration
@@ -441,12 +468,27 @@ async fn main() -> Result<()> {
     });
 
     // Platform context polling
-    let platform_ctx = Arc::clone(&platform);
-    let bus_ctx = Arc::clone(&bus);
-    let _ctx_poll_handle = tokio::spawn(async move {
+    //
+    // Supervised too: this calls into compositor-specific parsing (niri,
+    // sway, Hyprland, X11), which handles output formats that vary between
+    // versions and distributions. A parse panic here used to take context
+    // awareness out silently for the rest of the session.
+    let platform_for_poll = Arc::clone(&platform);
+    let bus_for_poll = Arc::clone(&bus);
+    let ctx_poll_handle = supervise("ContextPoller", Arc::clone(&bus), move || {
+        let platform_ctx = Arc::clone(&platform_for_poll);
+        let bus_ctx = Arc::clone(&bus_for_poll);
+        async move {
         let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(2));
         loop {
             ticker.tick().await;
+
+            // Stop polling once the bus is closed, so shutdown doesn't wait
+            // on a task that would otherwise tick forever.
+            if !bus_ctx.is_open() {
+                info!("ContextPoller: bus closed, shutting down");
+                break;
+            }
 
             let mut snapshot = ContextSnapshot {
                 active_window: None,
@@ -529,6 +571,7 @@ async fn main() -> Result<()> {
                     }
                 }
             }
+        }
         }
     });
 
@@ -699,6 +742,7 @@ async fn main() -> Result<()> {
         tokio::time::timeout(timeout, orb_handle),
         tokio::time::timeout(timeout, router_handle),
         tokio::time::timeout(timeout, energy_handle),
+        tokio::time::timeout(timeout, ctx_poll_handle),
     );
 
     info!("MAVIS shutdown complete.");

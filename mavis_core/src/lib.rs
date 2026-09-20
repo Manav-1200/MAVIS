@@ -1,6 +1,3 @@
-// mavis_core/src/lib.rs
-// Library root. Re-exports all modules for integration tests.
-
 pub mod context_engine;
 pub mod event_bus;
 pub mod executor;
@@ -13,3 +10,7 @@ pub mod bridge;
 pub mod tts;
 pub mod platform;
 pub mod context_snapshot;
+pub mod safety;
+pub mod sentinel;
+pub mod stt;
+pub mod util;
