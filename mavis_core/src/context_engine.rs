@@ -224,6 +224,29 @@ impl ContextEngine {
                     }
                 }
             }
+
+            // Phase 8.5 — the Sentinel saw the machine change under us.
+            //
+            // Deliberately not pushed into working memory: the sentinel's
+            // own store is the record, and a big update would otherwise
+            // evict the actual conversation from the ring, which is the
+            // exact failure the polling filter above exists to prevent.
+            EventType::SystemChange => {
+                let count = event
+                    .payload
+                    .get("count")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0);
+                let severity = event
+                    .payload
+                    .get("severity")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                info!(
+                    "ContextEngine: Sentinel reported {} system change(s), peak severity {}",
+                    count, severity
+                );
+            }
         }
 
         // Phase 5 — debounced save of working memory to disk
