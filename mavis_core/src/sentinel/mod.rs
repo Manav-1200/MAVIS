@@ -58,6 +58,32 @@ pub fn enabled() -> bool {
     )
 }
 
+/// Which log entries a scan should consider, given the last watermark.
+///
+/// Extracted so the boundary rule is testable at the point `scan` uses
+/// it, rather than only where it happens to be implemented.
+///
+/// At or after the watermark — NOT strictly after. A large update writes
+/// its log lines over several minutes, and the mtime check makes it easy
+/// for a scan to land in the middle of one. If that scan sets the
+/// watermark to 12:00:05 and the package manager then writes more lines
+/// stamped 12:00:05, a strictly-after filter drops them permanently:
+/// they are discarded before they are ever fingerprinted, so neither the
+/// store nor the announcement path ever sees them.
+///
+/// Re-examining the boundary second costs nothing, because the
+/// fingerprint does the deduplication — `SentinelStore::record` returns
+/// false for anything already stored, so nothing is announced twice.
+fn fresh_since(
+    entries: &[packages::LogEntry],
+    watermark: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<packages::LogEntry> {
+    match watermark {
+        Some(mark) => packages::entries_since(entries, mark),
+        None => entries.to_vec(),
+    }
+}
+
 pub struct Sentinel {
     bus: Arc<EventBus>,
     store: SentinelStore,
@@ -156,16 +182,7 @@ impl Sentinel {
             .max()
             .expect("entries is non-empty");
 
-        let fresh_entries = match self.store.watermark(source)? {
-            // Strictly after the watermark: the entry *at* the watermark
-            // has already been handled.
-            Some(mark) => entries
-                .iter()
-                .filter(|e| e.occurred_at > mark)
-                .cloned()
-                .collect::<Vec<_>>(),
-            None => entries,
-        };
+        let fresh_entries = fresh_since(&entries, self.store.watermark(source)?);
 
         let explicit = packages::explicitly_installed(self.manager);
         let changes = packages::to_changes(&fresh_entries, &explicit, source);
@@ -268,6 +285,83 @@ mod tests {
         let s = Sentinel::new(bus, &dir).expect("sentinel");
         // Detection depends on the host; both outcomes are valid.
         assert!(s.store.count().unwrap() == 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The boundary case the `>=` filter exists for.
+    ///
+    /// A long `-Syu` writes its log lines over minutes. A scan that lands
+    /// mid-transaction sets the watermark to that second; pacman then
+    /// writes more lines stamped with the SAME second. Under a
+    /// strictly-after filter those lines were dropped before they were
+    /// ever fingerprinted, so they were lost for good.
+    ///
+    /// This walks the scan pipeline directly (no file I/O) to prove that
+    /// the boundary second is re-examined, the already-recorded entry is
+    /// not announced twice, and the late arrival IS caught.
+    #[test]
+    fn entries_written_in_the_watermark_second_are_not_lost() {
+        use packages::{Action, LogEntry};
+        use std::collections::HashSet;
+
+        let dir = temp_dir("boundary");
+        let store = SentinelStore::new(&dir.join("sentinel.db")).unwrap();
+        let source = "pacman";
+        let explicit: HashSet<String> = HashSet::from(["firefox".to_string()]);
+
+        let boundary = chrono::DateTime::from_timestamp(1_700_000_100, 0).unwrap();
+        let earlier = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
+
+        let entry = |name: &str, at: chrono::DateTime<chrono::Utc>| LogEntry {
+            action: Action::Installed,
+            name: name.to_string(),
+            old_version: String::new(),
+            new_version: "1.0".to_string(),
+            occurred_at: at,
+        };
+
+        // --- Scan 1: lands mid-transaction, sees only part of it. ---
+        let seen = vec![entry("firefox", earlier), entry("hyprland", boundary)];
+        let newest = seen.iter().map(|e| e.occurred_at).max().unwrap();
+        let changes = packages::to_changes(&seen, &explicit, source);
+        let recorded = store.record_all(&changes).unwrap();
+        store.set_watermark(source, newest).unwrap();
+        assert_eq!(recorded.len(), 2, "first scan records what it saw");
+
+        // --- pacman writes one more line, stamped the SAME second. ---
+        let all = vec![
+            entry("firefox", earlier),
+            entry("hyprland", boundary),
+            entry("xdg-desktop-portal-hyprland", boundary),
+        ];
+
+        // --- Scan 2 ---
+        let mark = store.watermark(source).unwrap().unwrap();
+        assert_eq!(mark, boundary);
+        // Drives the same helper `scan` uses, so reverting it to a
+        // strictly-after filter fails this test.
+        let fresh = fresh_since(&all, Some(mark));
+        assert_eq!(
+            fresh.len(),
+            2,
+            "the boundary second must be re-examined, not skipped"
+        );
+
+        let changes = packages::to_changes(&fresh, &explicit, source);
+        let recorded = store.record_all(&changes).unwrap();
+
+        assert_eq!(
+            recorded.len(),
+            1,
+            "only the late arrival is new; the fingerprint suppresses the replay"
+        );
+        assert!(
+            recorded[0].detail.contains("xdg-desktop-portal-hyprland"),
+            "got: {}",
+            recorded[0].detail
+        );
+        assert_eq!(store.count().unwrap(), 3, "nothing duplicated in the store");
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 
