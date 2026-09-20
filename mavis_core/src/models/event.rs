@@ -36,6 +36,11 @@ pub enum EventType {
     /// replace of active_window/clipboard, and reusing it here would wipe
     /// those out on every tab switch since browser payloads don't carry them.
     BrowserUpdate,
+    /// Something changed on the machine itself — packages installed or
+    /// removed, and later privilege surfaces. Published by the Sentinel
+    /// (Phase 8.5). Carries the changes and their peak severity so a
+    /// listener can decide how loudly to surface them.
+    SystemChange,
 }
 
 #[cfg(test)]
