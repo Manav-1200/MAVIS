@@ -6,7 +6,9 @@
 >
 > **Repo:** `github.com/Manav-1200/MAVIS`
 >
-> **Stack:** Rust (tokio, minifb, serde, rusqlite, notify), Python 3.10+ (llama-cpp-python, faster-whisper, piper)
+> **Stack:** Rust 1.85+ (tokio, minifb, serde, rusqlite, notify, cpal), Python 3.10+ (llama-cpp-python, faster-whisper, piper, kokoro)
+>
+> **Why things are the way they are:** see [`DECISIONS.md`](DECISIONS.md) — every decision, the problem behind it, and the evidence for each fix.
 
 ---
 
@@ -20,9 +22,10 @@
 | 4 | Integration | Voice wake -> STT -> LLM -> TTS. Intent system. First automations. | Full voice companion | :white_check_mark: Complete |
 | 5 | Interaction Polish | TTS queue, interruption, session recovery, personality foundation. | Daily polish | :white_check_mark: Complete |
 | 6 | Context Awareness | Active window, open windows, workspace, clipboard, IDE, terminal, project, calendar. | Companion senses | :white_check_mark: Complete |
-| 6.5 | Action Execution | App launching, YouTube, web search; cross-platform app discovery. | Companion acts | :white_check_mark: Built |
+| 6.5 | Action Execution | App launching, YouTube, web search, system control; cross-platform app discovery. | Companion acts | :white_check_mark: Built |
 | 7 | Memory & Learning | Recall with decay, daily consolidation, episodic replay, entity graph. | Persistent memory | :white_check_mark: 7.1–7.2 complete |
-| 8 | Safety & Permissions | 5-tier permission model, risk scoring, audit log, dry-run, rollback. | Trust layer | Not started |
+| 8 | Safety & Permissions | Risk scoring, permission gate, confirmation flow, append-only audit log. | Trust layer | :white_check_mark: Core built |
+| 8.5 | System Sentinel | Notices what changed on the machine: packages pulled in, removed, downgraded. | Machine awareness | :construction: Steps 1–2a |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
 | 10 | Automation & Proactive Intelligence | Rule engine, predictive suggestions, workflow recording, wellness reminders, daily briefing. | Proactive assistant | Not started |
 | 11 | Vision & Advanced UX | OCR, screenshot understanding, UI element detection, secondary monitor dashboard, conversation history. | Sees the screen | Not started |
@@ -39,27 +42,33 @@
 +-------------+     |   (Rust)    |
        ^            +------+------+
        |                   |
+       |            +------v------+        +-------------+
+       |            |   Planner   |<------>|  AI Worker  |
+       |            |   (Rust)    |  UDS   |  (Python)   |
+       |            +------+------+        +-------------+
+       |                   | PlanReady
        |            +------v------+
-       |            |   Planner   |
-       |            |   (Rust)    |
+       |            | Permission  |---> audit.db
+       |            |    Gate     |
        |            +------+------+
-       |                   |
+       |                   | PlanApproved
        |            +------v------+
-       |            |   Executor  |
-       |            |   (Rust)    |
-       |            +------+------+
-       |                   |
-       |            +------v------+
-       +------------| AI Worker   |
-                    |  (Python)   |
+       +------------|   Executor  |
+                    |   (Rust)    |
                     +-------------+
+
+  Sentinel (Rust) --SystemChange--> Context Engine
 ```
+
+Everything above communicates over the in-process event bus (`tokio::sync::broadcast`). Only the Python worker is reached over a socket.
 
 **Runtime split:**
 - **`mavis_core` (Rust):** UI, event bus, context engine, memory, system integration. ~50 MB. Always on.
 - **`mavis_worker` (Python):** AI inference, model weights, voice. Spawned on demand. Killed when idle.
 
-**Protocol:** JSON over UDS (Unix domain socket). Not HTTP. Not gRPC.
+**Protocol:** subsystems talk over an in-process event bus. The Python worker is reached over a Unix domain socket carrying length-prefixed JSON. Not HTTP. Not gRPC.
+
+**Supervision:** every event-loop subsystem runs under `util::supervise`. A panic is logged and the subsystem rebuilt and restarted, instead of silently disappearing.
 
 ---
 
@@ -91,7 +100,7 @@
 - [x] `ui/orb.rs` — `Orb` struct, dedicated render thread
 - [x] `ui/states.rs` — `OrbState` enum: Idle, Listening, Thinking, Speaking, Working, Error, Asleep
 - [x] 80x80 px, borderless, transparent, always-on-top
-- [x] Draggable (click-and-drag to reposition)
+- [x] Draggable (click-and-drag to reposition) *— did not actually work until 2026-09-16: `MouseMode::Clamp` confined cursor readings to the orb's own 80×80 area. Fixed with `MouseMode::Pass`. `MAVIS_ORB_POS=x,y` sets the start position; native Wayland ignores it, and `wlr-layer-shell` is the real fix (not built).*
 - [x] Soft pulsing circle with smoothstep gradient, state-reactive colors
 - [x] **Decision:** `minifb` for Phase 1-2. Raw Wayland in Phase 6.
 
@@ -102,15 +111,15 @@
 - [x] `worker_bridge.rs` — UDS client stub
 - [x] `memory/manager.rs` — `MemoryManager` facade
 - [x] `memory/working.rs` — in-memory store
-- [x] `memory/permanent.rs`, `episodic.rs` — SQLite stubs
-- [x] `memory/long_term.rs`, `session.rs` — empty stubs
+- [x] `memory/permanent.rs`, `episodic.rs` — SQLite stubs *(`permanent.rs` removed 2026-09-19 — never read)*
+- [x] `memory/long_term.rs`, `session.rs` — empty stubs *(`long_term.rs` made real in Phase 7; `session.rs` removed 2026-09-19)*
 - [x] `system/dbus.rs`, `hotkeys.rs`, `watcher.rs` — empty stubs
 
 ### 1.6 — Python worker reorganization
 - [x] `core/config.py` — TOML loading, validation, dot-notation `get()`
 - [x] `core/logger.py` — logging setup
-- [x] `core/events.py` — in-process EventBus for Python side
-- [x] `bootstrap.py` — creates dirs, loads config, starts `MavisApp`
+- [x] `core/events.py` — in-process EventBus for Python side *(removed 2026-09-14 — nothing used it)*
+- [x] `bootstrap.py` — creates dirs, loads config, starts `MavisApp` *(removed 2026-09-14 along with `app.py`, `main.py` and `core/lifecycle.py`; the worker starts from `worker.py`)*
 - [x] `worker.py` — asyncio UDS server at `/tmp/mavis_worker.sock`, lazy AI imports, responds with `[STUB]`
 
 ### 1.7 — Phase 1 wrap-up
@@ -119,7 +128,7 @@
 - [x] `cargo test` passes for event bus and models
 - [x] `pip install -e ./mavis_worker` succeeds
 - [x] `python -m mavis.worker` starts UDS server
-- [x] Tag: `v0.1.0-foundation`
+- [ ] Tag: `v0.1.0-foundation` — *never created; `v0.3.0-ai-worker` is the only tag*
 
 ---
 
@@ -191,7 +200,7 @@
 - [x] Planner decomposes intent -> Executor runs actions
 - [x] `cargo test` passes (7 tests)
 - [x] Graceful shutdown under 1 second
-- [x] Tag: `v0.2.0-core-runtime`
+- [ ] Tag: `v0.2.0-core-runtime` — *never created*
 
 ---
 
@@ -408,6 +417,17 @@ A run of VAD problems, each found and fixed against measured data rather than gu
 
 **Still open:** cold start is 15–30 s while models load (mitigated by leaving the worker running between `mavis_core` restarts). Calendar's has-events path remains untested.
 
+### 6.3 — Cross-desktop hardening (2026-09-16 — 2026-09-19)
+
+Found by running on GNOME rather than niri. Details in [`DECISIONS.md` §5](DECISIONS.md#5-context-awareness--phase-6).
+
+- [x] **GNOME session crash** — project detection rescanned all of `/proc` once per descendant process: tens of thousands of file reads every 2 s. Now one pass builds a process tree, walked in memory, bounded to depth 3 and 64 nodes, cached per PID for 30 s. *Not yet re-verified on a real GNOME session.*
+- [x] **Compositor resolved once** — each poll used to try niri, sway, Hyprland and up to three `xdotool` calls. Now probed once at startup.
+- [x] **Environment variables are hints, not proof** — a `NIRI_SOCKET` leaked into a GNOME login made MAVIS commit to niri and fail every poll. Each candidate is now confirmed by actually running it.
+- [x] **Failed commands no longer look successful** — `run_cmd` checks exit status and rejects empty output.
+- [x] **XDG application directories** — app discovery now searches `XDG_DATA_DIRS` and `XDG_DATA_HOME` in addition to the defaults, which picks up Nix, Snap and several distributions' layouts.
+- [x] **Graceful audio failure** — a missing or busy microphone used to abort the whole process. MAVIS now runs without voice input and says so.
+
 ---
 
 ## Phase 6.5 — Action Execution
@@ -438,7 +458,9 @@ First implementation used a hardcoded alias list, which broke the moment the use
 
 Discovery lives behind `PlatformProvider::installed_apps()` with an empty default, so an unimplemented platform degrades to "no apps found" rather than failing. Matching is deliberately loose for speech — "code" finds Code - OSS, "notepad" finds DMS Notepad, "calculator" finds GNOME Calculator — and returns nothing rather than guessing at a binary that doesn't exist. Scanned once at startup; new installs need a restart.
 
-**Not yet reachable from voice:** the executor's `notify` and `system` actions (volume, brightness, media control via DBus) are implemented but have no intent patterns yet.
+**System control** (added 2026-09-15): "volume up", "mute", "next track", "dim the screen" and similar reach the existing DBus operations directly. Matched as whole phrases, and never when the utterance opens with an explicit action — so "google how to mute a tab" searches instead of muting the machine.
+
+**Not yet reachable from voice:** `notify`.
 
 ---
 
@@ -489,7 +511,13 @@ Two deliberate departures from the original plan, both made to avoid dependencie
 - [ ] Learn frequently used commands
 - [ ] Adapt suggestions over time
 
-### 7.4 — Not yet verified
+### 7.4 — Fixes after first use (2026-09-16 — 2026-09-19)
+
+- [x] **MAVIS stopped quoting itself back as memory.** 10 of 17 recalled entries were MAVIS's own earlier replies — one carrying a "clayboard" mistranscription forward as fact. A guess got recorded, recalled, and treated as established. Recall now returns only what the *user* said; MAVIS's replies are still stored for replay and consolidation.
+- [x] **Polling no longer evicts the conversation.** `ContextUpdate` every 2 s filled the 50-slot working-memory ring in about two minutes. Only conversational events enter it now; context lives in dedicated fields.
+- [x] **`PermanentStore` and `SessionStore` removed** — Phase 1 stubs that nothing ever read.
+
+### 7.5 — Not yet verified
 
 Everything above compiles and its logic is unit-verified, but none of it has run in a live session. Consolidation in particular cannot be confirmed until MAVIS has been left running across a day boundary. Recall and replay only become meaningful after several sessions of accumulated history.
 
@@ -497,40 +525,135 @@ Everything above compiles and its logic is unit-verified, but none of it has run
 
 ## Phase 8 — Safety & Permission System
 
+**Status:** :white_check_mark: Core built (2026-09-17 — 2026-09-18). Rollback and per-skill permissions not built. The rationale for each choice below is in [`DECISIONS.md` §8](DECISIONS.md#8-safety--permissions--phase-8).
+
 **Goal:** Local-first does not mean reckless. Every capability is gated.
+
+Nothing reaches the executor unreviewed. The planner publishes `PlanReady`; the permission gate scores it, records it, and republishes it as `PlanApproved` — the only event the executor acts on.
+
+```
+Planner --PlanReady--> PermissionGate --PlanApproved--> Executor
+                              |
+                              +--> audit.db (append-only)
+```
 
 ### 8.1 Permission Tiers
 
-| Tier | Description | Examples |
-|------|-------------|----------|
-| `Read` | Observe only | Window title, clipboard hash, file listing |
-| `Notify` | Alert user | "You have a meeting in 5 min" |
-| `Ask` | Propose action, wait for confirmation | "Shall I open your daily notes?" |
-| `Execute` | Run command / modify file | `git commit`, `mv`, `rm` |
-| `Administrator` | Destructive or system-wide | `pacman -Syu`, partition ops, network changes |
+**Built as risk bands rather than five named tiers.** A 0–10 score composes — one dangerous step makes the whole plan dangerous, and `assess_plan` takes the worst — while named tiers remain the right model for per-skill grants, which wait on Phase 9.
 
-- [ ] **Per-plugin / per-skill permissions** — Each skill declares its required tier; user grants per-skill
-- [ ] **Per-skill permissions** — Granular control: `git` may have `Execute` while `browser` only has `Read`
-- [ ] **Dry-run mode** — `Execute` tier commands are echoed to user before running; user must voice-confirm
-- [ ] **Audit log** — Append-only SQLite log: `(timestamp, skill, action, args, user_confirmed, risk_score)`
-- [ ] **Confirmation prompts** — Visual + voice confirmation for any action above `Notify` tier
+| Planned tier | As built |
+|---|---|
+| `Read`, `Notify` | risk 0–2: `say`, `notify`, `system` (volume/media/brightness), `app` — run silently |
+| `Ask`, `Execute` | risk 3–7: "Shall I? …" — waits up to 20 s for a clear yes |
+| `Administrator` | risk 8+: requires the word "administrator" |
+| — | irreversible patterns: refused at any score |
+
+- [ ] **Per-plugin / per-skill permissions** — blocked on Phase 9. *(The original list had this item twice.)*
+- [ ] **Dry-run mode** — partial. The gate asks before running, but speaks the *reason* ("modifies or deletes data"), not the command itself.
+- [x] **Audit log** — `audit.db`, append-only by construction: `AuditLog` exposes no update or delete method. Columns are `(timestamp, action_type, detail, risk_score, outcome, reason)` rather than the planned `(skill, args, user_confirmed)`, since skills don't exist yet.
+- [x] **Confirmation prompts** — voice. The planned visual (orb) confirmation is not built.
 
 ### 8.2 Safety Layer
 
-- [ ] **Command validation** — Static regex / deny-list for dangerous commands (`rm -rf /`, `mkfs`, `dd if=/dev/zero`)
-- [ ] **Risk scoring** — Static analysis + heuristic scoring: file deletion = high risk; file creation = low; network call = medium
-- [ ] **LLM validation** — Second-pass LLM call rates risk 1-10 for any `Execute` action; blocks if >= 8 without `Administrator` tier
-- [ ] **Rollback where possible** — File operations create `.mavis-backup/` snapshots before destructive actions; allow undo within 5 minutes
-- [ ] **Confirmation for destructive actions** — Any action with risk >= 5 requires explicit user confirmation; no silent execution
+- [x] **Command validation** — static deny-list in `safety/risk.rs`: `mkfs`, `dd if=/dev/zero`, writes to `/dev/sd*`, fork bomb, `shutdown`, `reboot`, `userdel`, `visudo` and more. Whitespace is collapsed first so spacing can't evade it.
+- [x] **Root deletion** — `is_root_delete` inspects what *follows* the slash, so `rm -rf /` is refused while `rm -rf /home/user/project` is merely confirmable. A plain substring match refused the second too; caught in testing before it was committed.
+- [x] **Pipe-to-shell** — `is_pipe_to_shell` checks for a download command *and* a shell pipe anywhere, because the URL sits between them. The literal `"curl | bash"` let `curl http://x.sh | bash` through at risk 4; caught in testing.
+- [x] **Risk scoring** — static: elevated + destructive 9, elevated 8, destructive 6, any other shell command 4, unrecognised action type 5. Network calls are not scored separately.
+- [ ] **LLM validation** — **replaced by static scoring, deliberately.** A missed judgement here runs a destructive command. An LLM pass may later *raise* a score as a second opinion; it must never lower one.
+- [ ] **Rollback** (`.mavis-backup/` snapshots, 5-minute undo) — not built.
+- [x] **Confirmation for destructive actions** — from risk 3.
 
 ### 8.3 Confirmation Flow
 
+As built. The plan contradicted itself (§8.2 said confirm from 5, this section said 3); the stricter was used. The answer window is 20 s rather than 5, which was too short to hear a question and answer it by voice.
+
 ```
-Executor proposes action -> Risk score computed
-    -> If score < 3: execute silently (respects "Never intrusive")
-    -> If score 3-7: TTS "Shall I <action>?" -> wait 5 s for "yes" / orb tap
-    -> If score >= 8: TTS "This requires administrator permission. Confirm?" -> require explicit "yes, administrator"
+PlanReady -> assess_plan() -> audit.db
+    -> deny pattern:   "I won't do that. It's not reversible."      (never runs)
+    -> score 0-2:      run silently
+    -> score 3-7:      "Shall I? <reason>."          -> clear yes within 20 s
+    -> score 8+:       "That needs administrator permission ..." -> "yes, administrator"
+    -> anything else:  "Cancelled."                   -> audit: declined / expired
 ```
+
+- **Negation always wins.** "No, yes", "actually no, cancel that", "don't" are refusals. Punctuation is normalised first, so "yes, administrator" works.
+- **The answer is ordinary speech.** The gate listens to `UserIntent` only while something is pending, so normal conversation is unaffected.
+- **Audit outcomes say what happened.** A held action is logged `held_for_confirmation`, then closed by `confirmed`, `declined` or `expired`. *(Fixed 2026-09-20 — it previously read `blocked_pending_confirmation`, which was untrue.)*
+
+**`shell` remains unreachable from voice.** The gate now scores shell commands, but the planner still never produces one.
+
+### 8.4 Known gaps
+
+- **`app` actions bypass shell scoring.** `ELEVATED_TOKENS` carry trailing spaces, so `"sudo".contains("sudo ")` is false, and `args` are never scored — `{"type":"app","target":"sh","args":["-c","…"]}` scores 2 and runs. Not reachable from voice today, since the planner only emits `app` for discovered `.desktop` entries.
+- **"ok" counts as consent** — "okay so what about…" reads as a yes for a risk 3–7 action.
+- **One pending action at a time** — a second held plan silently replaces the first, without an audit entry.
+
+---
+
+## Stability audit — 2026-09-20
+
+A full line-by-line audit, run against a clone of the repository. Every claimed bug was reproduced by compiling and running it. Details and evidence in [`DECISIONS.md` §9](DECISIONS.md#9-crash-safety--the-2026-09-20-audit).
+
+- [x] **Three UTF-8 panics** — `strip_address`, clipboard logging and audit summaries sliced strings by byte index, which panics inside a multi-byte character. Whisper emits them routinely. Replaced with `util::truncate_bytes` and `str::get`. **Most likely cause of the intermittent "MAVIS stops answering" reports** — reproduced by a test that fails on the old planner and passes on the new one.
+- [x] **Subsystem supervision** — a panic in a spawned task used to end that task silently while everything else kept running. The context engine, planner, permission gate, executor, context poller and Sentinel now run under `util::supervise`: logged loudly, rebuilt, restarted up to 5 times.
+- [x] **Event bus poison cascade** — one panic while holding the bus lock made every later `publish` panic. Now recovers.
+- [x] **Audio-thread deadlock** — a double `lock()` in the VAD, deadlocking under edition-2021 temporary lifetimes after any poisoning.
+- [x] **No new dependencies, no new language features** — nothing added to `Cargo.toml`.
+
+**Still open from the audit** — see [`DECISIONS.md` §14](DECISIONS.md#14-open-issues): the espeak fallback that can never run (also the one `cargo clippy` error), a 300 s first STT timeout with serial processing, I16-only microphones, `pw-play --device` (should be `--target`), the worker socket at `0666`, the worker's idle-unload race, and several pieces of dead code.
+
+---
+
+## Phase 8.5 — System Sentinel
+
+**Status:** :construction: Steps 1–2a built (2026-09-20 — 2026-09-21). Detects and records; does not yet speak. Rationale in [`DECISIONS.md` §10](DECISIONS.md#10-system-sentinel--phase-85).
+
+**Goal:** Phase 8 audits what MAVIS does. The Sentinel audits what happened *to the machine* — so a package you never asked for doesn't sit unnoticed for days.
+
+**Why it exists:** a `pacman -Syu` pulled in Hyprland as a dependency of a DMS shell update, on a machine that runs niri. It took days to notice. Hyprland wasn't the problem; the delay would have been, had it been something that wasn't benign.
+
+**Rules it holds to:**
+- **Severity is static.** Same reasoning as the permission gate: an LLM that misjudges severity either cries wolf until you stop listening, or stays quiet about the one change that mattered.
+- **Facts, never malware verdicts.** MAVIS reports what changed. Where a real scanner exists — Defender, ClamAV, XProtect — its findings are reported as *that tool's* findings. MAVIS never implies an all-clear it can't back up.
+- **Opt-in.** `MAVIS_SENTINEL=1`, like every context source.
+
+| Severity | What qualifies | How you hear about it |
+|---|---|---|
+| **Critical** | new setuid/setgid binary, sudoers change, new UID-0 user, new SSH key, integrity mismatch, real scanner detection *(step 3–5)* | desktop notification immediately, spoken next time, in history |
+| **Notable** | package installed that you didn't ask for; package removed; package downgraded | spoken the next time you talk to MAVIS *(step 2b)* |
+| **Routine** | version upgrades; packages you asked for | recorded only — answered if you ask |
+
+### 8.5.1 — Package change detection (step 1) :white_check_mark:
+
+Reads the package manager's own transaction log rather than diffing package lists. The log carries real timestamps ("your update on Thursday") and separates a new package from a version bump, which a name diff can't. World-readable; no root needed.
+
+| Manager | Log | Status |
+|---|---|---|
+| pacman | `/var/log/pacman.log` | :white_check_mark: validated against real lines, including the `+0545` offset and the pre-2019 timestamp format |
+| dpkg | `/var/log/dpkg.log` | :white_check_mark: validated against a real 675 KB log (1,172 transactions) and a live install |
+| dnf / rpm | `/var/log/dnf.rpm.log` | :warning: **untested on real hardware** — written from the documented format |
+
+- [x] A new package absent from the explicit set (`pacman -Qeq`, `apt-mark showmanual`, `dnf repoquery --userinstalled`) is a dependency you didn't ask for — **Notable**. If that query fails, everything is treated as requested, so a broken query is silent rather than a flood.
+- [x] Downgrades detected with a dpkg-style version comparison. A first version dropped separators and reported an ordinary `gcc-14-base` upgrade as a downgrade — on every Ubuntu machine. Fixed, and kept as a regression test: 0 false downgrades across 1,172 real entries.
+
+### 8.5.2 — Scan loop, store and summaries (step 2a) :white_check_mark:
+
+- [x] **`sentinel.db`** — a watermark per source plus the change history, keyed by fingerprint so re-reading a log can't announce anything twice. Append-only; only the `announced` flag is updated.
+- [x] **Watermark is a timestamp, not a byte offset** — survives log rotation. Filtered *at or after* the watermark: a scan landing mid-transaction previously lost later lines stamped with the same second.
+- [x] **First run is silent** — history is imported and marked already-announced. On the target machine that is ~2,079 transactions; announcing them would be worse than saying nothing.
+- [x] **One sentence per update** — changes are regrouped into the transaction that produced them (300 s window): *"Your system update on Friday pulled in 3 packages you didn't ask for: …"*. With ~90% of Arch packages being dependencies, a sentence per package would be unbearable.
+- [x] **Cheap** — one `stat()` per minute; the log is re-read only when it changes.
+- [x] **Critical changes go through the permission gate**, so they're audited and the Sentinel can't become a back door to the executor.
+- [x] **`SystemChange` event** — kept out of working memory so a large update can't evict the conversation.
+
+**Verified live (2026-09-20):** installed two packages that pulled in a third as a dependency. The Sentinel spoke only about the one that arrived uninvited, then stayed silent on the next scan.
+
+### 8.5.3 — Remaining steps
+
+- [ ] **2b — Speaking.** Planner leads with pending Notable changes on your next utterance; "what changed recently?" and "what did that update do?" answered from the store; `mark_announced` so you're told once.
+- [ ] **3 — Privilege surfaces.** New setuid/setgid binaries, newly enabled systemd services and timers, sudoers changes, new users and groups, new `authorized_keys` entries.
+- [ ] **4 — Integrity and advisories.** `pacman -Qkk` / `rpm -Va` / `debsums`; `arch-audit` and the Debian security tracker.
+- [ ] **5 — Windows and macOS.** Appx, winget, the uninstall registry, scheduled tasks and startup items — Windows is notorious for restoring removed apps on update — plus Defender's verdicts; Homebrew, launchd, `pkgutil` and XProtect on macOS.
 
 ---
 
@@ -682,16 +805,18 @@ Executor proposes action -> Risk score computed
 2. **Python AI worker only** — LLM inference, STT, embeddings, vision. Spawned by Rust, not assumed running.
 3. **Context Engine is central** — All subsystems publish events; Context Engine maintains canonical state.
 4. **Planner never executes** — Planner generates plans; Executor carries them out. Separation of strategy and action.
-5. **Event bus** — UDS + JSON. No HTTP, no gRPC, no cloud APIs in core loop.
+5. **Event bus** — in-process `tokio::sync::broadcast`; the Python worker over UDS + length-prefixed JSON. No HTTP, no gRPC, no cloud APIs in the core loop.
 6. **Local-first, privacy-first** — No telemetry. No cloud STT/TTS by default. All models local.
 7. **Voice is interface, not identity** — MAVIS does not "become" a voice. The orb is the identity.
-8. **Layered memory** — Permanent -> Long-Term -> Episodic -> Session -> Working. No single flat store.
+8. **Layered memory** — Working -> Recall -> Long-Term, with Episodic and Entities alongside. No single flat store. *(Permanent and Session were planned and removed 2026-09-19; see Phase 7.)*
 9. **AI-agnostic** — Prompts and context format must work with Phi-3, Llama, Mistral, etc.
 10. **"Always present. Never intrusive."** — Every feature must pass this test before shipping.
+11. **Deterministic where it matters** — the LLM never selects actions, scores risk, rates memory importance or decides severity. It may phrase things, and may *raise* a risk score. It may never lower one.
+12. **Fail loud, degrade gracefully** — a missing microphone costs MAVIS its ears, not its life; a panicking subsystem is restarted and logged.
 
 ### B. Definition of Done for Each Phase
 
-- [ ] All code passes `cargo check` / `cargo clippy` / `cargo test`
+- [ ] All code passes `cargo check` / `cargo clippy` / `cargo test` *(as of 2026-09-21: check and test pass — 112 tests; **clippy fails** on one pre-existing error in `executor.rs`, and the pre-commit hook runs only `ruff`, so nothing enforces this)*
 - [ ] Python code passes `ruff` pre-commit
 - [ ] Feature documented in `docs/phase-N.md`
 - [ ] E2E test script exists and passes
@@ -703,8 +828,8 @@ Executor proposes action -> Risk score computed
 | Component | Max RAM | Max VRAM | Notes |
 |-----------|---------|----------|-------|
 | LLM (Phi-3 / Llama-3 8B) | 6 GB | 4 GB | `int4` or `int8` quantization |
-| STT (faster-whisper base) | 1 GB | 0 GB | CPU-only, `int8` |
-| Embeddings (MiniLM) | 300 MB | 0 GB | CPU-only |
+| STT (faster-whisper small) | 1 GB | 0 GB | CPU-only, `int8` |
+| Embeddings (MiniLM) | 300 MB | 0 GB | Not used — memory search is SQLite FTS5 (Phase 7) |
 | Vision (YOLO / small DETR) | 200 MB | 2 GB | Optional; unload when idle |
 | Rust runtime + UI | 200 MB | 0 GB | Orb, event bus, context engine |
 | **Total (all loaded)** | **~8 GB** | **~6 GB** | Leaves headroom for user apps |
@@ -722,10 +847,13 @@ Executor proposes action -> Risk score computed
 - Dry-run mode must always work.
 - Comments explain why, not what.
 - Verify before trusting a "success" message.
+- When you fix a bug, search for the same pattern elsewhere. Fix the class, not the instance.
+- A regression test isn't proven until it has been seen failing against the old code.
+- Record decisions in `DECISIONS.md` in the same change that makes them.
 - Never block the async runtime.
 - No circular dependencies.
 - Privacy is default.
 
 ---
 
-*Last updated: 2026-09-15*
+*Last updated: 2026-09-21*
