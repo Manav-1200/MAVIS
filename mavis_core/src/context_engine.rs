@@ -20,6 +20,8 @@ pub struct ContextEngine {
     /// every 2 s, so recording every one would count idle seconds rather
     /// than actual work — entities are only recorded when this changes.
     last_entity_signature: Mutex<Option<String>>,
+    /// Last context summary logged, so the 2 s poll logs changes only.
+    last_context_log: Mutex<Option<String>>,
 }
 
 impl ContextEngine {
@@ -29,6 +31,7 @@ impl ContextEngine {
             bus,
             last_save: Mutex::new(Instant::now() - Duration::from_secs(10)),
             last_entity_signature: Mutex::new(None),
+            last_context_log: Mutex::new(None),
         })
     }
 
@@ -75,8 +78,7 @@ impl ContextEngine {
                     wm.set_intent(intent.to_string());
 
                     if let Some(name) = extract_user_name(intent) {
-                        if wm.user_name.as_ref() != Some(&name) {
-                            wm.set_user_name(name.clone());
+                        if wm.user_name.as_ref() != Some(&name) && wm.set_user_name(name.clone()) {
                             info!("ContextEngine: stored user name: {}", name);
                         }
                     }
@@ -103,7 +105,7 @@ impl ContextEngine {
                 if let Some(payload) = event.payload.as_object() {
                     match serde_json::from_value::<ContextSnapshot>(serde_json::Value::Object(payload.clone())) {
                         Ok(snapshot) => {
-                            let (log_app, log_clip) = {
+                            let summary = {
                                 let mut wm = self.memory.working.write().await;
                                 wm.active_window = snapshot.active_window;
                                 wm.open_windows = snapshot.open_windows;
@@ -112,26 +114,31 @@ impl ContextEngine {
                                 wm.next_event = snapshot.next_event;
                                 wm.last_clipboard = snapshot.clipboard_text;
                                 wm.context_timestamp = Some(snapshot.captured_at);
-                                (
+                                // Length, not content: the log is often
+                                // pasted into bug reports, and the clipboard
+                                // is exactly where passwords end up.
+                                format!(
+                                    "app={}, project={}, clipboard={}",
                                     wm.active_window
                                         .as_ref()
-                                        .map(|w| w.app_name.clone())
-                                        .unwrap_or_else(|| "none".to_string()),
-                                    // truncate_bytes, not `s[..20]`: the
-                                    // clipboard holds arbitrary user text,
-                                    // and slicing mid-character panicked —
-                                    // which killed the context engine
-                                    // silently for the rest of the run.
+                                        .map(|w| w.app_name.as_str())
+                                        .unwrap_or("none"),
+                                    wm.project.as_ref().map(|p| p.name.as_str()).unwrap_or("none"),
                                     wm.last_clipboard
                                         .as_ref()
-                                        .map(|s| crate::util::truncate_bytes(s, 20).to_string())
-                                        .unwrap_or_else(|| "none".to_string()),
+                                        .map(|c| format!("{} chars", c.chars().count()))
+                                        .unwrap_or_else(|| "empty".to_string()),
                                 )
                             };
-                            info!(
-                                "ContextEngine: context injected — app={}, clipboard={}",
-                                log_app, log_clip
-                            );
+                            // This fires every 2 s; logging each one buried
+                            // everything else. Log only what changed.
+                            {
+                                let mut last = self.last_context_log.lock().await;
+                                if last.as_deref() != Some(summary.as_str()) {
+                                    info!("ContextEngine: context changed — {}", summary);
+                                    *last = Some(summary);
+                                }
+                            }
                             self.observe_entities(&event.timestamp.to_rfc3339()).await;
                         }
                         Err(e) => {
@@ -367,59 +374,73 @@ impl ContextEngine {
 // Name extraction — simple pattern matching, no NLP dependency.
 // ---------------------------------------------------------------------
 
-/// Common words that are NOT names. Prevents false positives like
-/// "No, I'm here" → "Here".
-const NAME_DENYLIST: &[&str] = &[
-    "here", "there", "sure", "ok", "fine", "good", "ready", "back",
-    "home", "done", "right", "well", "yeah", "yes", "no", "maybe",
-    "nothing", "something", "anything", "everything", "someone",
-    "everyone", "nobody", "anybody", "today", "tomorrow", "yesterday",
-    "talking", "speaking", "listening", "waiting", "coming", "going",
-    "not", "in", "looking", "mavis",
-    // Interjections and filler that follow "I'm ..." / "... name is ..."
-    // in natural speech but are never names. Added as live testing
-    // surfaced them — "sorry" got stored as the user's name.
-    "sorry", "okay", "hey", "hi", "hello", "thanks", "just", "still",
-    "trying", "wondering", "asking", "curious", "confused", "sup",
-];
-
+/// Learn a name only when it is unmistakably being given.
+///
+/// No list of "words that aren't names". Earlier versions matched "I'm …"
+/// and then kept a denylist of what followed — here, sorry, looking,
+/// using… — which grew with every false match and could never be finished.
+/// Instead, the *shape* of the sentence decides:
+///
+/// 1. An explicit introduction: "my name is X", "call me X", "I'm called X".
+///    "I'm X" / "I am X" don't count — they introduce a state ("I'm using
+///    the terminal") far more often than a name.
+/// 2. X ends its clause: followed by nothing, punctuation, or "and". Names
+///    come last ("my name is Manav", "call me Azazel, please");
+///    other words keep going ("call me back later", "my name is not
+///    important").
+/// 3. Not a question: "what's my name is what I asked?" introduces nothing.
+/// 4. For "call me", X must be capitalised as said. Whisper capitalises
+///    proper nouns; "call me maybe" / "call me back" come out lowercase.
+///    "my name is" is unambiguous enough to accept lowercase, which matters
+///    for typed input.
+///
+/// MAVIS then addresses the user by it, so a wrong one is heard and can be
+/// corrected by saying it again.
 fn extract_user_name(text: &str) -> Option<String> {
-    let lower = text.to_lowercase();
-    let patterns = [
-        ("my name is ", 11),
-        ("i am ", 5),
-        ("i'm ", 4),
-        ("call me ", 8),
-        ("name is ", 8),
-    ];
+    // Work on the clause containing the phrase, so a question elsewhere in
+    // the utterance doesn't disqualify an introduction.
+    for sentence in text.split_inclusive(['.', '!', '?']) {
+        if sentence.trim_end().ends_with('?') {
+            continue;
+        }
+        let words: Vec<&str> = sentence.split_whitespace().collect();
+        let lower: Vec<String> = words
+            .iter()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_lowercase())
+            .collect();
 
-    for (prefix, prefix_len) in patterns {
-        if let Some(pos) = lower.find(prefix) {
-            let start = pos + prefix_len;
-            // Slice `lower`, not `text` — `start` is a byte offset computed
-            // from `lower`, and lowercasing can change a string's byte
-            // length (e.g. Turkish İ), so using it to slice `text` could
-            // land mid-character and panic. The name gets manually
-            // recapitalized below regardless, so original casing isn't needed.
-            let rest = &lower[start..];
-            let name: String = rest
-                .trim_start()
-                .split_whitespace()
-                .next()?
-                .trim_end_matches(|c: char| c.is_ascii_punctuation())
-                .to_string();
-            if name.is_empty() || name.len() >= 30 {
+        for i in 0..words.len() {
+            let (next, needs_capital) = match lower[i].as_str() {
+                "my" if lower.get(i + 1).is_some_and(|w| w == "name")
+                    && lower.get(i + 2).is_some_and(|w| w == "is") =>
+                {
+                    (i + 3, false)
+                }
+                "call" if lower.get(i + 1).is_some_and(|w| w == "me") => (i + 2, true),
+                "called" if i > 0 && matches!(lower[i - 1].as_str(), "i'm" | "am") => {
+                    (i + 1, false)
+                }
+                _ => continue,
+            };
+            let Some(raw) = words.get(next) else { continue };
+            let name = raw.trim_matches(|c: char| !c.is_alphabetic() && c != '\'' && c != '-');
+            if !crate::memory::working::is_plausible_name(name) {
                 continue;
             }
-            if NAME_DENYLIST.contains(&name.as_str()) {
+            // Clause end: last word, trailing punctuation, or "and" next.
+            let ends_clause = next + 1 == words.len()
+                || raw.ends_with([',', '.', '!', ';', ':'])
+                || lower.get(next + 1).is_some_and(|w| w == "and");
+            if !ends_clause {
+                continue;
+            }
+            let capitalised = name.chars().next().is_some_and(|c| c.is_uppercase());
+            if needs_capital && !capitalised {
                 continue;
             }
             let mut chars = name.chars();
-            let capitalized = match chars.next() {
-                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
-                None => name,
-            };
-            return Some(capitalized);
+            let first = chars.next()?;
+            return Some(first.to_uppercase().collect::<String>() + chars.as_str());
         }
     }
     None
