@@ -612,24 +612,37 @@ async fn run_piper_to_file(text: &str, voice_model: &str, wav_path: &Path) -> Re
     Ok(())
 }
 
-/// Fallback TTS via spd-say or espeak. Blocks until the process exits.
+/// Fallback TTS via spd-say or espeak. Blocks until speech has finished.
+///
+/// Each binary is tried in turn. Previously a missing `spd-say` returned
+/// an error straight out of the loop, so `espeak` was never tried — the
+/// common case on minimal installs, which ship espeak-ng without
+/// speech-dispatcher. `spd-say` gets `--wait`: without it, it hands the
+/// text to speech-dispatcher and exits at once, so the microphone reopened
+/// while MAVIS was still talking and heard itself.
 async fn fallback_say_blocking(text: &str) -> Result<()> {
-    for tts in ["spd-say", "espeak"] {
-        let mut child = Command::new(tts)
+    let candidates: [(&str, &[&str]); 3] =
+        [("spd-say", &["--wait"]), ("espeak-ng", &[]), ("espeak", &[])];
+    for (tts, flags) in candidates {
+        let mut child = match Command::new(tts)
+            .args(flags)
             .arg(text)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| anyhow::anyhow!("failed to spawn {}: {}", tts, e))?;
-
-        let _ = child
-            .wait()
-            .await
-            .map_err(|e| anyhow::anyhow!("{} wait error: {}", tts, e))?;
-
-        info!("TTS via {}: {}", tts, text);
-        return Ok(());
+        {
+            Ok(c) => c,
+            Err(_) => continue, // not installed — try the next one
+        };
+        match child.wait().await {
+            Ok(status) if status.success() => {
+                info!("TTS via {}: {}", tts, text);
+                return Ok(());
+            }
+            Ok(status) => warn!("Executor: {} exited with {}, trying next", tts, status),
+            Err(e) => warn!("Executor: {} wait error: {}, trying next", tts, e),
+        }
     }
     info!("Executor: no TTS binary found, logging only: {}", text);
     Ok(())
