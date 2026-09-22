@@ -28,7 +28,24 @@ pub struct WorkingMemory {
     pub last_clipboard: Option<String>,
     pub context_timestamp: Option<u64>,
     pub user_name: Option<String>,
+    /// Set when the name was learned by the current rules. Names stored
+    /// by builds before 2026-09-22 don't have it: those came from "I'm …"
+    /// patterns that produced "Using", "Sorry", "Here" — so they aren't
+    /// trusted, and are dropped on load. The user says it once more.
+    #[serde(default)]
+    pub user_name_verified: bool,
     pub browser_tab: Option<BrowserTab>,
+}
+
+/// A name is one word of letters (apostrophes and hyphens allowed, as in
+/// O'Neil or Anne-Marie) under 30 bytes. What makes a word a *name* is how
+/// it was said — see `extract_user_name` — not whether it's missing from a
+/// list of words that aren't names.
+pub fn is_plausible_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() < 30
+        && name.chars().next().is_some_and(|c| c.is_alphabetic())
+        && name.chars().all(|c| c.is_alphabetic() || c == '\'' || c == '-')
 }
 
 impl WorkingMemory {
@@ -51,8 +68,26 @@ impl WorkingMemory {
         self.current_intent = None;
     }
 
-    pub fn set_user_name(&mut self, name: String) {
+    /// Stores the name only if it could plausibly be one — see
+    /// `is_plausible_name`. Returns whether it was stored.
+    pub fn set_user_name(&mut self, name: String) -> bool {
+        if !is_plausible_name(&name) {
+            return false;
+        }
         self.user_name = Some(name);
+        self.user_name_verified = true;
+        true
+    }
+
+    /// Drop a restored name that wasn't learned by the current rules.
+    /// A bad name is persisted in working_memory.json, so without this a
+    /// false match from an older build ("The user's name is Using.") comes
+    /// back on every run.
+    pub fn sanitize(&mut self) -> Option<String> {
+        if self.user_name.is_some() && !self.user_name_verified {
+            return self.user_name.take();
+        }
+        None
     }
 
     pub fn set_active_plan(&mut self, plan: serde_json::Value) {
