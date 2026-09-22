@@ -39,6 +39,14 @@ fn is_meta_instruction_question(text: &str) -> bool {
 // Phase 6 privacy gate: each context source is off by default and must be
 // explicitly opted into. This is the specific gate Phase 6 itself asks for —
 // not the fuller 5-tier system Phase 8 builds later.
+/// Is the user asking about what they copied?
+fn mentions_clipboard(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    ["clipboard", "copied", "i copy", "just copy", "paste", "pasted"]
+        .iter()
+        .any(|w| lower.contains(w))
+}
+
 fn context_source_enabled(env_var: &str) -> bool {
     matches!(std::env::var(env_var).as_deref(), Ok("1") | Ok("true"))
 }
@@ -592,7 +600,7 @@ impl Planner {
             return Ok(());
         }
 
-        let working_memory = self.build_working_memory(intent).await;
+        let working_memory = self.build_working_memory(intent, event.id).await;
 
         // Only send the user message — build_chat_messages() in Python owns the system prompt.
         let worker_req = Event {
@@ -605,7 +613,12 @@ impl Planner {
                 "messages": [
                     {"role": "user", "content": user_message}
                 ],
-                "max_tokens": 256,
+                // Replies are cut to two sentences / 180 characters after
+                // generation anyway, so anything past ~50 tokens was
+                // generated only to be thrown away — at 256 that was most
+                // of an 11-second wait. The worker also stops early once
+                // two sentences are complete; this is the backstop.
+                "max_tokens": 96,
                 "temperature": 0.7,
                 "working_memory": working_memory
             }),
@@ -614,7 +627,11 @@ impl Planner {
         Ok(())
     }
 
-    async fn build_working_memory(&self, current_intent: &str) -> Vec<serde_json::Value> {
+    async fn build_working_memory(
+        &self,
+        current_intent: &str,
+        current_id: uuid::Uuid,
+    ) -> Vec<serde_json::Value> {
         let snapshot = self.working.read().await;
         let mut items = Vec::new();
 
@@ -623,13 +640,6 @@ impl Planner {
             items.push(serde_json::json!({
                 "source": "user_profile",
                 "content": format!("The user's name is {}.", name),
-            }));
-        }
-
-        if let Some(intent) = &snapshot.current_intent {
-            items.push(serde_json::json!({
-                "source": "current_intent",
-                "content": intent,
             }));
         }
 
@@ -682,7 +692,10 @@ impl Planner {
             } else {
                 match store.recall(current_intent, 3) {
                     Ok(memories) if !memories.is_empty() => {
-                        for m in memories {
+                        // The context engine records each utterance as it
+                        // arrives, so recall can return the very sentence
+                        // being answered. That's not a memory.
+                        for m in memories.into_iter().filter(|m| m.text != current_intent) {
                             items.push(serde_json::json!({
                                 "source": "recalled",
                                 "content": format!("Earlier, {} said: {}", m.role, m.text),
@@ -861,7 +874,11 @@ impl Planner {
             }
         }
 
-        if context_source_enabled("MAVIS_CONTEXT_CLIPBOARD") {
+        // Only when the user is asking about it. Sent on every turn, the
+        // clipboard was noise the model had to ignore — and whatever
+        // happened to be copied (a launch command, a password) went into
+        // every prompt.
+        if context_source_enabled("MAVIS_CONTEXT_CLIPBOARD") && mentions_clipboard(current_intent) {
             if let Some(clipboard) = &snapshot.last_clipboard {
                 if !clipboard.is_empty() {
                     let truncated: String = clipboard.chars().take(200).collect();
@@ -882,36 +899,36 @@ impl Planner {
             }
         }
 
-        // CHANGED — 5 → 15. Between two user turns MAVIS generates ~7 internal
-        // events (WorkerRequest, WorkerResponse, PlanReady, ActionComplete,
-        // 2× UiStateChange). A window of 5 drops the prior turn entirely.
+        // Conversation so far. Between two user turns MAVIS generates ~7
+        // internal events, so a window of 5 dropped the prior turn; 15
+        // keeps it.
+        //
+        // What MAVIS said comes from PlanReady only. WorkerResponse carries
+        // the same text for LLM replies, and including both put every reply
+        // in the prompt twice — which nudges a small model to repeat itself.
+        // PlanReady also covers the deterministic replies ("Opening
+        // Firefox") that never pass through the worker.
+        //
+        // The current utterance is skipped: it's the user message itself,
+        // and depending on which task ran first it could also already be in
+        // the ring.
         for event in snapshot.recent_events(15) {
+            if event.id == current_id {
+                continue;
+            }
             let (source, content) = match event.event_type {
                 EventType::UserIntent => (
                     "user",
-                    event.payload
-                        .get("text")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string(),
-                ),
-                EventType::WorkerResponse => (
-                    "mavis",
-                    event.payload
-                        .get("result")
-                        .and_then(|r| r.get("content"))
-                        .and_then(|c| c.as_str())
-                        .unwrap_or("")
-                        .to_string(),
+                    event.payload.get("text").and_then(|v| v.as_str()).unwrap_or(""),
                 ),
                 EventType::PlanReady => (
-                    "plan",
-                    event.payload
+                    "mavis",
+                    event
+                        .payload
                         .get("plan")
                         .and_then(|p| p.get("text"))
                         .and_then(|t| t.as_str())
-                        .unwrap_or("")
-                        .to_string(),
+                        .unwrap_or(""),
                 ),
                 _ => continue,
             };
