@@ -113,7 +113,7 @@ pip install -e .
 python -m mavis
 ```
 
-`cargo test` runs the unit tests. `cargo clippy` currently reports one known error in `executor.rs` — see [`DECISIONS.md` §14](DECISIONS.md#14-open-issues).
+`cargo test` runs the unit tests. `cargo clippy` passes with warnings — mostly Sentinel code waiting for its next step, and platform stubs.
 
 ### Voice commands
 
@@ -187,7 +187,7 @@ cargo run
 | Variable | Gives MAVIS |
 |----------|-------------|
 | `MAVIS_CONTEXT_ACTIVE_WINDOW` | Focused window, the list of open apps and their workspaces, and the current git project (name, path, branch) |
-| `MAVIS_CONTEXT_CLIPBOARD` | Current clipboard text, truncated to 200 characters |
+| `MAVIS_CONTEXT_CLIPBOARD` | Current clipboard text, truncated to 200 characters — only sent when you ask about the clipboard, copying or pasting |
 | `MAVIS_CONTEXT_CALENDAR` | Next event from Evolution's local calendar |
 | `MAVIS_CONTEXT_BROWSER` | Tab URL/title, if something writes to `/tmp/mavis_browser.sock` |
 
@@ -206,18 +206,21 @@ Current date and time is always injected — it isn't private, and without it th
 | `MAVIS_PYTHON_PATH` | `python3` | Interpreter for the worker, e.g. your venv's |
 | `MAVIS_ORB` | on | `off` runs without the orb — headless use only; the orb is how you see what MAVIS is doing |
 | `MAVIS_ORB_POS` | — | `x,y` start position. Honoured on X11/XWayland; native Wayland ignores it |
-| `MAVIS_VAD_DEBUG` | off | Logs what the microphone is actually producing, every ~3 s |
+| `MAVIS_VAD_DEBUG` | off | Logs microphone level and the current start/end thresholds, every ~3 s |
+| `MAVIS_SPEECH_GATE` | on | `0` sends audio to Whisper even when no speech was detected in it — for diagnosing dropped speech only; it lets hallucinations back in |
 
 ## Troubleshooting
 
-**MAVIS doesn't hear you.** Check the microphone level before anything else — it has cost a full debugging session before:
+**MAVIS doesn't hear you, or takes ages to answer.** MAVIS measures the room for its first second of listening and adjusts to it, so keep quiet for a moment after starting. Then check what the microphone is producing:
 
 ```bash
-wpctl status | grep -A3 Sources
-wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.6
+wpctl status | grep -A3 Sources          # which source is the default
+MAVIS_VAD_DEBUG=1 cargo run               # logs levels every ~3 s
 ```
 
-Then run with `MAVIS_VAD_DEBUG=1` and speak. If `peak=` stays below ~0.075 while you talk, the microphone is too quiet — raise it rather than lowering MAVIS's thresholds, which are calibrated against measured room noise.
+`VAD: calibrated — noise_floor=…` shows what MAVIS measured. While you talk, `peak=` should clearly exceed `start=`; while you're silent, `level=` should sit below `end=`. If speech barely clears `start=`, raise the mic (`wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.5`, say). If the room alone is near `start=`, lower it or reduce the noise — MAVIS can follow a noisy room, but it can't hear speech that isn't much louder than it. `room got louder mid-utterance` in the log means it caught itself listening to the room and recovered. `No speech in N s of audio` means the worker's speech detector heard only noise, so nothing was transcribed — which is how MAVIS avoids inventing words.
+
+**Replies are slow.** Each reply logs `Reply: N tokens in Xs (first token Ys)`. A long first-token time is prompt processing; the rest is generation. If both are slow, the model may be running mostly on CPU — see `n_gpu_layers` in the worker config.
 
 **A subsystem stops working mid-session.** Look for `PANICKED — restarting` in the log. The panic message just above it is the bug worth reporting.
 
