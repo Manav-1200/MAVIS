@@ -25,6 +25,19 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **60-second replies** (found in the 2026-09-22 live run) — three causes, all fixed:
+  - *Listening never ended in a noisy room.* The VAD's thresholds couldn't rise above fixed values, so fan noise held utterances open to the 45 s ceiling. The noise floor is now measured at startup, follows the room, survives between utterances, and is re-measured mid-utterance if the room gets louder; trailing noise is trimmed. Ceiling 45 s → 30 s.
+  - *Whisper invented "Thank you for watching, please subscribe…"* after real speech. Silero VAD, already bundled with faster-whisper, now marks which audio is speech; Whisper hears only that and isn't called at all without it. The hallucination phrase lists are gone.
+  - *The LLM generated up to 256 tokens and kept ~40.* Generation now streams and stops once the reply is complete; the system prompt is pre-evaluated while the user is still speaking.
+- **Unpunctuated transcripts came back empty** — sentence de-duplication dropped text after the last punctuation mark.
+- **"The user's name is Using"** — names are recognised by how they're said (explicit introduction, last in the clause, not a question), with no word lists; names stored by older builds are discarded once.
+- **MAVIS saw its own orb as the active window**, and reported its own directory as the user's project.
+- **Every reply was in the prompt twice**, and the current utterance could be too.
+- **Clipboard sent with every message** — now only when asked about.
+- **Speech fallback never fell back** from `spd-say` to `espeak`, and `spd-say` didn't wait for speech to finish. `cargo clippy` passes again.
+- **Integer-format microphones** (16/32-bit) were rejected as unsupported.
+- Context logged every 2 s, including clipboard text — now logged on change, as a length.
+- Kokoro's `repo_id` and torch warnings on every load.
 - **MAVIS stopping mid-session** — three places sliced strings by byte index and panicked on non-ASCII transcriptions or clipboard text; the panic silently ended that subsystem. Most likely cause of the intermittent "doesn't respond" reports.
 - **Event bus poison cascade** — one panic while holding its lock made every later publish panic.
 - **Audio-thread deadlock** after any mutex poisoning.
