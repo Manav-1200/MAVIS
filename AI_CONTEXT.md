@@ -110,7 +110,7 @@ Each of these has been "improved" before, or nearly was. The reasons are in `DEC
 
 **Build**
 - Rust 1.85+ via rustup. Build needs a C compiler, `pkg-config` and ALSA headers — not X11 or Wayland headers.
-- `cargo clippy` currently fails on one known error in `executor.rs`.
+- `cargo clippy` passes with warnings only (fixed 2026-09-22).
 - `Cargo.lock` is currently gitignored, so builds aren't reproducible across machines. Committing it is recommended.
 
 **Targets (not yet measured)** — Rust startup under 2 s and under 200 MB; worker spawn and model load under 5 s, under 5 GB VRAM; 70% test coverage.
