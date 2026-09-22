@@ -22,12 +22,24 @@ class KokoroEngine:
         if self._pipeline is not None:
             return
         try:
-            # Suppress kokoro's verbose spaCy download messages on first load
+            # Loading kokoro prints spaCy download chatter, and building the
+            # pipeline trips two harmless torch warnings (LSTM dropout with
+            # one layer; weight_norm deprecation) inside kokoro's own model
+            # code. None are actionable here, so they're kept out of the log
+            # for the import and construction only.
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 from kokoro import KPipeline
 
-            self._pipeline = KPipeline(lang_code=self._lang_code)
+                try:
+                    # Naming the repo explicitly silences "Defaulting
+                    # repo_id to hexgrad/Kokoro-82M" on every load.
+                    self._pipeline = KPipeline(
+                        lang_code=self._lang_code, repo_id="hexgrad/Kokoro-82M"
+                    )
+                except TypeError:
+                    # kokoro releases before repo_id existed.
+                    self._pipeline = KPipeline(lang_code=self._lang_code)
             self.is_loaded = True
             print("[kokoro] Pipeline loaded.")
         except Exception as e:
