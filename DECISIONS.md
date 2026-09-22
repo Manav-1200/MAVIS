@@ -33,6 +33,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 12. [Process, tooling and build](#12-process-tooling-and-build)
 13. [Mistakes and retractions](#13-mistakes-and-retractions)
 14. [Open issues](#14-open-issues)
+15. [The 2026-09-22 live run](#15-the-2026-09-22-live-run)
 
 ---
 
@@ -74,6 +75,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-19 | — | Two lost fixes re-applied; graceful audio failure; dead memory stores removed |
 | 09-20 | — | Full code audit; three UTF-8 panics, a deadlock and a poison cascade fixed; subsystem supervision |
 | 09-20 → 09-21 | 8.5 | System Sentinel: package change detection |
+| 09-22 | — | First live run after the audit: 60 s replies traced to the VAD, Whisper and the LLM; all three fixed (§15) |
 
 ---
 
@@ -154,6 +156,7 @@ These are the rules every decision below was measured against. When two entries 
 **Decision:** Two thresholds. It takes 0.075 to *start* (above the 0.058 silence peak, with margin) and only a drop below 0.06 to count as silence *once speaking*.
 **Why these numbers:** An earlier start value of 0.10 came from a speech median skewed by loud syllables and never triggered on real speech at all. Noise-floor multipliers were lowered at the same time (2.0× → 1.4× for start, 1.2× → 1.15× for end) because at 2.0× the adapting floor pushed the threshold above normal speaking volume and the VAD stopped triggering entirely.
 **Evidence:** Measured.
+**Partly superseded 2026-09-22:** 0.075 and 0.06 remain, as *minimums*. On top of them the thresholds now follow the measured room, because fixed values failed as soon as the room was louder than the one they were measured in. See §15.
 
 ### Decision · Silence wait of 500 ms — not 400
 **Date:** 2026-09-12
@@ -175,6 +178,7 @@ These are the rules every decision below was measured against. When two entries 
 **Why the confidence gate didn't catch it:** Whisper reports these with *high* confidence. It's trained on subtitle data, where such phrases really do follow silence.
 **Fix:** `HALLUCINATION_DENYLIST` in `stt/engine.py`, matched after whitespace and curly-apostrophe normalisation — segment joins and `’` were breaking exact comparison on the first attempt.
 **Evidence:** Measured.
+**Superseded 2026-09-22:** the list is gone; Whisper now only hears audio a speech detector has marked as speech (§15).
 
 ### Decision · Confidence threshold 0.6 → 0.45
 **Date:** 2026-09-12
@@ -205,6 +209,7 @@ These are the rules every decision below was measured against. When two entries 
 **Symptom:** MAVIS heard nothing at all.
 **Actual cause:** The microphone's capture gain was at **0.35**. At that level normal speech peaks around 0.03–0.05, below the 0.075 start threshold. Not a MAVIS bug.
 **Fix:** `wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.6`. Thresholds deliberately left alone — they are calibrated against measured room noise, and lowering them to compensate for a quiet mic would reopen the hallucination problem.
+**Superseded 2026-09-22:** 0.6 was a guess, not a measurement, and it was too hot — with fans running, the room alone sat above the end threshold and MAVIS never heard the user stop (§15). The real fault was that the thresholds couldn't follow the room at all; that is what changed.
 
 ### Decision · Keep `MAVIS_VAD_DEBUG`
 **Date:** `VAD-LIVE` logging removed 2026-09-14; restored as the opt-in `MAVIS_VAD_DEBUG` 2026-09-19
@@ -253,6 +258,7 @@ These are the rules every decision below was measured against. When two entries 
 **Date:** 2026-08-28 → 09-02
 **Cause:** Name extraction matched patterns like "I'm ___". An offset bug came first; then false positives kept arriving — Not, In, Looking, Mavis, Sorry — mostly downstream of the echo bug in §4 feeding MAVIS's own speech back in.
 **Fix:** Offset fixed; `NAME_DENYLIST` extended. Most of this class disappeared once echo was fixed.
+**Superseded 2026-09-22:** the denylist approach lost to "I'm using…" → "Using". The "I'm" / "I am" patterns are gone; see §15.
 
 ### Problem · First UTF-8 panic
 **Date:** 2026-09-02
@@ -609,6 +615,7 @@ Established by uninstalling packages and rebuilding from clean, not by reading d
 
 ### Finding · `cargo clippy` fails, and the pre-commit hook can't notice
 The Definition of Done in `PHASES.md` says code passes `cargo clippy`. It doesn't: `executor.rs` has a loop clippy rejects as "never actually loops" (§14). The pre-commit hook runs only `ruff`, which skips every Rust commit, so nothing enforces it.
+**Update 2026-09-22:** the loop is fixed (§15), so `cargo clippy` now passes with warnings only. The hook still doesn't run it.
 
 ### Finding · Versions and tags don't agree
 **Date:** 2026-09-21
@@ -641,6 +648,8 @@ Kept so the same mistakes are recognisable next time.
 | 09-20 | Watermark filter lost entries at its own boundary | Explaining a design out loud finds bugs |
 | 09-20 | A regression test that couldn't fail | A test is proven only once it has been seen failing |
 | 09-20 | A test assertion written for the wrong order | Check the helper's semantics — "seconds ago", not "seconds" |
+| 09-20 | Mic gain 0.6 recommended without measuring it | A number without a measurement is a guess — label it as one |
+| 09-22 | Fixed thresholds kept because they were "calibrated" — for one room, one gain, no fans | Calibration holds only under the conditions it was measured in |
 
 ---
 
@@ -649,19 +658,19 @@ Kept so the same mistakes are recognisable next time.
 Known, recorded, not yet fixed. Roughly in the order they'd be felt.
 
 **Verification still owed**
-- Full live run after the 2026-09-20 changes — supervision rewired every subsystem's startup path
-- Sentinel first run on the target Arch machine: expect `imported ~2079 past transactions`
+- A live run of the 2026-09-22 fixes (§15) — the VAD changes are proven in simulation, not yet on the target machine
 - GNOME crash fix on a real GNOME session
 - Calendar has-events path (the calendar is empty)
 - Windows and macOS app discovery; the RPM parser
 
 **Latency and portability**
-- Espeak fallback can never run — a `?` returns on the first missing binary. Also the one clippy error.
 - First STT attempt waits up to 300 s, and utterances are processed one at a time
 - A malformed STT reply is retried by re-running full transcription, up to 5 times
-- Only F32 microphones work; many USB mics are I16-only
 - `pw-play` is given `--device`; its flag is `--target`, so `MAVIS_AUDIO_DEVICE` breaks playback
-- Resampling has no anti-aliasing filter — a plausible contributor to mistranscriptions
+- Resampling has no anti-aliasing filter — a plausible contributor to mistranscriptions. Less often reached since 2026-09-22: 16 kHz is now preferred in any sample format, and 192 kHz devices are no longer opened at their maximum rate
+- The VAD is still energy-based. It now follows the room, but speech only ~2× louder than steady noise can go unheard, and non-steady noise (typing, a video playing) can still start an utterance. A speech-trained VAD (WebRTC or Silero) is the next step if this bites
+- `n_gpu_layers` is 20 because full offload failed on 6 GB. Somewhere between 20 and 33 is probably faster and still fits — unmeasured
+- The microphone chosen is the raw ALSA `sysdefault` device, which bypasses PipeWire's own processing (and any noise suppression the user has set up there)
 - Memory lives at `../memory`, relative to the working directory
 
 **Security**
@@ -678,12 +687,110 @@ Known, recorded, not yet fixed. Roughly in the order they'd be felt.
 **Dead code**
 - `EpisodicStore` is written, never read, never pruned
 - `MAVIS_ACTIVE_LISTEN` can't cross the process boundary it's meant to
-- Unused platform traits and fields: `AudioCapture`, `ScreenGrabber`, `LinuxScreen.wayland`, `SttHandle.tts_active`, `parse_png_dimensions`, `_shutdown_tx`
+- Unused platform traits and fields: `AudioCapture`, `ScreenGrabber`, `LinuxScreen.wayland`, `parse_png_dimensions`, `_shutdown_tx`
 
 **Not built**
 - Sentinel steps 2b–5: speaking pending changes, answering "what changed?", privilege surfaces, integrity and CVE checks, Windows and macOS
 - `wlr-layer-shell` for the orb on native Wayland
 - Phase 8 rollback; per-skill permissions (needs Phase 9)
+
+---
+
+## 15. The 2026-09-22 live run
+
+The first full run after the audit. Everything started, nothing panicked, the Sentinel imported 2,124 past pacman transactions silently as designed. But a single "hello MAVIS, can you hear me" took **60 seconds** to answer, and the answer was to a sentence the user never said. The log was read line by line; every problem found is below.
+
+**Where the 60 s went:** listening 45 s · transcription 3 s · LLM 11 s · speech 5 s.
+
+### Problem · MAVIS never heard the user stop talking
+**Symptom:** `SPEECH START` at 08:44:28, then nothing until `FORCED END — hard ceiling` 45 s later. The utterance was ~2 s long.
+**Actual cause:** The thresholds were effectively fixed. The noise floor could adapt, but it was capped at 0.045 and reset to 0.035 after every utterance, so the end threshold never rose above 0.06. With the mic at 0.6 (§4) and fans spinning up as the model loaded, the room itself sat above 0.06 — every frame read as speech. The same reset caused two more false starts: one second after the forced end, and the instant MAVIS finished speaking.
+**Fix:** In `stt.rs`:
+- The fixed thresholds stay as **minimums**, and a noise-relative part is added on top (1.8× the floor to start, 1.5× to end). In the quiet room both land below the minimums, so behaviour there is unchanged.
+- The floor is **measured for the first second** of listening rather than assumed; it follows quiet quickly and noise slowly; it is **no longer capped at 0.045 or reset** between utterances.
+- Energy is **smoothed** (~70 ms). Steady fan noise flickers above and below a threshold frame by frame, and a single loud frame used to reset the silence count.
+- **Stuck detection:** real speech always dips between words. If the quietest moment in 2.7 s of "speech" is still above the end threshold, it's the room — the floor is re-measured from that moment and the utterance ends.
+- The utterance's **tail is trimmed** to 300 ms after its last loud frame, so Whisper doesn't get seconds of fan noise to invent words from. An utterance that never rose above the start threshold for the room as now measured is dropped.
+- Partial frames are **carried over** between audio callbacks instead of appended unanalysed.
+- Hard ceiling **45 s → 30 s**.
+**Why not a speech-trained VAD:** WebRTC VAD (`webrtc-vad` crate) was built and tried: on its most aggressive setting it still flagged loud hiss as speech, so it didn't clearly beat the energy approach at the one thing that failed. Silero needs ONNX Runtime in the Rust core. Neither has earned its dependency yet; both stay the next step (§14).
+**Evidence:** Proven in simulation — five tests with synthetic room noise and speech, including a room that jumps from 0.03 to 0.10 mid-utterance (ends within ~1.5 s instead of 45 s) and noise wobbling ±90% frame to frame (no false utterances over a minute). A sweep showed ratios of 2.2× and 1.6× went deaf to speech only ~2.4× louder than the room, which is why 1.8× and 1.5× were chosen. **Not yet measured on the target machine.**
+
+### Problem · "Thank you for watching, please subscribe…"
+**Symptom:** The user said "hello MAVIS, can you hear me". The transcript added "Thank you for watching, please subscribe and hit the bell icon to get notified when I post new videos."
+**Actual cause:** Whisper given ~40 s of fan noise fills it with the end of a YouTube video. `HALLUCINATION_DENYLIST` only dropped a transcript that was *entirely* a known phrase; real words came first, so the whole thing passed — and the LLM replied to it.
+**Fix:** In `stt/engine.py`: outro phrases are matched **per sentence** and cut from the match onward (`OUTRO_PATTERNS`); segments Whisper itself flags as probably not speech (`no_speech_prob > 0.6` with `avg_logprob < -1.0`, or `compression_ratio > 2.4` — the thresholds from openai/whisper) are dropped individually. The VAD's tail trimming removes most of the noise that caused it in the first place.
+**Evidence:** The exact transcript from the log now comes out as "Hello, Mavis. Mavis, can you hear me?" — tested against the function directly.
+**Superseded the same day** by the next entry: a list of phrases to delete can never be finished.
+
+### Decision · Detect speech instead of listing hallucinations
+**Context:** Both `HALLUCINATION_DENYLIST` and the outro patterns above were lists of things Whisper had invented. Every new hallucination would need another entry — the list only grows, and it's always one step behind.
+**Decision:** Remove both lists. Before transcribing, Silero VAD — a small neural network trained to tell speech from everything else — marks which parts of the audio are someone talking. If there are none, Whisper is never called. If there are, Whisper is given only those parts (`vad_filter=True`). Whisper can't invent words over noise it never hears.
+**Why Silero, why here:** It ships inside faster-whisper, with onnxruntime, so it adds no dependency. Putting it in the Rust core instead would have meant adding ONNX Runtime there (§15, the VAD entry). The Rust energy VAD still decides when you've stopped talking; Silero decides what was speech.
+**Reverses:** `vad_filter=False`, set 2026-08-15 to fix "empty transcripts". That was the same session that fixed a microphone routed to nothing and audio truncated over the socket (`PHASES.md` §4.5), so the filter was most likely being fed no speech — correctly finding none. Not provable now; `MAVIS_SPEECH_GATE=0` turns the gate off if real speech is ever dropped, and every drop is logged with the audio's length and peak.
+**What's left of the old defences:** Whisper's own per-segment signals (`no_speech_prob`, `avg_logprob`, `compression_ratio`), the confidence gate, and repetition collapsing. None of them is a list.
+**Evidence:** Tested with the real Silero model: 40 s each of white, pink, brown and fan-like noise at three levels — zero seconds reported as speech in all twelve. A spoken phrase mixed into the same noise was found with correct boundaries whenever it was audible (lost only when the noise was louder than the speech). Through `transcribe()`: 40 s of noise returned nothing without calling Whisper. Not tested with Whisper itself — the model download is blocked in the sandbox — so the first live run is the real check.
+
+### Problem · An unpunctuated transcript came back empty
+**Found while fixing the above.** The sentence-level de-duplication in `_deduplicate_repetition` walked `(sentence, punctuation)` pairs and stopped one element early, dropping any text after the last punctuation mark. "hello mavis can you hear me" became "", and "Hi. open firefox" lost the command. Whisper usually punctuates, which is how it went unnoticed.
+**Fix:** Walk every element. **Evidence:** tested.
+
+### Problem · 11 seconds to produce one sentence
+**Actual cause:** The planner asked for up to 256 tokens and nothing stopped the model at a line break. It generated a paragraph; the worker then kept the first line, at most two sentences and 180 characters, and threw the rest away.
+**Fix:** Generation is **streamed** and stopped as soon as it has produced everything post-processing would keep (`_reply_complete`, which mirrors `_post_process`'s rules exactly). `max_tokens` 256 → 96 as a backstop. And the fixed system prompt is **evaluated during warm-up**, which is requested the moment the user starts speaking — llama.cpp reuses that prefix, so prompt processing overlaps with the user talking.
+**Why stream rather than a `"\n"` stop token:** the model sometimes opens with a newline, and a newline stop would then end generation before any text. `_post_process` had the same flaw — a leading newline made the kept "first line" empty — also fixed.
+**Evidence:** Equivalence tested — for sample outputs, post-processing the early-stopped text gives exactly the same reply as post-processing the full generation. Real timing isn't measured yet; each reply now logs `Reply: N tokens in Xs (first token Ys)` so it will be.
+
+### Decision · Whisper `patience` 2.0 → 1.0
+**Why:** Patience widens beam search beyond `beam_size`. 1.0 is the standard setting; 2.0 roughly doubled decode time with no observed difference. Beam size stays at 5.
+
+### Problem · "The user's name is Using"
+**Actual cause:** "I'm …" and "I am …" were treated as introductions. They introduce a state far more often than a name. The name was also persisted in `working_memory.json`, so it came back every run.
+**Fix:** Only "my name is …" and "call me …", matched as whole phrases. A name must be one word of letters and not a common English word. A stored name that fails these checks is discarded on load, which clears "Using".
+**Why not extend the denylist again:** it had been extended five times (§5). Guessing every word that can follow "I'm" is a losing game; not treating "I'm" as an introduction ends it.
+**Superseded the same day:** the first version of this fix still kept a word list. Replaced by the next entry.
+
+### Decision · Recognise a name by how it's said, not by a list of non-names
+**Decision:** No word list at all. A name is taken only when all of these hold:
+1. An explicit introduction — "my name is X", "call me X", "I'm called X". Never "I'm X" or "I am X".
+2. X ends its clause — nothing after it, or punctuation, or "and". Names come last; "call me back later" and "my name is not important" keep going.
+3. The sentence isn't a question.
+4. After "call me", X is capitalised as transcribed. Whisper capitalises proper nouns, so "call me maybe" and "call me back" come out lowercase. "My name is" is unambiguous enough to accept lowercase, which typed input needs.
+Names stored by older builds carry no marker that they were learned this way, so they are dropped once on load, which clears "Using". A real name from before has to be said once more.
+**Why this is enough:** MAVIS then uses the name, so a mistake is heard at once and corrected by saying the name again.
+**Evidence:** Tested: seven introductions learned, twelve non-introductions rejected — including "I'm using the terminal", "Call me back later.", "What's my name is what I asked?" and the log's own "Hello, Mavis. Mavis, can you hear me?". Those tests were run and then left out of the repository at the maintainer's request — the codebase keeps no example sentences. If this rule set proves wrong in use, the next step is to let the model extract the name, or to drop extraction and rely on recall.
+
+### Problem · MAVIS thought the user was looking at MAVIS
+**Symptom:** `[active_window] The user is currently in unknown — "MAVIS"` and `[project] … MAVIS project at /home/…/MAVIS`.
+**Actual cause:** The orb is a window and the compositor reported it as focused. Project detection then read the working directory of MAVIS's own process.
+**Fix:** MAVIS's own windows are removed from the window list (by PID, or by the "MAVIS" title where no PID is reported). While the orb has focus, the user is taken to still be in the window they were in before.
+
+### Problem · Every reply appeared twice in the prompt
+**Symptom:** `[mavis] You called me Mavis earlier.` followed by `[plan] You called me Mavis earlier.`
+**Cause:** The history included both the worker's response and the plan built from it.
+**Fix:** History is built from plans only, labelled `mavis` (which the prompt's echo filter expects). The current utterance is also excluded from history and recall — depending on task order it could already be there, which put the user's message in the prompt twice.
+
+### Decision · The clipboard is sent only when asked about
+**Why:** It went into every prompt: noise the model had to ignore, and whatever happened to be copied — in the log, the launch command; in general, sometimes a password. With `MAVIS_CONTEXT_CLIPBOARD=1` it is now included only when the user mentions the clipboard, copying or pasting.
+
+### Decision · Log context changes, not context polls
+**Why:** `context injected — app=…, clipboard=…` was logged every 2 s, burying everything else, and printed the start of the clipboard into logs that get pasted into bug reports. Now logged only when it changes, with the clipboard as a character count.
+
+### Problem · The speech fallback could never fall back
+**Cause:** A missing `spd-say` returned an error straight out of the loop, so `espeak` was never tried — clippy's "never actually loops" (§12). `spd-say` also returned immediately, before speaking, so the microphone reopened while MAVIS talked.
+**Fix:** Try `spd-say --wait`, then `espeak-ng`, then `espeak`; skip any that aren't installed or fail. `cargo clippy` now passes (warnings only).
+
+### Decision · Accept integer-format microphones
+**Why:** Some USB microphones and plain ALSA devices offer only 16- or 32-bit integer samples; MAVIS refused them with "unsupported sample format" and ran deaf. They are now converted at the edge. The input format is now chosen as: 32-bit float over integer, 16 kHz over anything else, then 48, 32 or 44.1 kHz — previously a device without 16 kHz float was opened at its maximum rate, which can be 192 kHz.
+
+### Minor
+- Kokoro is given its `repo_id` explicitly, silencing "Defaulting repo_id" on every load; two harmless torch warnings raised inside Kokoro's model code are suppressed during load only.
+- `STT result: '…...'` no longer appends "..." to text that wasn't truncated.
+- Removed the dead `SttHandle.tts_active` field.
+
+### Not problems
+- **35 apps, down from 104.** Most likely duplicates: the old build had no de-duplication, and the same `.desktop` file appears under several XDG directories. Unconfirmed; `find … | xargs -n1 basename | sort -u | wc -l` settles it.
+- ALSA `/dev/dsp` messages are cpal probing the legacy OSS path; harmless.
 
 ---
 
