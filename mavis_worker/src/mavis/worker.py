@@ -276,7 +276,8 @@ class WorkerServer:
                     bypass_confidence=active_listen,
                 ),
             )
-            print(f"[worker] STT result: '{text[:80]}...'", flush=True)
+            shown = text if len(text) <= 80 else text[:80] + "..."
+            print(f"[worker] STT result: '{shown}'", flush=True)
             return _make_event(
                 {
                     "type": "response",
@@ -331,7 +332,7 @@ class WorkerServer:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             self.llm_executor,
-            self.engine.warm_up,
+            lambda: self.engine.warm_up(SYSTEM_PROMPT),
         )
         print("[worker] LLM warm-up complete", flush=True)
         return _make_event(
