@@ -495,6 +495,8 @@ async fn main() -> Result<()> {
         let bus_ctx = Arc::clone(&bus_for_poll);
         async move {
         let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(2));
+        // The user's last real window, used while the orb has focus.
+        let mut last_user_window: Option<WindowInfo> = None;
         loop {
             ticker.tick().await;
 
@@ -519,37 +521,57 @@ async fn main() -> Result<()> {
             };
 
             if let Some(tracker) = platform_ctx.windows() {
-                if let Ok(list) = tracker.open_windows() {
+                // The orb is a window too, and compositors happily report
+                // it as focused — the log showed MAVIS telling the model
+                // the user was "in unknown — MAVIS", and deriving the
+                // project from MAVIS's own working directory. Our own
+                // windows are removed, and while the orb has focus the
+                // user is taken to still be where they were before it.
+                let mut own_focused = false;
+                if let Ok(mut list) = tracker.open_windows() {
+                    own_focused = list.iter().any(|w| w.is_focused && is_own_window(w));
+                    list.retain(|w| !is_own_window(w));
                     // The focused entry already carries workspace + focus
                     // flags, so derive active_window from it rather than
                     // making a second compositor call.
                     if let Some(focused) = list.iter().find(|w| w.is_focused) {
                         snapshot.active_window = Some(focused.clone());
-                        snapshot.active_workspace = focused.workspace_id;
-                        if let Some(pid) = focused.pid {
-                            snapshot.project = tracker.current_project(pid);
-                        }
                     }
                     snapshot.open_windows = list;
                 }
 
                 // Fallback for compositors whose full-list path didn't
                 // report a focused window.
-                if snapshot.active_window.is_none() {
+                if snapshot.active_window.is_none() && !own_focused {
                     match tracker.active_window() {
                         Ok((app, title, pid)) => {
-                            snapshot.active_window = Some(WindowInfo {
+                            let w = WindowInfo {
                                 app_name: app,
                                 window_title: title,
                                 pid: Some(pid),
                                 workspace_id: None,
                                 is_focused: true,
-                            });
-                            snapshot.project = tracker.current_project(pid);
+                            };
+                            if is_own_window(&w) {
+                                own_focused = true;
+                            } else {
+                                snapshot.active_window = Some(w);
+                            }
                         }
                         Err(e) => {
                             log::debug!("Window tracking error: {}", e);
                         }
+                    }
+                }
+
+                if snapshot.active_window.is_none() && own_focused {
+                    snapshot.active_window = last_user_window.clone();
+                }
+                if let Some(w) = &snapshot.active_window {
+                    last_user_window = Some(w.clone());
+                    snapshot.active_workspace = w.workspace_id;
+                    if let Some(pid) = w.pid {
+                        snapshot.project = tracker.current_project(pid);
                     }
                 }
             }
@@ -763,4 +785,12 @@ async fn main() -> Result<()> {
 
     info!("MAVIS shutdown complete.");
     Ok(())
+}
+
+/// Is this one of MAVIS's own windows (the orb)? By pid where the
+/// compositor reports one; by title for backends that don't (minifb sets
+/// no app_id, so it shows up as "unknown" with the title "MAVIS").
+fn is_own_window(w: &WindowInfo) -> bool {
+    w.pid == Some(std::process::id())
+        || (w.window_title == "MAVIS" && (w.app_name.is_empty() || w.app_name == "unknown"))
 }
