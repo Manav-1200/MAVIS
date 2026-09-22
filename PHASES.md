@@ -255,7 +255,7 @@ Everything above communicates over the in-process event bus (`tokio::sync::broad
 - [x] **Decision:** `faster-whisper` (not whisper.cpp). CPU int8 to avoid VRAM contention.
 - [x] Audio capture via `cpal`. Energy-based VAD for speech segmentation.
 - [x] Explicit ALSA device selection (`sysdefault:CARD=Generic`) to avoid silent "default" route.
-- [x] `vad_filter=False` in faster-whisper — Rust VAD is single source of truth.
+- [x] `vad_filter=False` in faster-whisper — Rust VAD is single source of truth. *(Reversed 2026-09-22: Silero now gates what Whisper hears — see §6.4.)*
 - [x] `min_speech_duration_ms=500` to filter noise bursts.
 - [x] UDS protocol: `readexactly()` fix for partial socket reads on large audio payloads.
 - [x] STT request timeout with retries (model load can be slow).
@@ -360,7 +360,7 @@ Everything above communicates over the in-process event bus (`tokio::sync::broad
 ### 5.8 — Full E2E Verification (2026-09-02)
 Real bugs found through live voice testing on target hardware — not simulated, not assumed fixed from code review alone:
 - [x] **TTS echo feedback loop** — root cause and fix under 5.6.
-- [x] **Whisper hallucination on near-silence** — the model invents fluent filler ("thank you for watching", "I don't know what I'm talking about") with *high* confidence on quiet ambient noise, bypassing the confidence gate entirely. Added `HALLUCINATION_DENYLIST` in `stt/engine.py`, with whitespace/apostrophe normalization (segment-join artifacts and curly quotes were breaking exact-match comparisons on the first attempt).
+- [x] **Whisper hallucination on near-silence** — the model invents fluent filler ("thank you for watching", "I don't know what I'm talking about") with *high* confidence on quiet ambient noise, bypassing the confidence gate entirely. Added `HALLUCINATION_DENYLIST` in `stt/engine.py`, with whitespace/apostrophe normalization (segment-join artifacts and curly quotes were breaking exact-match comparisons on the first attempt). *(Replaced 2026-09-22 by speech detection — §6.4.)*
 - [x] **Low-confidence drops were a black box** — logging now includes the actual dropped text, not just the score, so borderline rejections are debuggable instead of silent.
 - [x] **"MAVIS" misheard as baby/movies/moose** — added `initial_prompt="MAVIS"` to bias the Whisper decoder toward the rare proper noun. Measurable improvement (4/6 correct in one test session), not a full fix — expected limitation of a quantized small model on an uncommon name.
 - [x] **Worker logs arriving late / out of order** — Python's stdout was block-buffered when piped (no `PYTHONUNBUFFERED`); prints without explicit `flush=True` queued for seconds before appearing, which had been actively misleading live debugging all session.
@@ -410,7 +410,7 @@ A run of VAD problems, each found and fixed against measured data rather than gu
 - **Single threshold couldn't serve both jobs.** High enough to avoid false starts meant cutting mid-sentence on quiet syllables. Replaced with hysteresis: start 0.075, end 0.06. The longest sub-0.06 dip measured inside real speech was 450 ms, which sets the floor for the silence wait.
 - **Audio-stream startup transient.** Opening the input stream emits a full-scale click (`max_energy=1.000`), shipped as a ~1.3 s "utterance" that Whisper turned into fluent invented sentences. Fixed with a 1.5 s settle window plus a minimum utterance length of 1.5 s.
 - **Silence wait 600 ms → 500 ms.** Dead time on every exchange. Floored by the 450 ms measurement above; going lower needs the end threshold raised first.
-- **Whisper hallucination on near-silence** — invents filler with *high* confidence, so the confidence gate can't catch it. Denylist of known phrases, with whitespace/apostrophe normalisation.
+- **Whisper hallucination on near-silence** — invents filler with *high* confidence, so the confidence gate can't catch it. Denylist of known phrases, with whitespace/apostrophe normalisation. *(Replaced 2026-09-22 by speech detection — §6.4.)*
 - **Confidence threshold 0.6 → 0.45.** Correct transcriptions were being silently dropped at 0.590 and 0.499.
 
 **Result (measured 2026-09-12, 12 exchanges):** 9 of 12 replies in 1–2 s from end of speech. 9 of 10 transcriptions accurate, "MAVIS" recognised correctly in five separate utterances. No speech detected during any TTS playback — the suspected echo leak did not reproduce, and the earlier "fire-and-forget playback" diagnosis was wrong: the executor does await `child.wait()`.
@@ -427,6 +427,18 @@ Found by running on GNOME rather than niri. Details in [`DECISIONS.md` §5](DECI
 - [x] **Failed commands no longer look successful** — `run_cmd` checks exit status and rejects empty output.
 - [x] **XDG application directories** — app discovery now searches `XDG_DATA_DIRS` and `XDG_DATA_HOME` in addition to the defaults, which picks up Nix, Snap and several distributions' layouts.
 - [x] **Graceful audio failure** — a missing or busy microphone used to abort the whole process. MAVIS now runs without voice input and says so.
+
+### 6.4 — Live-run fixes (2026-09-22)
+
+The first full run after the audit answered "hello MAVIS, can you hear me" in 60 s — to a sentence the user never said. Details in [`DECISIONS.md` §15](DECISIONS.md#15-the-2026-09-22-live-run).
+
+- [x] **VAD follows the room** — floor measured at startup, uncapped, kept between utterances, re-measured mid-utterance when the room gets louder; smoothed energy; tail trimmed; ceiling 45 s → 30 s. *Proven in simulation; not yet measured on hardware.*
+- [x] **Speech detection instead of phrase lists** — Silero VAD (bundled with faster-whisper) marks speech; Whisper hears only that, and isn't called at all without it. Hallucination denylists removed. Unpunctuated transcripts no longer vanish
+- [x] **LLM stops as soon as the reply is complete**; system prompt pre-evaluated during speech; per-reply timing logged
+- [x] Names recognised by sentence shape (explicit introduction, ends the clause, not a question, capitalised) — no word lists; names from older builds discarded once
+- [x] Orb excluded from active window and project detection
+- [x] Prompt history de-duplicated; clipboard only when asked
+- [x] Speech fallback chain fixed; integer-format microphones accepted
 
 ---
 
@@ -600,7 +612,7 @@ A full line-by-line audit, run against a clone of the repository. Every claimed 
 - [x] **Audio-thread deadlock** — a double `lock()` in the VAD, deadlocking under edition-2021 temporary lifetimes after any poisoning.
 - [x] **No new dependencies, no new language features** — nothing added to `Cargo.toml`.
 
-**Still open from the audit** — see [`DECISIONS.md` §14](DECISIONS.md#14-open-issues): the espeak fallback that can never run (also the one `cargo clippy` error), a 300 s first STT timeout with serial processing, I16-only microphones, `pw-play --device` (should be `--target`), the worker socket at `0666`, the worker's idle-unload race, and several pieces of dead code.
+**Still open from the audit** — see [`DECISIONS.md` §14](DECISIONS.md#14-open-issues): a 300 s first STT timeout with serial processing, `pw-play --device` (should be `--target`), the worker socket at `0666`, the worker's idle-unload race, and several pieces of dead code.
 
 ---
 
@@ -816,7 +828,7 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ### B. Definition of Done for Each Phase
 
-- [ ] All code passes `cargo check` / `cargo clippy` / `cargo test` *(as of 2026-09-21: check and test pass — 112 tests; **clippy fails** on one pre-existing error in `executor.rs`, and the pre-commit hook runs only `ruff`, so nothing enforces this)*
+- [ ] All code passes `cargo check` / `cargo clippy` / `cargo test` *(as of 2026-09-22: check, test and clippy pass — 123 tests, clippy with warnings only; the pre-commit hook still runs only `ruff`, so nothing enforces the Rust checks)*
 - [ ] Python code passes `ruff` pre-commit
 - [ ] Feature documented in `docs/phase-N.md`
 - [ ] E2E test script exists and passes
