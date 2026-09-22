@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import gc
 import logging
+import os
 import re
 import time
 
@@ -14,22 +15,35 @@ import numpy as np
 
 logger = logging.getLogger("mavis.stt")
 
-# Faster-whisper doesn't output silence as empty text — it hallucinates
-# plausible-sounding filler, often with HIGH confidence, since the model
-# is trained to always produce fluent speech. These are well-documented
-# recurring phrases from the whisper community, plus ones seen in testing.
-# Grows the same way NAME_DENYLIST does: add a phrase here when you catch
-# a new one, rather than trying to raise thresholds and losing sensitivity.
-HALLUCINATION_DENYLIST = {
-    "thank you for watching",
-    "thanks for watching",
-    "please subscribe to my channel",
-    "i don't know what i'm talking about",
-    "thank you",
-    "bye",
-    "bye bye",
-    "the end",
+# Speech detection — which parts of the audio are someone talking.
+#
+# Whisper always produces fluent text, even from a fan: that's where
+# "Thank you for watching, please subscribe..." came from. The earlier fix
+# was a list of phrases to delete, and every new hallucination would have
+# meant another entry, forever. Instead, Silero VAD — a small neural model
+# trained to tell speech from everything else — marks the speech, and
+# Whisper is given only that. No speech, no Whisper call, nothing to invent.
+#
+# Silero ships inside faster-whisper (with onnxruntime), so this adds no
+# dependency. Tested 2026-09-22 against 40 s each of white, pink, brown and
+# fan-like noise at three levels: zero seconds reported as speech in all
+# twelve, while a spoken phrase mixed into the same noise was found with
+# correct boundaries at every level where it was audible.
+#
+# min_silence 500 ms matches the Rust side's end-of-utterance pause, so a
+# pause inside a sentence doesn't split it; speech_pad 300 ms keeps word
+# onsets and endings Silero is conservative about.
+SPEECH_GATE_OPTIONS = {
+    "threshold": 0.5,
+    "min_speech_duration_ms": 250,
+    "min_silence_duration_ms": 500,
+    "speech_pad_ms": 300,
 }
+
+
+def _speech_gate_enabled() -> bool:
+    """MAVIS_SPEECH_GATE=0 turns the gate off — for diagnosing dropped speech only."""
+    return os.environ.get("MAVIS_SPEECH_GATE", "1").lower() not in ("0", "false", "off")
 
 
 class STTEngine:
@@ -138,34 +152,52 @@ class STTEngine:
         if audio.size == 0:
             return ""
 
-        # Trim trailing silence to prevent echo/repetition artifacts
-        audio = self._trim_trailing_silence(audio, sample_rate=sample_rate)
+        duration = audio.size / sample_rate
+        gate = _speech_gate_enabled()
+        if gate:
+            from faster_whisper.vad import VadOptions, get_speech_timestamps
 
-        # Diagnostics: log what the model actually receives
-        logger.info(
-            "STT input: samples=%d duration=%.2fs min=%.4f max=%.4f mean=%.4f",
-            audio.size,
-            audio.size / sample_rate,
-            float(audio.min()),
-            float(audio.max()),
-            float(audio.mean()),
-        )
+            speech = get_speech_timestamps(audio, VadOptions(**SPEECH_GATE_OPTIONS))
+            speech_s = sum(t["end"] - t["start"] for t in speech) / sample_rate
+            logger.info(
+                "STT input: %.2fs audio, %.2fs speech in %d region(s), peak=%.3f",
+                duration,
+                speech_s,
+                len(speech),
+                float(np.abs(audio).max()),
+            )
+            if not speech:
+                print(
+                    f"[stt] No speech in {duration:.2f}s of audio — not transcribing",
+                    flush=True,
+                )
+                return ""
+        else:
+            logger.info("STT input: %.2fs audio, speech gate OFF", duration)
 
         segments, info = self._model.transcribe(
             audio,
             beam_size=5,
             best_of=5,
-            patience=2.0,
+            # 2.0 → 1.0 (the standard setting). Patience widens the beam
+            # search beyond beam_size; doubling it roughly doubled decode
+            # time for no difference observed in the transcripts.
+            patience=1.0,
             temperature=0.0,
             language="en",
             condition_on_previous_text=False,
-            vad_filter=False,  # Rust VAD already segmented; don't double-filter
+            # Whisper sees only the speech regions (see SPEECH_GATE_OPTIONS).
+            # Was False since 2026-08-15, disabled for "empty transcripts" in
+            # the same session that fixed a dead microphone route and audio
+            # truncated over the socket — so it was most likely being fed
+            # no speech at all. Reversed 2026-09-22.
+            vad_filter=gate,
+            vad_parameters=SPEECH_GATE_OPTIONS if gate else None,
             # Bias the decoder toward the vocabulary actually used when
-            # talking to a desktop assistant. Whisper leans on its language
-            # model when the signal is weak, and without this it substitutes
-            # common near-homophones — observed: "clayboard" for clipboard,
-            # "Ladies" and "Clayport" for MAVIS. Listing the real words makes
-            # them likelier than the invented ones.
+            # talking to a desktop assistant. This is not a filter: it tells
+            # Whisper which rare words exist, so a weak signal resolves to
+            # "clipboard" rather than "clayboard", and "MAVIS" rather than
+            # "Ladies" or "Clayport".
             initial_prompt=(
                 "MAVIS. clipboard, workspace, terminal, window, desktop "
                 "environment, application, browser, Firefox, Brave, GNOME, "
@@ -179,6 +211,23 @@ class STTEngine:
         segment_confidences = []
         raw_parts = []
         for seg in segments:
+            # Whisper's own verdict on a segment: likely no speech and not
+            # confidently decoded, or suspiciously repetitive. The standard
+            # thresholds from openai/whisper's transcribe(). This drops a
+            # hallucinated segment on its own instead of relying on the
+            # average over the whole utterance.
+            no_speech = getattr(seg, "no_speech_prob", 0.0)
+            logprob = getattr(seg, "avg_logprob", 0.0)
+            compression = getattr(seg, "compression_ratio", 1.0)
+            if (no_speech > 0.6 and logprob < -1.0) or compression > 2.4:
+                logger.info(
+                    "STT: dropping segment (no_speech=%.2f logprob=%.2f compression=%.2f): %s",
+                    no_speech,
+                    logprob,
+                    compression,
+                    seg.text[:80],
+                )
+                continue
             raw_parts.append(seg.text)
             # avg_logprob is (-inf, 0]. Map to [0, 1] via exp.
             conf = float(np.exp(seg.avg_logprob)) if hasattr(seg, "avg_logprob") else 1.0
@@ -188,15 +237,7 @@ class STTEngine:
 
         raw_text = " ".join(raw_parts).strip()
         text = self._deduplicate_repetition(raw_text)
-
-        # Hallucination denylist: known filler phrases the model produces on
-        # silence/near-silence, regardless of how confident it claims to be.
-        # Segment joins can leave double spaces, and the model sometimes uses
-        # curly apostrophes — normalize both before comparing.
-        normalized = re.sub(r"\s+", " ", text.strip().lower()).replace("\u2019", "'")
-        if normalized.rstrip(".!?") in HALLUCINATION_DENYLIST:
-            logger.info("STT: hallucination denylist match, dropping: %s", text[:80])
-            print(f"[stt] Hallucination denylist match, dropping: '{text[:80]}'", flush=True)
+        if not text:
             return ""
 
         # Confidence gate: drop ambient noise / hallucinations
@@ -225,35 +266,6 @@ class STTEngine:
             text[:120],
         )
         return text
-
-    @staticmethod
-    def _trim_trailing_silence(
-        audio: np.ndarray,
-        sample_rate: int = 16000,
-        threshold: float = 0.01,
-        padding_ms: int = 50,
-    ) -> np.ndarray:
-        """Trim trailing silence from normalized float32 audio."""
-        if audio.size == 0:
-            return audio
-
-        above_threshold = np.abs(audio) > threshold
-        if not np.any(above_threshold):
-            return audio
-
-        last_speech_idx = int(np.where(above_threshold)[0][-1])
-        padding_samples = int(sample_rate * padding_ms / 1000)
-        end_idx = min(last_speech_idx + padding_samples, audio.size)
-        trimmed = audio[:end_idx]
-
-        logger.debug(
-            "Trimmed trailing silence: %d -> %d samples (%.2f s -> %.2f s)",
-            audio.size,
-            trimmed.size,
-            audio.size / sample_rate,
-            trimmed.size / sample_rate,
-        )
-        return trimmed
 
     @staticmethod
     def _deduplicate_repetition(text: str) -> str:
@@ -311,14 +323,19 @@ class STTEngine:
         output = []
         prev_phrase = None
 
-        for i in range(0, len(parts) - 1, 2):
+        # Step through (sentence, punctuation) pairs. The range runs to
+        # len(parts), not len(parts) - 1: re.split leaves any text after the
+        # last punctuation mark as a final unpaired element, and stopping
+        # early threw it away — an unpunctuated transcript came back empty,
+        # and "Hi. open firefox" lost its command.
+        for i in range(0, len(parts), 2):
             phrase = parts[i].strip()
             punct = parts[i + 1] if i + 1 < len(parts) else ""
             if not phrase:
                 continue
             if phrase.lower() == prev_phrase:
                 continue
-            output.append(phrase + punct)
+            output.append((phrase + punct).strip())
             prev_phrase = phrase.lower()
 
         return " ".join(output)
