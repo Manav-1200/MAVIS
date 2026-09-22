@@ -1,6 +1,7 @@
 import gc
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -87,9 +88,34 @@ class LlamaEngine:
     def is_loaded(self) -> bool:
         return self._llm is not None
 
-    def warm_up(self):
-        """Eagerly load model weights so the next chat request is fast."""
+    def warm_up(self, system_prompt: str | None = None):
+        """
+        Eagerly load model weights so the next chat request is fast.
+
+        With a system prompt, also evaluate it now. Warm-up is requested the
+        moment the user starts speaking, so this runs while they talk; every
+        prompt starts with the same system block, and llama.cpp reuses an
+        evaluated prefix instead of recomputing it. Best effort — a failure
+        here only means the chat request does the work itself.
+        """
         self.load_model()
+        if not system_prompt:
+            return
+        prefix = self._format_chat_prompt([{"role": "system", "content": system_prompt}])
+        if prefix is None:
+            return
+        # Drop the trailing "<|assistant|>" opener the formatter appends:
+        # the real prompt continues with working memory there instead.
+        prefix = prefix.rsplit("<|assistant|>", 1)[0]
+        try:
+            started = time.perf_counter()
+            self._llm.create_completion(prompt=prefix, max_tokens=1, temperature=0.0)
+            print(
+                f"[engine] System prompt prefilled in {time.perf_counter() - started:.2f}s",
+                flush=True,
+            )
+        except (RuntimeError, ValueError) as e:
+            print(f"[engine] Prefill skipped: {e}", flush=True)
 
     def get_memory_usage(self) -> dict[str, float]:
         if not self.is_loaded:
@@ -173,6 +199,9 @@ class LlamaEngine:
             if stop in text:
                 text = text[: text.index(stop)]
 
+        # A leading newline used to make the "first line" below empty.
+        text = text.lstrip()
+
         # 2. Split on structural separators and keep only the first segment
         for sep in ["===", "---", "***", "___", "\n\n", "\n"]:
             if sep in text:
@@ -198,7 +227,7 @@ class LlamaEngine:
             match = re.search(r".{1,180}[.!?]", text)
             text = match.group(0) if match else text[:180]
 
-        return text.strip()
+        return text.strip() or "I'm here."
 
     def generate(
         self,
@@ -215,6 +244,52 @@ class LlamaEngine:
             stop=stop or [],
         )
 
+    @staticmethod
+    def _reply_complete(text: str) -> bool:
+        """
+        True once generation has produced everything _post_process keeps.
+
+        _post_process keeps the first line, at most two sentences and at
+        most 180 characters. Everything generated past that point was
+        thrown away — with max_tokens=256 that was most of an 11-second
+        wait in the 2026-09-22 log. Stopping here gives the same reply,
+        sooner. Mirrors _post_process's own rules, so it never stops before
+        something that would have been kept.
+        """
+        t = text.lstrip()
+        if not t:
+            return False
+        if "\n" in t:
+            return True
+        if any(sep in t for sep in ("===", "---", "***", "___")):
+            return True
+        if len(t) > 200:
+            return True
+        # A sentence boundary is punctuation followed by whitespace — the
+        # same rule _post_process splits on, so "3.5" or a trailing "." at
+        # the very end (not yet followed by anything) don't count.
+        return len(re.findall(r"[.!?]+[\"')\]]*\s", t)) >= 2
+
+    def _stream(self, chunks, get_text) -> tuple[str, str, int, float | None]:
+        """Consume a streaming completion, stopping as soon as the reply is complete."""
+        started = time.perf_counter()
+        first_token_at: float | None = None
+        text = ""
+        finish_reason = ""
+        tokens = 0
+        for chunk in chunks:
+            choice = chunk.get("choices", [{}])[0]
+            piece = get_text(choice) or ""
+            if piece and first_token_at is None:
+                first_token_at = time.perf_counter() - started
+            text += piece
+            tokens += 1
+            finish_reason = choice.get("finish_reason") or finish_reason
+            if self._reply_complete(text):
+                finish_reason = "complete"
+                break
+        return text, finish_reason, tokens, first_token_at
+
     def chat(
         self,
         messages: list[dict[str, str]],
@@ -222,27 +297,41 @@ class LlamaEngine:
         temperature: float = 0.7,
     ) -> dict[str, Any]:
         self.load_model()
+        started = time.perf_counter()
 
         manual_prompt = self._format_chat_prompt(messages)
         if manual_prompt is not None:
             print(f"[engine] Prompt ({self._model_name_hint}):\n{manual_prompt}\n")
-            result = self._llm(
+            chunks = self._llm(
                 prompt=manual_prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
                 stop=self._get_stop_tokens(),
+                stream=True,
             )
-            raw_text = result.get("choices", [{}])[0].get("text", "")
-            finish_reason = result.get("choices", [{}])[0].get("finish_reason", "")
+            raw_text, finish_reason, tokens, ttft = self._stream(
+                chunks, lambda c: c.get("text", "")
+            )
         else:
             # Native path — llama.cpp uses the GGUF's own chat template.
-            result = self._llm.create_chat_completion(
+            chunks = self._llm.create_chat_completion(
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                stream=True,
             )
-            raw_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-            finish_reason = result.get("choices", [{}])[0].get("finish_reason", "")
+            raw_text, finish_reason, tokens, ttft = self._stream(
+                chunks, lambda c: c.get("delta", {}).get("content", "")
+            )
+
+        elapsed = time.perf_counter() - started
+        # The one number that says where a slow reply went: time to first
+        # token is prompt processing, the rest is generation.
+        print(
+            f"[engine] Reply: {tokens} tokens in {elapsed:.2f}s "
+            f"(first token {ttft if ttft is not None else elapsed:.2f}s, finish={finish_reason})",
+            flush=True,
+        )
 
         # Fix: this used to only run for tinyllama/phi3 (manual_prompt branch),
         # so llama3/unknown models skipped style cleanup entirely.
@@ -255,5 +344,5 @@ class LlamaEngine:
                     "finish_reason": finish_reason,
                 }
             ],
-            "usage": result.get("usage", {}),
+            "usage": {"completion_tokens": tokens, "elapsed_s": round(elapsed, 3)},
         }
