@@ -35,7 +35,13 @@ impl MemoryManager {
         let working = if working_file.exists() {
             match std::fs::read_to_string(&working_file) {
                 Ok(json) => match WorkingMemory::from_json(&json) {
-                    Ok(wm) => {
+                    Ok(mut wm) => {
+                        if let Some(bad) = wm.sanitize() {
+                            log::warn!(
+                                "Memory: discarded stored user name {:?} — learned by an older build's rules; say \"my name is …\" again",
+                                bad
+                            );
+                        }
                         info!(
                             "Memory: restored working memory from snapshot ({} events, user={:?})",
                             wm.events.len(),
