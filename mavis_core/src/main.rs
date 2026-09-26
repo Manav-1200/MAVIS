@@ -39,6 +39,11 @@ const WORKER_SOCKET: &str = "/tmp/mavis_worker.sock";
 
 use util::supervise;
 
+/// Below this, a transcript is treated as "didn't catch that" rather than
+/// acted on. The worker's own floor (0.45) drops the hopeless ones; this
+/// covers the band above it, where Whisper returns fluent-but-wrong text.
+const UNCLEAR_CONFIDENCE: f32 = 0.55;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     env_logger::init();
@@ -351,7 +356,7 @@ async fn main() -> Result<()> {
             let req_str = request.to_string();
             let req_bytes = req_str.as_bytes();
 
-            let mut response_text: Option<String> = None;
+            let mut response_text: Option<(String, f32)> = None;
             for attempt in 1..=5 {
                 let attempt_timeout = if attempt == 1 {
                     Duration::from_secs(300)
@@ -374,13 +379,20 @@ async fn main() -> Result<()> {
 
                     let resp_str = String::from_utf8_lossy(&resp_buf);
                     if let Ok(resp_json) = serde_json::from_str::<serde_json::Value>(&resp_str) {
-                        if let Some(text) = resp_json
+                        if let Some(result) = resp_json
                             .get("payload")
                             .and_then(|p| p.get("result"))
-                            .and_then(|r| r.get("text"))
-                            .and_then(|t| t.as_str())
                         {
-                            return Ok::<_, std::io::Error>(Some(text.to_string()));
+                            if let Some(text) = result.get("text").and_then(|t| t.as_str()) {
+                                let confidence = result
+                                    .get("confidence")
+                                    .and_then(|c| c.as_f64())
+                                    .unwrap_or(1.0) as f32;
+                                return Ok::<_, std::io::Error>(Some((
+                                    text.to_string(),
+                                    confidence,
+                                )));
+                            }
                         }
                     }
                     Ok(None)
@@ -406,9 +418,37 @@ async fn main() -> Result<()> {
                 }
             }
 
-            if let Some(text) = response_text {
-                if !text.is_empty() {
-                    info!("STT transcription: {}", text);
+            if let Some((text, confidence)) = response_text {
+                if text.is_empty() {
+                    info!("STT: empty transcription (silence or no speech)");
+                    let _ = bus_for_stt.publish(Event {
+                        id: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now(),
+                        source: "stt".to_string(),
+                        event_type: EventType::UiStateChange,
+                        payload: serde_json::json!({ "state": "idle" }),
+                    });
+                } else if confidence < UNCLEAR_CONFIDENCE {
+                    // Heard something, but not well enough to act on it.
+                    // Answering a mangled transcript is worse than saying
+                    // so: in the 2026-09-26 run "I'm working on it right
+                    // now, where it is" — a misheard question — got a
+                    // confident answer to something never asked.
+                    info!(
+                        "STT: unclear (confidence {:.2} < {:.2}): {}",
+                        confidence, UNCLEAR_CONFIDENCE, text
+                    );
+                    bus_for_stt.publish(Event {
+                        id: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now(),
+                        source: "stt".to_string(),
+                        event_type: EventType::PlanReady,
+                        payload: serde_json::json!({
+                            "plan": {"type": "say", "text": "Sorry, I didn't catch that."}
+                        }),
+                    });
+                } else {
+                    info!("STT transcription: {} (confidence {:.2})", text, confidence);
                     let event = Event {
                         id: uuid::Uuid::new_v4(),
                         timestamp: chrono::Utc::now(),
@@ -420,15 +460,6 @@ async fn main() -> Result<()> {
                         }),
                     };
                     let _ = bus_for_stt.publish(event);
-                } else {
-                    info!("STT: empty transcription (silence or no speech)");
-                    let _ = bus_for_stt.publish(Event {
-                        id: uuid::Uuid::new_v4(),
-                        timestamp: chrono::Utc::now(),
-                        source: "stt".to_string(),
-                        event_type: EventType::UiStateChange,
-                        payload: serde_json::json!({ "state": "idle" }),
-                    });
                 }
             } else {
                 warn!("STT: failed to get transcription after retries");
