@@ -13,6 +13,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 192 commits since `v0.3.0-ai-worker`, covering Phases 4 through 8.5.
 
 ### Added
+- **Barge-in** — talk over MAVIS and it stops speaking immediately; say "stop" and it goes quiet without answering. It listens while it talks, against a threshold set above its own voice. `MAVIS_BARGE_IN=0` turns it off.
+- **"Sorry, I didn't catch that"** when a transcript is too unreliable to act on, instead of answering a misheard question.
 - **System Sentinel** (Phase 8.5, opt-in via `MAVIS_SENTINEL=1`) — reads the pacman, dpkg or dnf transaction log and notices packages you didn't ask for, removals and downgrades. First run imports history silently; one sentence per update; routine upgrades never mentioned. Detects and records; speaking is not yet wired up.
 - **Permission gate** (Phase 8) — every plan is scored 0–10 and recorded before the executor sees it. Silent below 3, "Shall I?" from 3, "yes, administrator" from 8, irreversible commands refused.
 - **Append-only audit log** — `audit.db`, with no update or delete path.
@@ -25,6 +27,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **MAVIS said "Opening Firefox" without opening anything** — commands were only recognised at the start of a sentence, a comma after the wake word blocked them, and an app didn't match unless every spoken word was in its name. The model is also now told it cannot act, so it stops narrating actions.
+- **Repeating its own last reply** on short or garbled input — less history in the prompt, and known facts now sit last where they outrank the conversation.
+- **Real speech dropped** as "too short" (minimum 1.5 s → 0.8 s) or as room noise; the noise floor no longer drifts upward on word onsets and echo.
+- **Questions stored as memories**, which fed the user's old questions back into every prompt.
+- **The worker's own logs never appeared** — logging was configured but never switched on.
+- Kokoro contacted Hugging Face on every start even with the model cached.
 - **60-second replies** (found in the 2026-09-22 live run) — three causes, all fixed:
   - *Listening never ended in a noisy room.* The VAD's thresholds couldn't rise above fixed values, so fan noise held utterances open to the 45 s ceiling. The noise floor is now measured at startup, follows the room, survives between utterances, and is re-measured mid-utterance if the room gets louder; trailing noise is trimmed. Ceiling 45 s → 30 s.
   - *Whisper invented "Thank you for watching, please subscribe…"* after real speech. Silero VAD, already bundled with faster-whisper, now marks which audio is speech; Whisper hears only that and isn't called at all without it. The hallucination phrase lists are gone.
