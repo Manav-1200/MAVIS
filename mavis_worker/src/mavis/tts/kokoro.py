@@ -4,8 +4,10 @@
 
 import base64
 import io
+import os
 import time
 import warnings
+from pathlib import Path
 
 import numpy as np
 import soundfile as sf
@@ -18,9 +20,30 @@ class KokoroEngine:
         self._pipeline = None
         self._lang_code = "a"  # American English
 
+    @staticmethod
+    def _prefer_local_weights() -> None:
+        """
+        Don't touch the network when the model is already downloaded.
+
+        Kokoro asks Hugging Face about its weights on every load — visible
+        as "unauthenticated requests to the HF Hub" in each run's log. For
+        a local-first assistant that's a startup that fails when offline,
+        for a model already sitting on disk.
+        """
+        if os.environ.get("HF_HUB_OFFLINE") is not None:
+            return
+        cache = (
+            Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface"))
+            / "hub"
+            / "models--hexgrad--Kokoro-82M"
+        )
+        if cache.exists():
+            os.environ["HF_HUB_OFFLINE"] = "1"
+
     def _load(self) -> None:
         if self._pipeline is not None:
             return
+        self._prefer_local_weights()
         try:
             # Loading kokoro prints spaCy download chatter, and building the
             # pipeline trips two harmless torch warnings (LSTM dropout with
