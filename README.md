@@ -134,6 +134,12 @@ An utterance that starts with an explicit action is never treated as system cont
 
 `shell` execution exists in the executor and is scored by the permission gate, but it is **deliberately unreachable from voice**.
 
+### Interrupting
+
+MAVIS listens while it speaks. Start talking and it stops mid-sentence, then answers what you just said. Say "stop", "quiet" or "cancel" and it simply goes quiet.
+
+It measures how loud its own voice arrives at your microphone and only treats you as speaking when you're clearly louder, so it doesn't interrupt itself. The first three-quarters of a second of a reply can't be interrupted — that's the part it spends measuring. With speakers at high volume it may take raising your voice; headphones make it immediate. `MAVIS_BARGE_IN=0` goes back to a muted microphone while it speaks.
+
 ### Permissions
 
 Every plan is scored for risk before anything runs:
@@ -208,6 +214,7 @@ Current date and time is always injected — it isn't private, and without it th
 | `MAVIS_ORB_POS` | — | `x,y` start position. Honoured on X11/XWayland; native Wayland ignores it |
 | `MAVIS_VAD_DEBUG` | off | Logs microphone level and the current start/end thresholds, every ~3 s |
 | `MAVIS_SPEECH_GATE` | on | `0` sends audio to Whisper even when no speech was detected in it — for diagnosing dropped speech only; it lets hallucinations back in |
+| `MAVIS_BARGE_IN` | on | `0` mutes the microphone while MAVIS speaks, so it can't be interrupted by voice |
 
 ## Troubleshooting
 
