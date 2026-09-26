@@ -34,6 +34,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 13. [Mistakes and retractions](#13-mistakes-and-retractions)
 14. [Open issues](#14-open-issues)
 15. [The 2026-09-22 live run](#15-the-2026-09-22-live-run)
+16. [The 2026-09-26 live run and barge-in](#16-the-2026-09-26-live-run-and-barge-in)
 
 ---
 
@@ -76,6 +77,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-20 | — | Full code audit; three UTF-8 panics, a deadlock and a poison cascade fixed; subsystem supervision |
 | 09-20 → 09-21 | 8.5 | System Sentinel: package change detection |
 | 09-22 | — | First live run after the audit: 60 s replies traced to the VAD, Whisper and the LLM; all three fixed (§15) |
+| 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 
 ---
 
@@ -791,6 +793,59 @@ Names stored by older builds carry no marker that they were learned this way, so
 ### Not problems
 - **35 apps, down from 104.** Most likely duplicates: the old build had no de-duplication, and the same `.desktop` file appears under several XDG directories. Unconfirmed; `find … | xargs -n1 basename | sort -u | wc -l` settles it.
 - ALSA `/dev/dsp` messages are cpal probing the legacy OSS path; harmless.
+
+---
+
+## 16. The 2026-09-26 live run and barge-in
+
+23 exchanges, two runs with a restart between them. The §15 fixes held: **2 s median** from the end of speech to MAVIS talking (was 60 s), replies of 8 tokens in 0.66 s median, listening ending 0.5–1 s after the user stopped every time, and **not one hallucinated sentence**. What the run exposed instead was that MAVIS had been *describing* actions it never performed.
+
+### Problem · "Opening Firefox" — five times, nothing opened
+**Symptom:** No `[app]` action appears anywhere in the log. Every "Opening Firefox." was the language model talking, including twice when the user hadn't asked for anything of the kind.
+**Three causes, all in `match_action_intent`:**
+1. The verb had to be the first word, so "Let's open Firefox" fell through to the model.
+2. Addressing MAVIS left a comma behind: "MAVIS, open Firefox browser" became ", open firefox browser", and no prefix matched.
+3. `find_app` required every spoken word to appear in the app's name, so "firefox browser" didn't match Firefox.
+**Fix:** The verb may appear anywhere, *provided what follows names something real* — a URL or an installed app. That evidence is what keeps "how do I open a file" out. Punctuation is trimmed at both ends after the wake word. `find_app` gained a last rule: an app whose name appears in what was said, longest match first, so "visual studio code" beats "code".
+**And the deeper one:** nothing told the model it can't act. Rule 14 now says so plainly — it cannot open apps or control the machine, and should say so rather than narrate. The planner's own "Opening Firefox." is unaffected: that is only spoken when the app actually launches.
+
+### Problem · The model repeated its own last reply
+**Symptom:** Three times, a short or garbled utterance was answered with the previous reply word for word — including reading the clipboard out unprompted, and "Your name is Mavis" with "The user's name is Manav." sitting sixteen lines above it in the same prompt.
+**Cause:** Fifteen events of history — about seven exchanges — and the facts placed far from the question. A 3.8B model copies the nearest plausible answer.
+**Fix:** History cut to the last three exchanges. The profile facts moved to the *end* of the system prompt, under a heading that says they are current and outrank the conversation (rules 15 and 16 say the same in words).
+
+### Decision · Say "I didn't catch that" instead of answering a guess
+**Why:** "I'm working on it right now, where it is" was a misheard question, and MAVIS answered it confidently. The worker already computes each transcript's confidence but was throwing it away.
+**Decision:** Confidence travels with the text. Below 0.55 — above the worker's own 0.45 floor, where Whisper returns fluent nonsense — MAVIS says it didn't catch it rather than answering.
+
+### Decision · Barge-in: listen while speaking, stop when spoken to
+**Context:** The microphone was muted outright while MAVIS talked, so the interruption machinery built in Phase 5 (kill playback, drain the queue) could never fire from voice: the only path to it was a `UserIntent` that could not be produced. "Always present, never intrusive" fails if you can't stop it talking.
+**Decision:** Keep analysing audio during playback, against a threshold raised above MAVIS's own voice. `echo_level` tracks how loud playback arrives in the microphone, rising fast and falling slowly; it takes **1.4×** that to count as someone speaking, confirmed in 150 ms rather than the usual 250. The first 750 ms of a reply is spent measuring the echo and can't be interrupted. On trigger, `stt.rs` publishes `TtsInterrupt` immediately — before transcription, because an interruption that lands two seconds later isn't one — and the rest of the sentence is captured as an ordinary utterance.
+**"Stop" itself:** recognised in the planner as a request for silence, not a question, so the model never gets a turn to answer it. Narrow by construction: at most four words, and one of them has to be the point of the sentence.
+**Evidence:** Simulated against MAVIS's own voice at four loudness levels: no self-interruption at any of them, and a voice twice as loud as the echo broke through at all four. 1.5× did not, and 2.0× as a ratio failed entirely — smoothing keeps a syllable from ever reaching its full height between gaps. **Not yet tried on real speakers**, where the echo depends on volume and mic placement; `MAVIS_BARGE_IN=0` restores the old behaviour.
+**Known limit:** the last fraction of a second of MAVIS's own voice is inside the captured audio. The speech detector and the tail trim remove most of it; headphones remove all of it.
+
+### Problem · Real speech thrown away
+- **Four utterances dropped as "too short"** (1.0–1.4 s), including one-word replies. The 1.5 s minimum existed because Whisper invents words from clicks — the worker's speech detector now does that job, so it's down to 0.8 s.
+- **One dropped as "it was the room"** when the floor had drifted to 0.22. That test now only drops audio that never reached the *end* threshold; anything above goes to the worker, which is better at this than an energy comparison.
+- **The floor drifted because it learned from the wrong frames.** It updated on every frame not yet confirmed as speech, so a word's onset and post-playback echo pushed it up. It now only learns from frames clearly below the speech threshold.
+
+### Decision · A question is not a memory
+**Why:** Recall kept feeding the user's own past questions back into the prompt ("[recalled] Earlier, user said: What is my name, Mavis?"). That is noise, and it competes with the answer. Questions now score below the storage threshold. Statements, stated facts and preferences are unaffected.
+
+### Problem · The worker's logs never existed
+`setup_logging()` was defined and never called, so every `logger.info` in the Python worker went nowhere — the root logger defaults to WARNING with no handler. Only `print()` reached the Rust log. Every STT diagnostic added on 09-22 was invisible during the 09-26 run: speech found, segments dropped, confidence, all of it. Called now, in `main()`.
+
+### Not a bug · No shutdown lines after Ctrl+C
+The log ends at `^C` with none of the shutdown messages. Ctrl+C goes to every process in the foreground group, so `tee` dies first and the rest of the output has nowhere to go. Redirect instead of piping (`> ~/mavis-test.log 2>&1`) to see the shutdown sequence.
+
+### Minor
+- Kokoro asked Hugging Face about its weights on every load. When the model is already in the cache, `HF_HUB_OFFLINE` is now set before the import, so a local-first assistant starts without the network.
+- The two `/dev/dsp` ALSA errors are cpal probing the legacy OSS device. Harmless.
+
+### Still open after this run
+- **Transcription quality is now the weak link**: "Hello Robus", "I'm in blinding, watch yours". The measured room level was 0.16–0.18 with speech frames peaking at 0.75, which means the input is almost certainly clipping. The mic gain was raised to 0.6 back when thresholds were fixed numbers (§4); they follow the room now, so a lower gain costs nothing and gives Whisper cleaner audio.
+- MAVIS captures from `sysdefault:CARD=Generic` rather than PipeWire, bypassing whatever processing is configured there. Changing it needs the `pw-play --device`/`--target` bug fixed first, or playback breaks.
 
 ---
 
