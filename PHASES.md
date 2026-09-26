@@ -440,6 +440,19 @@ The first full run after the audit answered "hello MAVIS, can you hear me" in 60
 - [x] Prompt history de-duplicated; clipboard only when asked
 - [x] Speech fallback chain fixed; integer-format microphones accepted
 
+### 6.5 — Barge-in and action reliability (2026-09-26)
+
+Second live run: 2 s median replies, no hallucinations — and five "Opening Firefox" replies with nothing opened. Details in [`DECISIONS.md` §16](DECISIONS.md#16-the-2026-09-26-live-run-and-barge-in).
+
+- [x] **Barge-in** — MAVIS listens while it speaks and stops the moment you talk over it; "stop" is understood as a request for silence, not a question. `MAVIS_BARGE_IN=0` restores mute-while-speaking. *Simulated only; not yet tried on real speakers.*
+- [x] **Actions actually run** — the verb may appear anywhere provided an installed app or URL follows; punctuation after the wake word no longer blocks matching; an app matches when its name appears in what was said
+- [x] **The model no longer narrates actions it cannot perform** (rule 14), no longer repeats its last reply (rule 15), and the known facts sit last in the prompt where they outrank the conversation (rule 16)
+- [x] **"Sorry, I didn't catch that"** below 0.55 transcription confidence, instead of answering a misheard question
+- [x] Minimum utterance 1.5 s → 0.8 s; the "it was the room" drop relaxed; the noise floor only learns from frames that clearly aren't speech
+- [x] Questions are no longer stored as memories
+- [x] The Python worker's logging was never switched on — `setup_logging()` is now called
+- [x] Kokoro starts from its local cache instead of asking Hugging Face
+
 ---
 
 ## Phase 6.5 — Action Execution
