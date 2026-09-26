@@ -203,10 +203,26 @@ fn find_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
     }
     // Every spoken word appears in the name — "notepad" finds "DMS Notepad".
     let words: Vec<&str> = s.split_whitespace().collect();
-    apps.iter().find(|a| {
+    if let Some(a) = apps.iter().find(|a| {
         let n = normalize(&a.name);
         words.iter().all(|w| n.contains(w))
-    })
+    }) {
+        return Some(a);
+    }
+
+    // The app's name appears in what was said — "open firefox browser"
+    // finds Firefox, "open the code editor" doesn't find anything unless
+    // an app is actually called that. People add words the launcher entry
+    // doesn't have ("browser", "please", "for me"), and the previous rules
+    // all required the opposite: that every spoken word be in the name.
+    // The longest match wins, so "visual studio code" beats "code".
+    let padded = format!(" {} ", s);
+    apps.iter()
+        .filter(|a| {
+            let n = normalize(&a.name);
+            !n.is_empty() && n.len() >= 3 && padded.contains(&format!(" {} ", n))
+        })
+        .max_by_key(|a| normalize(&a.name).len())
 }
 
 /// Percent-encode a search query. Hand-rolled to avoid pulling in a URL
@@ -348,13 +364,56 @@ fn match_system_intent(text: &str) -> Option<serde_json::Value> {
     })
 }
 
+/// Byte offset of `verb` where it starts a word, or None.
+fn find_verb(text: &str, verb: &str) -> Option<usize> {
+    let mut from = 0;
+    while let Some(rel) = text[from..].find(verb) {
+        let at = from + rel;
+        let starts_word = at == 0
+            || text[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| !c.is_alphanumeric());
+        if starts_word {
+            return Some(at);
+        }
+        from = at + verb.len();
+    }
+    None
+}
+
+/// "Stop", "quiet", "cancel" — spoken while MAVIS is talking, this is not
+/// a request for an answer, it's a request for silence. Recognised here so
+/// the model never gets a turn to reply to it; the interruption itself has
+/// already happened in `stt.rs` the moment the user started speaking.
+/// Deliberately narrow: it must be a short utterance whose whole point is
+/// stopping, not a sentence that happens to contain the word.
+fn is_stop_request(text: &str) -> bool {
+    let t = normalize(text);
+    let words: Vec<&str> = t.split_whitespace().collect();
+    if words.is_empty() || words.len() > 4 {
+        return false;
+    }
+    words
+        .iter()
+        .any(|w| matches!(*w, "stop" | "quiet" | "cancel" | "enough" | "shush" | "nevermind"))
+        || t == "never mind"
+        || t == "shut up"
+        || t == "be quiet"
+}
+
 /// Returns a plan (say + action) when the utterance is a clear command.
 /// None means "not a command" — the utterance goes to the LLM as normal.
 fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Value> {
     let lower = text.to_lowercase();
+    // Trim punctuation at both ends: addressing MAVIS leaves a comma
+    // behind — "MAVIS, open firefox browser" became ", open firefox
+    // browser", and the leading comma stopped every prefix from matching,
+    // so the request went to the model, which announced an action nothing
+    // had performed.
     let t = strip_address(&lower)
         .trim()
-        .trim_end_matches(|c: char| c.is_ascii_punctuation())
+        .trim_matches(|c: char| c.is_ascii_punctuation())
         .trim();
 
     if let Some(plan) = match_system_intent(text) {
@@ -386,8 +445,17 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
     }
 
     // "open / launch / start / run <app or url>"
-    for prefix in ["open ", "launch ", "start ", "run "] {
-        if let Some(rest) = t.strip_prefix(prefix) {
+    //
+    // The verb no longer has to be the first word. "Let's open Firefox"
+    // and "maybe open firefox" went to the model before, which then said
+    // "Opening Firefox." without anything opening. What keeps this safe is
+    // the evidence required after the verb: a URL, or an app that is
+    // actually installed. "How do I open a file" names neither, so it
+    // still goes to the model.
+    for verb in ["open ", "launch ", "start ", "run "] {
+        let Some(at) = find_verb(t, verb) else { continue };
+        let rest = &t[at + verb.len()..];
+        {
             let target = rest.trim();
             if target.is_empty() {
                 continue;
@@ -406,9 +474,10 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
                     {"type": "app", "target": bin, "args": args},
                 ]));
             }
-            // Unknown app — don't guess at a binary that probably doesn't
-            // exist. Fall through and let the LLM respond instead.
-            return None;
+            // Nothing installed by that name — don't guess at a binary
+            // that probably doesn't exist. Try the next verb, then let the
+            // model answer.
+            continue;
         }
     }
 
@@ -569,6 +638,28 @@ impl Planner {
         } else {
             intent.to_string()
         };
+
+        // "Stop" is a request for silence, not for an answer. Playback
+        // was already killed when the user started speaking; all that's
+        // left is to drain anything queued behind it and say nothing.
+        if is_stop_request(intent) {
+            info!("Planner: stop request — going quiet");
+            self.bus.publish(Event {
+                id: uuid::Uuid::new_v4(),
+                timestamp: chrono::Utc::now(),
+                source: "planner".to_string(),
+                event_type: EventType::TtsInterrupt,
+                payload: serde_json::json!({ "reason": "user_asked" }),
+            });
+            self.bus.publish(Event {
+                id: uuid::Uuid::new_v4(),
+                timestamp: chrono::Utc::now(),
+                source: "planner".to_string(),
+                event_type: EventType::UiStateChange,
+                payload: serde_json::json!({ "state": "idle" }),
+            });
+            return Ok(());
+        }
 
         // Deterministic deflection — no LLM round trip, no way to leak.
         if is_meta_instruction_question(intent) {
@@ -899,9 +990,15 @@ impl Planner {
             }
         }
 
-        // Conversation so far. Between two user turns MAVIS generates ~7
-        // internal events, so a window of 5 dropped the prior turn; 15
-        // keeps it.
+        // Conversation so far — the last three exchanges.
+        //
+        // It was fifteen events, which is roughly seven exchanges, and
+        // that much history made a 3.8B model repeat itself: in the
+        // 2026-09-26 run it answered a garbled utterance by copying its
+        // own previous reply word for word, three separate times, and
+        // once repeated a wrong answer ("Your name is Mavis") that the
+        // system prompt contradicted three lines above. Less history to
+        // copy from, and the current turn's facts carry more weight.
         //
         // What MAVIS said comes from PlanReady only. WorkerResponse carries
         // the same text for LLM replies, and including both put every reply
@@ -912,7 +1009,10 @@ impl Planner {
         // The current utterance is skipped: it's the user message itself,
         // and depending on which task ran first it could also already be in
         // the ring.
-        for event in snapshot.recent_events(15) {
+        // 12 events ≈ three exchanges: each turn puts a UserIntent, a
+        // WorkerResponse, a PlanReady and an ActionComplete in the ring,
+        // and only the first and third become prompt lines.
+        for event in snapshot.recent_events(12) {
             if event.id == current_id {
                 continue;
             }
