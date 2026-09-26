@@ -120,18 +120,50 @@ const REBASELINE_FRAMES: usize = 90;
 /// Audio kept after the last loud frame when trimming an utterance's tail.
 const TAIL_PADDING_MS: usize = 300;
 
+// Barge-in — hearing the user while MAVIS is talking.
+//
+// The microphone was previously muted outright during playback, so the
+// only way to stop MAVIS was to wait for it to finish. Now the audio is
+// still analysed, against a threshold raised above MAVIS's own voice:
+// `echo_level` tracks how loud playback sounds in the microphone, and it
+// takes twice that to count as someone speaking. When it triggers, the
+// caller kills playback, and the utterance continues as a normal one.
+//
+// The ratio is the trade-off: lower and MAVIS interrupts itself, higher
+// and the user has to shout. Simulated against MAVIS's own voice at four
+// levels: at 2.0 even a voice twice as loud as the echo failed to break
+// through, because smoothing never lets a syllable reach its full height
+// between gaps. 1.4, with a shorter confirmation while playback is on,
+// breaks through at 1.5x and never triggered on MAVIS's own speech.
+// `MAVIS_BARGE_IN=0` restores the old mute-while-speaking behaviour.
+const BARGE_IN_RATIO: f32 = 1.4;
+/// Echo tracking rises quickly (so a loud passage doesn't false-trigger)
+/// and falls slowly (so a quiet passage doesn't either).
+const ECHO_RISE_RATE: f32 = 0.3;
+const ECHO_FALL_RATE: f32 = 0.05;
+/// Frames at the start of playback spent measuring MAVIS's own voice
+/// before barge-in can trigger. Without it the echo level is still zero
+/// when the first syllable arrives, so MAVIS interrupts itself.
+/// 25 frames is 750 ms: the opening of a reply can't be talked over, the
+/// rest of it can.
+const PLAYBACK_GRACE_FRAMES: usize = 25;
+
+/// Pre-roll kept while MAVIS is speaking. The full second used the rest of
+/// the time would hand Whisper a second of MAVIS's own voice.
+const PLAYBACK_PREROLL_MS: usize = 250;
+
 /// Ignore audio for this long after the input stream opens. The device
 /// emits a full-scale click on startup (measured max_energy=1.000), which
 /// the VAD would otherwise ship as a 1.3s "utterance" for Whisper to
 /// hallucinate words from.
 const STREAM_SETTLE_TIME: Duration = Duration::from_millis(1500);
 
-/// Shortest utterance worth transcribing. A real spoken phrase runs well
-/// over a second; anything briefer is a click, a keypress or a door — loud
-/// enough to pass the energy gates, but not speech. Whisper responds to
-/// such fragments by inventing fluent text, so they're dropped here.
-/// Includes the up-to-1 s of audio kept from before speech started.
-const MIN_UTTERANCE_SAMPLES: usize = 24000; // 1.5s at 16kHz
+/// Shortest utterance worth transcribing. This exists because Whisper
+/// invents fluent text from clicks and door slams — but the worker now
+/// checks for actual speech before transcribing anything, so the bar no
+/// longer has to be high. It was 1.5 s, which threw away four real
+/// utterances in the 2026-09-26 run, including "stop" and "Mavis".
+const MIN_UTTERANCE_SAMPLES: usize = 12800; // 0.8s at 16kHz
 
 // ---------------------------------------------------------------------------
 // VAD — smoothed energy with a noise floor that follows the room
@@ -147,6 +179,12 @@ struct EnergyVad {
     tail_padding_samples: usize,
     past_soft_ceiling: bool,
     noise_floor: f32,
+    /// True while MAVIS is speaking through the speakers.
+    playback: bool,
+    /// How loud that playback sounds in the microphone.
+    echo_level: f32,
+    playback_grace: usize,
+    playback_preroll: usize,
     /// Frames still to measure before detection starts.
     calibration_left: usize,
     calibration: Vec<f32>,
@@ -194,6 +232,10 @@ impl EnergyVad {
             tail_padding_samples: cfg.sample_rate as usize * TAIL_PADDING_MS / 1000,
             past_soft_ceiling: false,
             noise_floor: INITIAL_NOISE_FLOOR,
+            playback: false,
+            echo_level: 0.0,
+            playback_grace: 0,
+            playback_preroll: cfg.sample_rate as usize * PLAYBACK_PREROLL_MS / 1000,
             calibration_left: CALIBRATION_FRAMES,
             calibration: Vec::with_capacity(CALIBRATION_FRAMES),
             smoothed: 0.0,
@@ -217,11 +259,37 @@ impl EnergyVad {
     }
 
     fn start_threshold(&self) -> f32 {
-        SPEECH_START_MIN.max(self.noise_floor * START_RATIO)
+        let base = SPEECH_START_MIN.max(self.noise_floor * START_RATIO);
+        if self.playback {
+            base.max(self.echo_level * BARGE_IN_RATIO)
+        } else {
+            base
+        }
     }
 
     fn end_threshold(&self) -> f32 {
-        SPEECH_END_MIN.max(self.noise_floor * END_RATIO)
+        let base = SPEECH_END_MIN.max(self.noise_floor * END_RATIO);
+        if self.playback {
+            base.max(self.echo_level * BARGE_IN_RATIO * 0.8)
+        } else {
+            base
+        }
+    }
+
+    /// Tell the VAD whether MAVIS is speaking. Entering playback forgets
+    /// any part-heard utterance and starts measuring the echo afresh;
+    /// leaving it keeps whatever the user is in the middle of saying,
+    /// because that is exactly what stopped the playback.
+    fn set_playback(&mut self, on: bool) {
+        if on == self.playback {
+            return;
+        }
+        self.playback = on;
+        if on {
+            self.echo_level = 0.0;
+            self.playback_grace = PLAYBACK_GRACE_FRAMES;
+            self.reset();
+        }
     }
 
     fn process(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
@@ -307,6 +375,15 @@ impl EnergyVad {
         } else {
             self.start_threshold()
         };
+        // Interrupting takes less confirmation than starting from silence:
+        // the bar it has to clear (above MAVIS's own voice) is already
+        // high, and an interruption that needs a quarter-second of shouting
+        // isn't one.
+        let confirm = if self.playback {
+            self.min_speech_threshold_frames.min(5)
+        } else {
+            self.min_speech_threshold_frames
+        };
 
         if self.is_speaking {
             self.trace.push((self.buffer.len(), level));
@@ -328,10 +405,21 @@ impl EnergyVad {
             }
         }
 
+        // Measuring MAVIS's own voice before deciding anything.
+        if self.playback && self.playback_grace > 0 {
+            self.playback_grace -= 1;
+            let rate = if level > self.echo_level { ECHO_RISE_RATE } else { ECHO_FALL_RATE };
+            self.echo_level += rate * (level - self.echo_level);
+            while self.buffer.len() > self.playback_preroll {
+                self.buffer.pop_front();
+            }
+            return None;
+        }
+
         if level > threshold {
             self.speech_frames += 1;
             self.silence_frames = 0;
-            if self.speech_frames >= self.min_speech_threshold_frames && !self.is_speaking {
+            if self.speech_frames >= confirm && !self.is_speaking {
                 info!(
                     "VAD: SPEECH START (level={:.4}, threshold={:.4}, noise_floor={:.4})",
                     level, threshold, self.noise_floor
@@ -355,10 +443,25 @@ impl EnergyVad {
                 let reason = if self.past_soft_ceiling { "SPEECH END (grace)" } else { "SPEECH END" };
                 return self.finish(reason);
             }
+        } else if self.playback {
+            // MAVIS's own voice: learn how loud it arrives, and leave the
+            // room's noise floor alone — it isn't the room we're hearing.
+            let rate = if level > self.echo_level { ECHO_RISE_RATE } else { ECHO_FALL_RATE };
+            self.echo_level += rate * (level - self.echo_level);
+            while self.buffer.len() > self.playback_preroll {
+                self.buffer.pop_front();
+            }
+            self.speech_frames = self.speech_frames.saturating_sub(1);
         } else {
-            let rate = if level < self.noise_floor { FLOOR_FALL_RATE } else { FLOOR_RISE_RATE };
-            self.noise_floor = (self.noise_floor + rate * (level - self.noise_floor))
-                .clamp(0.001, MAX_NOISE_FLOOR);
+            // Only frames clearly below the speech threshold teach the
+            // floor. Counting louder ones let a word's onset, or echo just
+            // after MAVIS spoke, inflate the floor — measured at 0.22 in
+            // the 2026-09-26 run, which then dropped a real utterance.
+            if level < self.start_threshold() {
+                let rate = if level < self.noise_floor { FLOOR_FALL_RATE } else { FLOOR_RISE_RATE };
+                self.noise_floor = (self.noise_floor + rate * (level - self.noise_floor))
+                    .clamp(0.001, MAX_NOISE_FLOOR);
+            }
             while self.buffer.len() > self.sample_rate {
                 self.buffer.pop_front();
             }
@@ -396,12 +499,19 @@ impl EnergyVad {
             self.max_energy_seen,
             self.noise_floor
         );
-        let is_noise = loudest <= start;
+        // Drop only what never even reached the end threshold — audio
+        // that is, by its own measure, nothing but room. Anything above
+        // that is sent on: the worker checks it for actual speech, and
+        // that check is better at this than an energy comparison. The
+        // stricter version of this test (loudest ≤ start threshold) threw
+        // away a real utterance in the 2026-09-26 run.
+        let is_noise = loudest <= end;
+        let _ = start;
         self.reset();
         if is_noise {
             info!(
-                "VAD: dropping — never rose above the start threshold ({:.4} ≤ {:.4}); it was the room",
-                loudest, start
+                "VAD: dropping — never rose above the end threshold ({:.4} ≤ {:.4}); it was the room",
+                loudest, end
             );
             return None;
         }
@@ -597,6 +707,10 @@ impl SttManager {
             device_rate: sample_rate,
             target_rate: config.sample_rate,
             min_max_energy: config.min_max_energy,
+            barge_in: !matches!(
+                std::env::var("MAVIS_BARGE_IN").as_deref(),
+                Ok("0") | Ok("false") | Ok("off")
+            ),
             vad,
             tx,
             energy_tx,
@@ -678,6 +792,8 @@ struct Capture {
     device_rate: u32,
     target_rate: u32,
     min_max_energy: f32,
+    /// Off means the old behaviour: deaf while MAVIS speaks.
+    barge_in: bool,
     vad: Arc<Mutex<EnergyVad>>,
     tx: mpsc::Sender<Vec<f32>>,
     energy_tx: mpsc::Sender<f32>,
@@ -694,6 +810,31 @@ impl Capture {
             event_type: EventType::UiStateChange,
             payload: serde_json::json!({ "state": state }),
         });
+    }
+
+    fn publish_interrupt(&self) {
+        self.bus.publish(Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "stt".to_string(),
+            event_type: EventType::TtsInterrupt,
+            payload: serde_json::json!({ "reason": "user_spoke" }),
+        });
+    }
+
+    fn set_playback(&self, on: bool) {
+        match self.vad.lock() {
+            Ok(mut g) => g.set_playback(on),
+            Err(p) => p.into_inner().set_playback(on),
+        }
+    }
+
+    /// Is the user mid-utterance right now?
+    fn speaking(&self) -> bool {
+        match self.vad.lock() {
+            Ok(g) => g.is_speaking,
+            Err(p) => p.into_inner().is_speaking,
+        }
     }
 
     /// A poisoned lock must not kill the audio thread — recover the guard.
@@ -719,18 +860,26 @@ impl Capture {
             return;
         }
 
-        // TTS is playing — discard everything to prevent echo contamination.
-        if self.tts_active.load(Ordering::Relaxed) {
+        let playing = self.tts_active.load(Ordering::Relaxed);
+
+        if playing && !self.barge_in {
+            // Old behaviour: deaf while MAVIS speaks.
             self.was_tts_active = true;
             self.reset_vad();
             return;
         }
 
-        // TTS just ended — reset and let room echo decay before listening.
-        if self.was_tts_active {
-            self.reset_vad();
-            self.was_tts_active = false;
-            self.post_tts_cooldown = Some(Instant::now());
+        if playing != self.was_tts_active {
+            self.set_playback(playing);
+            if !playing {
+                // Playback ended. If the user is mid-sentence, that's the
+                // barge-in that ended it — keep listening to them. If not,
+                // let the room echo decay before trusting the microphone.
+                if !self.speaking() {
+                    self.post_tts_cooldown = Some(Instant::now());
+                }
+            }
+            self.was_tts_active = playing;
         }
         if let Some(start) = self.post_tts_cooldown {
             if start.elapsed() < Duration::from_millis(250) {
@@ -794,6 +943,13 @@ impl Capture {
             // The VAD ended an utterance and dropped it as room noise.
             self.publish_state("idle");
         } else if !was_speaking && now_speaking {
+            if playing {
+                // Someone is talking over MAVIS. Stop it now, rather than
+                // waiting for the transcript — an interruption that takes
+                // two seconds to land isn't an interruption.
+                info!("VAD: user spoke during playback — interrupting MAVIS");
+                self.publish_interrupt();
+            }
             if let Some(ref sstx) = self.speech_start {
                 let _ = sstx.try_send(());
             }
@@ -939,6 +1095,50 @@ mod vad_tests {
         assert!(utt.len() < 16000 * 3, "utterance {} samples", utt.len());
         // No further utterances manufactured from the fan.
         assert_eq!(got.len(), 1, "fan noise produced {} extra utterances", got.len() - 1);
+    }
+
+    #[test]
+    fn mavis_does_not_interrupt_itself_but_the_user_can() {
+        let mut sd = 7;
+        let mut v = vad();
+        feed(&mut v, &noise(0.03, 60, &mut sd)); // quiet room
+
+        // MAVIS starts talking; its own voice arrives at 0.25.
+        v.set_playback(true);
+        let got = feed(&mut v, &speech(0.25, 0.03, 4000, &mut sd));
+        assert!(got.is_empty(), "MAVIS interrupted itself");
+        assert!(!v.is_speaking);
+        assert!(v.echo_level > 0.1, "echo not learned: {}", v.echo_level);
+
+        // The user talks over it, twice as loud.
+        let over = speech(0.6, 0.25, 1500, &mut sd);
+        let got = feed(&mut v, &over);
+        assert!(v.is_speaking || !got.is_empty(), "barge-in not detected");
+
+        // Playback stops; the user's sentence continues and completes.
+        v.set_playback(false);
+        let mut rest = speech(0.6, 0.03, 800, &mut sd);
+        rest.extend(noise(0.03, 40, &mut sd));
+        let got2 = feed(&mut v, &rest);
+        assert!(!got.is_empty() || !got2.is_empty(), "utterance never shipped");
+    }
+
+    #[test]
+    fn a_word_onset_does_not_inflate_the_noise_floor() {
+        let mut sd = 8;
+        let mut v = vad();
+        feed(&mut v, &noise(0.03, 60, &mut sd));
+        let quiet = v.noise_floor;
+        for _ in 0..6 {
+            feed(&mut v, &speech(0.4, 0.03, 900, &mut sd));
+            feed(&mut v, &noise(0.03, 40, &mut sd));
+        }
+        assert!(
+            v.noise_floor < quiet * 2.0,
+            "floor drifted from {:.4} to {:.4}",
+            quiet,
+            v.noise_floor
+        );
     }
 
     #[test]
