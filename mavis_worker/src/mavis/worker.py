@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 
 from mavis.core.config import load_config
+from mavis.core.logger import setup_logging
 from mavis.inference import SYSTEM_PROMPT, LlamaEngine, build_chat_messages
 from mavis.stt.engine import STTEngine
 from mavis.tts.engine import TTSEngine
@@ -268,7 +269,7 @@ class WorkerServer:
                 print("[worker] Active listen override enabled for this utterance", flush=True)
 
             loop = asyncio.get_event_loop()
-            text = await loop.run_in_executor(
+            text, confidence = await loop.run_in_executor(
                 self.stt_executor,
                 lambda: self.stt_engine.transcribe(
                     audio_bytes,
@@ -277,11 +278,14 @@ class WorkerServer:
                 ),
             )
             shown = text if len(text) <= 80 else text[:80] + "..."
-            print(f"[worker] STT result: '{shown}'", flush=True)
+            print(f"[worker] STT result ({confidence:.2f}): '{shown}'", flush=True)
             return _make_event(
                 {
                     "type": "response",
-                    "result": {"text": text},
+                    # Confidence travels with the text so the Rust side can
+                    # say "I didn't catch that" instead of answering a
+                    # fluent-but-wrong transcript.
+                    "result": {"text": text, "confidence": confidence},
                 }
             )
         except (RuntimeError, OSError, ValueError) as e:
@@ -434,6 +438,12 @@ class WorkerServer:
 
 
 def main():
+    # Without this, every logger.info in the worker goes nowhere: the root
+    # logger's default level is WARNING and nothing configures a handler.
+    # Only print() reached the Rust log, so the STT diagnostics — how much
+    # speech was found, which segments were dropped, each transcript's
+    # confidence — were invisible for every run up to 2026-09-26.
+    setup_logging()
     server = WorkerServer()
     asyncio.run(server.run())
 
