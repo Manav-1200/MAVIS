@@ -245,8 +245,13 @@ fn score_importance(role: &str, text: &str) -> i64 {
         ]
         .iter()
         .any(|p| trimmed.starts_with(p));
+    // A question is not a memory. Storing them meant recall kept handing
+    // the model the user's own past questions — "[recalled] Earlier, user
+    // said: What is my name, Mavis?" — which is noise in the prompt and,
+    // worse, competes with the answer. Below the threshold, so it isn't
+    // stored at all.
     if is_question {
-        return 3;
+        return 1;
     }
 
     if t.split_whitespace().count() <= 3 {
