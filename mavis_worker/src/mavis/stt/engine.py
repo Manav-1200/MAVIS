@@ -132,7 +132,7 @@ class STTEngine:
         audio_bytes: bytes,
         sample_rate: int = 16000,
         bypass_confidence: bool = False,
-    ) -> str:
+    ) -> tuple[str, float]:
         """
         Transcribe raw PCM audio (float32, mono, 16 kHz).
 
@@ -142,15 +142,17 @@ class STTEngine:
             bypass_confidence: If True, skip the confidence gate (active listen).
 
         Returns:
-            Transcribed text, stripped and normalized. Empty string if confidence
-            is below threshold or no speech is detected.
+            (text, confidence). Text is empty when there was no speech, or
+            when what came back was too unreliable to use. Confidence is
+            Whisper's own average, mapped to 0–1; the caller decides what
+            to do with a borderline one.
         """
         self._load()
         self._last_activity = time.time()
 
         audio = np.frombuffer(audio_bytes, dtype=np.float32)
         if audio.size == 0:
-            return ""
+            return "", 0.0
 
         duration = audio.size / sample_rate
         gate = _speech_gate_enabled()
@@ -171,7 +173,7 @@ class STTEngine:
                     f"[stt] No speech in {duration:.2f}s of audio — not transcribing",
                     flush=True,
                 )
-                return ""
+                return "", 0.0
         else:
             logger.info("STT input: %.2fs audio, speech gate OFF", duration)
 
@@ -238,7 +240,7 @@ class STTEngine:
         raw_text = " ".join(raw_parts).strip()
         text = self._deduplicate_repetition(raw_text)
         if not text:
-            return ""
+            return "", 0.0
 
         # Confidence gate: drop ambient noise / hallucinations
         if not bypass_confidence and avg_confidence < self.confidence_threshold:
@@ -253,7 +255,7 @@ class STTEngine:
                 f"dropping utterance: '{text[:80]}'",
                 flush=True,
             )
-            return ""
+            return "", 0.0
 
         if text != raw_text:
             logger.info("STT dedup: '%s' -> '%s'", raw_text[:80], text[:80])
@@ -265,7 +267,7 @@ class STTEngine:
             avg_confidence,
             text[:120],
         )
-        return text
+        return text, avg_confidence
 
     @staticmethod
     def _deduplicate_repetition(text: str) -> str:
