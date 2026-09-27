@@ -59,8 +59,28 @@ impl Executor {
         match event.event_type {
             EventType::PlanApproved => self.execute_plan(event).await,
             EventType::TtsInterrupt => {
-                info!("Executor: TTS interrupt received — draining queue");
-                self.tts_queue.interrupt().await;
+                // A pause is provisional: MAVIS goes quiet at once, but the
+                // reply is kept in case what interrupted it turns out to be
+                // its own voice coming back through the microphone. The
+                // transcript decides — TtsResume carries on, a second
+                // TtsInterrupt without `pause` ends it for good.
+                let pause = event
+                    .payload
+                    .get("pause")
+                    .and_then(|p| p.as_bool())
+                    .unwrap_or(false);
+                if pause {
+                    info!("Executor: pausing playback");
+                    self.tts_queue.pause().await;
+                } else {
+                    info!("Executor: TTS interrupt received — draining queue");
+                    self.tts_queue.interrupt().await;
+                }
+                Ok(())
+            }
+            EventType::TtsResume => {
+                info!("Executor: resuming playback");
+                self.tts_queue.resume().await;
                 Ok(())
             }
             _ => Ok(()),
@@ -324,6 +344,8 @@ struct TtsQueue {
     kill_tx: mpsc::Sender<()>,
     current_pid: Arc<AtomicU32>,
     queue_depth: Arc<AtomicUsize>,
+    /// Playback is suspended, waiting to be resumed or killed.
+    paused: Arc<AtomicBool>,
 }
 
 impl TtsQueue {
@@ -336,12 +358,17 @@ impl TtsQueue {
         let tts_active_clone = tts_active.clone();
         let queue_depth = Arc::new(AtomicUsize::new(0));
         let queue_depth_for_task = queue_depth.clone();
+        let paused = Arc::new(AtomicBool::new(false));
+        let paused_for_task = paused.clone();
 
         tokio::spawn(async move {
             while let Some(text) = queue_rx.recv().await {
                 while kill_rx.try_recv().is_ok() {}
 
                 tts_active_clone.store(true, Ordering::SeqCst);
+                // A new item is never born paused, whatever happened to
+                // the last one.
+                paused_for_task.store(false, Ordering::SeqCst);
                 Self::emit_state(&bus_clone, "speaking").await;
 
                 let interrupted = Self::play_text(&text, &pid_for_task, &mut kill_rx).await;
@@ -378,6 +405,7 @@ impl TtsQueue {
             kill_tx,
             current_pid,
             queue_depth,
+            paused,
         }
     }
 
@@ -389,13 +417,35 @@ impl TtsQueue {
     async fn interrupt(&self) {
         let pid = self.current_pid.load(Ordering::SeqCst);
         if pid != 0 {
+            // CONT first: a paused player is stopped, and a stopped
+            // process doesn't act on SIGTERM until it runs again.
+            let _ = Command::new("kill").arg("-CONT").arg(pid.to_string()).output().await;
             let _ = Command::new("kill")
                 .arg("-15")
                 .arg(pid.to_string())
                 .output()
                 .await;
         }
+        self.paused.store(false, Ordering::SeqCst);
         let _ = self.kill_tx.try_send(());
+    }
+
+    /// Silence playback without losing it. SIGSTOP suspends the player
+    /// mid-sample; SIGCONT picks up exactly where it stopped.
+    async fn pause(&self) {
+        let pid = self.current_pid.load(Ordering::SeqCst);
+        if pid == 0 || self.paused.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let _ = Command::new("kill").arg("-STOP").arg(pid.to_string()).output().await;
+    }
+
+    async fn resume(&self) {
+        let pid = self.current_pid.load(Ordering::SeqCst);
+        if pid == 0 || !self.paused.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        let _ = Command::new("kill").arg("-CONT").arg(pid.to_string()).output().await;
     }
 
     async fn play_text(
@@ -527,13 +577,18 @@ async fn spawn_audio_player(path: &Path) -> Result<tokio::process::Child> {
         return Err(anyhow::anyhow!("WAV file does not exist: {:?}", path));
     }
 
-    let device_arg = std::env::var("MAVIS_AUDIO_DEVICE").ok();
+    // MAVIS_AUDIO_OUTPUT, not MAVIS_AUDIO_DEVICE: the latter names the
+    // *microphone*, and passing it here asked the player to output to a
+    // capture device, which silently broke playback for anyone who set it.
+    // The flags differ per player too — pw-play takes --target, not
+    // --device, which was the second half of the same bug.
+    let device_arg = std::env::var("MAVIS_AUDIO_OUTPUT").ok();
 
     let backends: [(&str, Vec<String>); 3] = [
         ("pw-play", {
             let mut args = vec![path.to_string_lossy().to_string()];
             if let Some(ref dev) = device_arg {
-                args.extend_from_slice(&["--device".to_string(), dev.clone()]);
+                args.extend_from_slice(&["--target".to_string(), dev.clone()]);
             }
             args
         }),
@@ -544,7 +599,14 @@ async fn spawn_audio_player(path: &Path) -> Result<tokio::process::Child> {
             }
             args
         }),
-        ("aplay", vec![path.to_string_lossy().to_string()]),
+        ("aplay", {
+            let mut args = vec![];
+            if let Some(ref dev) = device_arg {
+                args.extend_from_slice(&["-D".to_string(), dev.clone()]);
+            }
+            args.push(path.to_string_lossy().to_string());
+            args
+        }),
     ];
 
     for (cmd, args) in backends {
