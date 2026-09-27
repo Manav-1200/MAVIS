@@ -136,16 +136,20 @@ const TAIL_PADDING_MS: usize = 300;
 // between gaps. 1.4, with a shorter confirmation while playback is on,
 // breaks through at 1.5x and never triggered on MAVIS's own speech.
 // `MAVIS_BARGE_IN=0` restores the old mute-while-speaking behaviour.
-const BARGE_IN_RATIO: f32 = 1.4;
-/// Echo tracking rises quickly (so a loud passage doesn't false-trigger)
-/// and falls slowly (so a quiet passage doesn't either).
-const ECHO_RISE_RATE: f32 = 0.3;
-const ECHO_FALL_RATE: f32 = 0.05;
-/// Frames at the start of playback spent measuring MAVIS's own voice
-/// before barge-in can trigger. Without it the echo level is still zero
-/// when the first syllable arrives, so MAVIS interrupts itself.
-/// 25 frames is 750 ms: the opening of a reply can't be talked over, the
-/// rest of it can.
+const BARGE_IN_RATIO: f32 = 1.3;
+/// The echo estimate is the loudest MAVIS has been heard recently, not an
+/// average: an average sits below the syllable peaks, and every peak then
+/// looks like someone talking. Decays by this much per 30 ms frame — about
+/// a 4-second memory — so it follows a quiet passage down without chasing
+/// every gap between words.
+const ECHO_DECAY: f32 = 0.995;
+/// Frames of *audible* playback spent measuring MAVIS's own voice before
+/// barge-in can trigger. Counted from when sound actually arrives, not
+/// from when playback was requested: synthesis takes about a second, and
+/// in the 2026-09-27 run the whole grace period was spent on that silence,
+/// so the first word out of the speakers tripped the barge-in and MAVIS
+/// cut itself off on every single reply.
+/// 25 frames is 750 ms of real sound.
 const PLAYBACK_GRACE_FRAMES: usize = 25;
 
 /// Pre-roll kept while MAVIS is speaking. The full second used the rest of
@@ -181,7 +185,7 @@ struct EnergyVad {
     noise_floor: f32,
     /// True while MAVIS is speaking through the speakers.
     playback: bool,
-    /// How loud that playback sounds in the microphone.
+    /// The loudest MAVIS has recently been heard at, decaying.
     echo_level: f32,
     playback_grace: usize,
     playback_preroll: usize,
@@ -274,6 +278,11 @@ impl EnergyVad {
         } else {
             base
         }
+    }
+
+    /// Track the loudest recent playback, with a slow decay.
+    fn note_echo(&mut self, level: f32) {
+        self.echo_level = (self.echo_level * ECHO_DECAY).max(level);
     }
 
     /// Tell the VAD whether MAVIS is speaking. Entering playback forgets
@@ -405,11 +414,15 @@ impl EnergyVad {
             }
         }
 
-        // Measuring MAVIS's own voice before deciding anything.
+        // Measuring MAVIS's own voice before deciding anything. The
+        // countdown only runs while sound is actually coming out of the
+        // speakers — silence teaches nothing about the echo.
         if self.playback && self.playback_grace > 0 {
-            self.playback_grace -= 1;
-            let rate = if level > self.echo_level { ECHO_RISE_RATE } else { ECHO_FALL_RATE };
-            self.echo_level += rate * (level - self.echo_level);
+            let audible = level > SPEECH_START_MIN.max(self.noise_floor * START_RATIO);
+            if audible {
+                self.playback_grace -= 1;
+            }
+            self.note_echo(level);
             while self.buffer.len() > self.playback_preroll {
                 self.buffer.pop_front();
             }
@@ -446,8 +459,7 @@ impl EnergyVad {
         } else if self.playback {
             // MAVIS's own voice: learn how loud it arrives, and leave the
             // room's noise floor alone — it isn't the room we're hearing.
-            let rate = if level > self.echo_level { ECHO_RISE_RATE } else { ECHO_FALL_RATE };
-            self.echo_level += rate * (level - self.echo_level);
+            self.note_echo(level);
             while self.buffer.len() > self.playback_preroll {
                 self.buffer.pop_front();
             }
@@ -588,13 +600,25 @@ fn select_input_device(host: &cpal::Host) -> Option<Device> {
     }
     info!("==========================");
 
+    // Prefer the system's own audio server over the raw sound card.
+    //
+    // This used to be the other way round — `sysdefault:CARD=Generic` won —
+    // from a 2026-08-15 session where cpal's `default` resolved to a route
+    // with no signal. The cost showed up much later: going straight to the
+    // card bypasses everything PipeWire does, including the source the user
+    // actually chose and any echo cancellation they've set up, which is
+    // what barge-in needs to work with speakers. `MAVIS_AUDIO_DEVICE` still
+    // overrides by exact name if the card really is the better route here.
     let score = |name: &str| {
         let lower = name.to_lowercase();
-        if lower.contains("front") && lower.contains("generic") { return 100; }
-        if lower.contains("sysdefault") && lower.contains("generic") { return 90; }
+        if lower.contains("echo") && lower.contains("cancel") { return 120; }
+        if lower == "pipewire" { return 110; }
+        if lower == "pulse" { return 100; }
+        if lower == "default" { return 95; }
+        if lower.contains("front") && lower.contains("generic") { return 90; }
+        if lower.contains("sysdefault") && lower.contains("generic") { return 85; }
         if lower.contains("analog") && !lower.contains("hdmi") { return 80; }
         if !lower.contains("bluez") && !lower.contains("hdmi") && !lower.contains("monitor") { return 70; }
-        if lower == "default" { return 60; }
         0
     };
 
@@ -812,13 +836,27 @@ impl Capture {
         });
     }
 
+    /// Nothing came of an interruption — let MAVIS carry on.
+    fn publish_resume(&self) {
+        self.bus.publish(Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "stt".to_string(),
+            event_type: EventType::TtsResume,
+            payload: serde_json::json!({}),
+        });
+    }
+
     fn publish_interrupt(&self) {
         self.bus.publish(Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
             source: "stt".to_string(),
             event_type: EventType::TtsInterrupt,
-            payload: serde_json::json!({ "reason": "user_spoke" }),
+            // A pause, not a kill: if the transcript turns out to be
+            // MAVIS's own voice or nothing at all, the reply carries on
+            // from where it stopped instead of being lost.
+            payload: serde_json::json!({ "reason": "user_spoke", "pause": true }),
         });
     }
 
@@ -918,6 +956,16 @@ impl Capture {
             (was, r, g.last_max_energy, g.is_speaking)
         };
 
+        // Anything that ends without reaching the worker has to undo the
+        // pause itself, or a reply stays suspended forever.
+        let abandon = |c: &Self| {
+            if playing {
+                c.publish_resume();
+            } else {
+                c.publish_state("idle");
+            }
+        };
+
         if let Some(utterance) = result {
             if utterance.len() < MIN_UTTERANCE_SAMPLES {
                 info!(
@@ -925,7 +973,7 @@ impl Capture {
                     utterance.len(),
                     MIN_UTTERANCE_SAMPLES
                 );
-                self.publish_state("idle");
+                abandon(self);
                 return;
             }
             if max_energy < self.min_max_energy {
@@ -933,7 +981,7 @@ impl Capture {
                     "STT: dropping noise utterance (max_energy={:.3} < {:.3})",
                     max_energy, self.min_max_energy
                 );
-                self.publish_state("idle");
+                abandon(self);
                 return;
             }
             info!("STT: shipping utterance ({} samples)", utterance.len());
@@ -941,7 +989,7 @@ impl Capture {
             self.publish_state("thinking");
         } else if was_speaking && !now_speaking {
             // The VAD ended an utterance and dropped it as room noise.
-            self.publish_state("idle");
+            abandon(self);
         } else if !was_speaking && now_speaking {
             if playing {
                 // Someone is talking over MAVIS. Stop it now, rather than
@@ -1121,6 +1169,20 @@ mod vad_tests {
         rest.extend(noise(0.03, 40, &mut sd));
         let got2 = feed(&mut v, &rest);
         assert!(!got.is_empty() || !got2.is_empty(), "utterance never shipped");
+    }
+
+    /// The 2026-09-27 failure: playback is announced about a second before
+    /// any sound comes out (synthesis), and MAVIS cut itself off on every
+    /// reply because the measuring window was spent on that silence.
+    #[test]
+    fn silence_before_playback_does_not_burn_the_measuring_window() {
+        let mut sd = 11;
+        let mut v = vad();
+        feed(&mut v, &noise(0.03, 60, &mut sd));
+        v.set_playback(true);
+        feed(&mut v, &noise(0.03, 50, &mut sd)); // 1.5 s of synthesis
+        let got = feed(&mut v, &speech(0.45, 0.03, 9000, &mut sd));
+        assert!(got.is_empty() && !v.is_speaking, "MAVIS interrupted itself");
     }
 
     #[test]
