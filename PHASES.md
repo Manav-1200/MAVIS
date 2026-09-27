@@ -453,6 +453,17 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.6 — Barge-in, second pass (2026-09-27)
+
+Barge-in met real speakers and MAVIS cut itself off on every reply. Details in [`DECISIONS.md` §17](DECISIONS.md#17-the-2026-09-27-run--mavis-interrupting-itself).
+
+- [x] **The echo measuring window counts audible playback**, not wall-clock time — synthesis silence was eating all of it
+- [x] **The echo estimate is a decaying peak**, not an average, so MAVIS's own syllable peaks don't read as speech
+- [x] **An interruption pauses playback instead of killing it** — the transcript decides whether to carry on or answer, so a false trigger costs a pause rather than the whole reply
+- [x] **Capture prefers PipeWire** (and an echo-cancelled source above all) over the raw sound card
+- [x] **`MAVIS_AUDIO_OUTPUT`** for playback, with the right flag per player; `MAVIS_AUDIO_DEVICE` no longer breaks audio
+- [x] The worker warns when the microphone is clipping
+
 ---
 
 ## Phase 6.5 — Action Execution
