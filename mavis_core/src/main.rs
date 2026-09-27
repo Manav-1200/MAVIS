@@ -324,6 +324,7 @@ async fn main() -> Result<()> {
         }
     });
 
+    let tts_active_for_stt = tts_active.clone();
     let stt_task = tokio::spawn(async move {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -418,16 +419,39 @@ async fn main() -> Result<()> {
                 }
             }
 
+            // Playback the VAD paused when it heard this. If what it heard
+            // turns out to be nothing worth answering — MAVIS's own voice
+            // through the speakers, most often — the reply carries on
+            // instead of being lost.
+            let paused_playback = tts_active_for_stt.load(Ordering::SeqCst);
+            let resume = |reason: &str| {
+                info!("STT: {} — resuming playback", reason);
+                bus_for_stt.publish(Event {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    source: "stt".to_string(),
+                    event_type: EventType::TtsResume,
+                    payload: serde_json::json!({}),
+                });
+            };
+
             if let Some((text, confidence)) = response_text {
-                if text.is_empty() {
+                if text.is_empty() && paused_playback {
+                    resume("nothing but noise");
+                } else if text.is_empty() {
                     info!("STT: empty transcription (silence or no speech)");
-                    let _ = bus_for_stt.publish(Event {
+                    bus_for_stt.publish(Event {
                         id: uuid::Uuid::new_v4(),
                         timestamp: chrono::Utc::now(),
                         source: "stt".to_string(),
                         event_type: EventType::UiStateChange,
                         payload: serde_json::json!({ "state": "idle" }),
                     });
+                } else if confidence < UNCLEAR_CONFIDENCE && paused_playback {
+                    // Don't talk over a paused reply to say you didn't hear
+                    // something — just carry on with it.
+                    info!("STT: unclear during playback ({:.2}): {}", confidence, text);
+                    resume("unclear");
                 } else if confidence < UNCLEAR_CONFIDENCE {
                     // Heard something, but not well enough to act on it.
                     // Answering a mangled transcript is worse than saying
@@ -461,6 +485,8 @@ async fn main() -> Result<()> {
                     };
                     let _ = bus_for_stt.publish(event);
                 }
+            } else if paused_playback {
+                resume("transcription failed");
             } else {
                 warn!("STT: failed to get transcription after retries");
                 let _ = bus_for_stt.publish(Event {
