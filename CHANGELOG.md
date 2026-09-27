@@ -27,6 +27,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **MAVIS cut itself off on every reply** when barge-in first met real speakers: it measured its own voice during the silence before playback started, so its first word looked like someone interrupting. It now measures while sound is actually playing, tracks the loudest recent playback rather than an average, and an interruption pauses the reply instead of killing it — if what it heard turns out to be its own voice, the reply carries on.
+- **Capture now prefers PipeWire** (and an echo-cancelled source above everything) over the raw sound card, so system-level echo cancellation and the user's chosen source apply.
+- **`MAVIS_AUDIO_DEVICE` broke playback** — it names a microphone and was being passed to the audio player. Output now has its own variable, `MAVIS_AUDIO_OUTPUT`.
+- The worker now says so in the log when the microphone is clipping.
 - **MAVIS said "Opening Firefox" without opening anything** — commands were only recognised at the start of a sentence, a comma after the wake word blocked them, and an app didn't match unless every spoken word was in its name. The model is also now told it cannot act, so it stops narrating actions.
 - **Repeating its own last reply** on short or garbled input — less history in the prompt, and known facts now sit last where they outrank the conversation.
 - **Real speech dropped** as "too short" (minimum 1.5 s → 0.8 s) or as room noise; the noise floor no longer drifts upward on word onsets and echo.
