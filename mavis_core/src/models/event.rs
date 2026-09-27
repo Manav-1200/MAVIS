@@ -25,9 +25,16 @@ pub enum EventType {
     WorkerResponse,
     UiStateChange,
     SystemAction,
-    /// Signal to kill current TTS playback and drain the queue.
-    /// Emitted by the intent router when the user speaks during TTS.
+    /// Signal to stop current TTS playback. With `"pause": true` in the
+    /// payload the playback is only suspended, and either resumed by
+    /// TtsResume or killed by a later TtsInterrupt; otherwise it is killed
+    /// and the queue drained. Emitted by the intent router when the user
+    /// speaks during TTS, and by the VAD the moment it hears them.
     TtsInterrupt,
+    /// Carry on with playback that TtsInterrupt only paused — sent when
+    /// what interrupted MAVIS turned out not to be speech worth answering,
+    /// usually MAVIS's own voice coming back through the microphone.
+    TtsResume,
     /// A plan that has passed the permission gate. The executor listens
     /// for this rather than PlanReady, so nothing runs unreviewed.
     PlanApproved,
