@@ -35,6 +35,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 14. [Open issues](#14-open-issues)
 15. [The 2026-09-22 live run](#15-the-2026-09-22-live-run)
 16. [The 2026-09-26 live run and barge-in](#16-the-2026-09-26-live-run-and-barge-in)
+17. [The 2026-09-27 run — MAVIS interrupting itself](#17-the-2026-09-27-run--mavis-interrupting-itself)
 
 ---
 
@@ -78,6 +79,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-20 → 09-21 | 8.5 | System Sentinel: package change detection |
 | 09-22 | — | First live run after the audit: 60 s replies traced to the VAD, Whisper and the LLM; all three fixed (§15) |
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
+| 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 
 ---
 
@@ -846,6 +848,45 @@ The log ends at `^C` with none of the shutdown messages. Ctrl+C goes to every pr
 ### Still open after this run
 - **Transcription quality is now the weak link**: "Hello Robus", "I'm in blinding, watch yours". The measured room level was 0.16–0.18 with speech frames peaking at 0.75, which means the input is almost certainly clipping. The mic gain was raised to 0.6 back when thresholds were fixed numbers (§4); they follow the room now, so a lower gain costs nothing and gives Whisper cleaner audio.
 - MAVIS captures from `sysdefault:CARD=Generic` rather than PipeWire, bypassing whatever processing is configured there. Changing it needs the `pw-play --device`/`--target` bug fixed first, or playback breaks.
+
+---
+
+## 17. The 2026-09-27 run — MAVIS interrupting itself
+
+Barge-in's first contact with real speakers. Every single reply was cut off one to two seconds in, with `VAD: user spoke during playback — interrupting MAVIS` while nobody was speaking. From the user: "it does respond, but gets cut off after 2 words, no audio."
+
+### Problem · The measuring window was spent on silence
+**Symptom:** Six replies, six self-interruptions. The thresholds in the log give it away: `SPEECH START (level=0.4822, threshold=0.2900, noise_floor=0.1611)` — 0.2900 is exactly 1.8× the noise floor, the *room* threshold. The echo estimate was contributing nothing.
+**Actual cause:** `tts_active` is set when a reply is queued, but the sound doesn't arrive until Kokoro has synthesised it and `pw-play` has started — about a second later. The 750 ms measuring window was spent on that silence, so when MAVIS's first word came out of the speakers it was measured against an echo estimate of zero, and it cleared the room threshold immediately.
+**Fix:** The window counts frames of *audible* playback, not wall-clock time. Silence teaches nothing about the echo, so the countdown doesn't run during it.
+**Also changed:** the echo estimate is now the loudest MAVIS has recently been heard at, decaying about 14% a second, rather than a moving average. An average sits below the syllable peaks, so every peak looked like someone talking.
+**Evidence:** Reproduced in a test that mimics the real sequence — playback announced, 1.5 s of silence, then MAVIS's voice for nine seconds — which fails against the old code and passes now. Across three echo levels there is no self-interruption, and a voice at twice the echo level still breaks through.
+
+### Decision · An interruption is a pause, not a kill
+**Context:** The first version killed playback the moment it thought it heard someone. When that judgement is wrong the reply is gone, which is what made the failure above so total — MAVIS was mute for the whole session.
+**Decision:** The VAD's interruption now *suspends* playback (SIGSTOP) instead of ending it. The transcript decides what happens next: real speech kills it and answers, while nothing, noise, or an unusable transcript resumes it (SIGCONT) from the same sample. Every path that abandons an utterance — too short, too quiet, transcription failed — resumes too, or a reply would stay suspended forever.
+**Why it matters beyond this bug:** it changes the cost of being wrong. A false interruption is now a pause of a second or two in the middle of a sentence, not a lost answer, which is what makes it safe to keep barge-in on by default at all.
+**Note:** killing a suspended player needs SIGCONT first — a stopped process doesn't act on SIGTERM until it runs again.
+
+### Problem · The microphone is clipping
+**Symptom:** `peak=1.000` on every single utterance, transcription confidence between 0.37 and 0.75, and several correct-sounding transcripts dropped for low confidence.
+**Cause:** input gain. The waveform is hitting the ceiling and being squared off; Whisper degrades badly on that, and no model or threshold change compensates.
+**Fix:** none available in code — the worker now says so loudly in the log when it sees a clipped utterance, with the command to fix it. The 0.6 gain this traces back to was my own guess from 2026-09-20 (§4), made when the thresholds were fixed numbers; they follow the room now, so a quieter microphone costs nothing.
+
+### Decision · Prefer PipeWire over the raw sound card for capture
+**Context:** Device scoring put `sysdefault:CARD=Generic` above `pipewire`, from a 2026-08-15 session where cpal's `default` resolved to a route with no signal.
+**Decision:** `pipewire` first, then `pulse`, then `default`, then the card — and anything whose name mentions echo cancellation above all of them.
+**Why:** going straight to the card bypasses everything the audio server does: the source the user actually selected, their input processing, and echo cancellation. Echo cancellation is the real answer to barge-in with speakers — with it the microphone never hears MAVIS at all, and the thresholds above stop mattering. `MAVIS_AUDIO_DEVICE` still overrides by exact name.
+
+### Problem · `MAVIS_AUDIO_DEVICE` broke playback
+Long-known (§14), fixed here because it blocks the change above: the variable names a *microphone*, and the executor was passing it to the audio player as an output device — with `--device`, which isn't even `pw-play`'s flag for that. Playback output now has its own variable, `MAVIS_AUDIO_OUTPUT`, and each player gets the flag it actually takes.
+
+### What worked in this run
+- The speech detector: two utterances of pure noise came back as "0.00s speech in 0 region(s)" and never reached Whisper.
+- "Sorry, I didn't catch that" fired correctly on a 0.46-confidence transcript.
+- The worker's logs appeared for the first time, which is the only reason `peak=1.000` and the VAD-filter timings were visible at all.
+- Replies stayed fast: 0.5–3.9 s, median under a second.
+- The name came back right, including from "Mavis, what's my name?" — the phrasing that got it wrong on 09-26.
 
 ---
 
