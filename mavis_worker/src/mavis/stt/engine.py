@@ -161,13 +161,25 @@ class STTEngine:
 
             speech = get_speech_timestamps(audio, VadOptions(**SPEECH_GATE_OPTIONS))
             speech_s = sum(t["end"] - t["start"] for t in speech) / sample_rate
+            peak = float(np.abs(audio).max())
             logger.info(
                 "STT input: %.2fs audio, %.2fs speech in %d region(s), peak=%.3f",
                 duration,
                 speech_s,
                 len(speech),
-                float(np.abs(audio).max()),
+                peak,
             )
+            if peak >= 0.99:
+                # Every utterance in the 2026-09-27 run peaked at exactly
+                # 1.000: the signal is hitting the ceiling and the waveform
+                # is being squared off. Whisper degrades badly on that, and
+                # no threshold or model change compensates — the input has
+                # to be quieter.
+                print(
+                    "[stt] Microphone is CLIPPING (peak 1.0). Lower the input gain: "
+                    "wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35",
+                    flush=True,
+                )
             if not speech:
                 print(
                     f"[stt] No speech in {duration:.2f}s of audio — not transcribing",
