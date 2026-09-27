@@ -209,6 +209,10 @@ impl ContextEngine {
                 info!("ContextEngine: TTS interrupt observed");
             }
 
+            EventType::TtsResume => {
+                info!("ContextEngine: TTS resumed");
+            }
+
             EventType::PlanApproved => {
                 // The gate's verdict, not a new decision — working memory
                 // already recorded the plan when it was proposed.
