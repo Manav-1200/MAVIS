@@ -138,7 +138,20 @@ An utterance that starts with an explicit action is never treated as system cont
 
 MAVIS listens while it speaks. Start talking and it stops mid-sentence, then answers what you just said. Say "stop", "quiet" or "cancel" and it simply goes quiet.
 
-It measures how loud its own voice arrives at your microphone and only treats you as speaking when you're clearly louder, so it doesn't interrupt itself. The first three-quarters of a second of a reply can't be interrupted — that's the part it spends measuring. With speakers at high volume it may take raising your voice; headphones make it immediate. `MAVIS_BARGE_IN=0` goes back to a muted microphone while it speaks.
+It measures how loud its own voice arrives at your microphone and only treats you as speaking when you're clearly louder, so it doesn't interrupt itself. The first three-quarters of a second of audible speech can't be interrupted — that's the part it spends measuring.
+
+An interruption **pauses** the reply rather than ending it. If what it heard turns out to be its own voice or background noise, it carries on from the same word; only real speech ends the reply for good. So a false alarm costs a short pause, not the answer.
+
+How well this works depends on how much of MAVIS's own voice reaches your microphone. Headphones make it immediate. With speakers, either turn them down or set up echo cancellation, which removes MAVIS's voice from the microphone entirely:
+
+```bash
+# PipeWire: enable the echo-cancel module, then make its source the default
+systemctl --user restart wireplumber pipewire
+wpctl status | grep -i echo
+wpctl set-default <id of the echo-cancel source>
+```
+
+MAVIS prefers an echo-cancelled source, then PipeWire, then the raw card. `MAVIS_BARGE_IN=0` goes back to a muted microphone while it speaks.
 
 ### Permissions
 
@@ -209,6 +222,7 @@ Current date and time is always injected — it isn't private, and without it th
 | `MAVIS_VOICE_MODEL` | `~/.local/share/piper-voices/en_US-lessac-medium.onnx` | Piper voice model |
 | `MAVIS_KOKORO_VOICE` | `af_heart` | Kokoro voice |
 | `MAVIS_AUDIO_DEVICE` | auto | Exact microphone name as cpal reports it |
+| `MAVIS_AUDIO_OUTPUT` | system default | Playback device for speech, passed to `pw-play`/`paplay`/`aplay` |
 | `MAVIS_PYTHON_PATH` | `python3` | Interpreter for the worker, e.g. your venv's |
 | `MAVIS_ORB` | on | `off` runs without the orb — headless use only; the orb is how you see what MAVIS is doing |
 | `MAVIS_ORB_POS` | — | `x,y` start position. Honoured on X11/XWayland; native Wayland ignores it |
