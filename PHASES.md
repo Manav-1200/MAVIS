@@ -464,6 +464,15 @@ Barge-in met real speakers and MAVIS cut itself off on every reply. Details in [
 - [x] **`MAVIS_AUDIO_OUTPUT`** for playback, with the right flag per player; `MAVIS_AUDIO_DEVICE` no longer breaks audio
 - [x] The worker warns when the microphone is clipping
 
+### 7.4 — Memory hygiene (2026-09-30)
+
+A fresh run answered "can you hear me" with a clipboard from four days earlier. Details in [`DECISIONS.md` §18](DECISIONS.md#18-memory-that-follows-you-into-the-next-session).
+
+- [x] **A restart starts a new conversation** — the event ring no longer survives it; the name, recall, summaries and entities do
+- [x] **Stored questions are purged at startup** by today's rules — they stopped being memories on 09-26, but old rows kept coming back
+- [x] **Recall drops what is essentially the question being asked** (70% word overlap either way)
+- [x] The clipping warning reports the measured peak
+
 ---
 
 ## Phase 6.5 — Action Execution
@@ -892,4 +901,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-09-26*
+*Last updated: 2026-09-30*
