@@ -36,6 +36,13 @@ impl MemoryManager {
             match std::fs::read_to_string(&working_file) {
                 Ok(json) => match WorkingMemory::from_json(&json) {
                     Ok(mut wm) => {
+                        let dropped = wm.start_new_session();
+                        if dropped > 0 {
+                            info!(
+                                "Memory: starting a fresh conversation ({} events from the last session set aside)",
+                                dropped
+                            );
+                        }
                         if let Some(bad) = wm.sanitize() {
                             log::warn!(
                                 "Memory: discarded stored user name {:?} — learned by an older build's rules; say \"my name is …\" again",
@@ -68,6 +75,11 @@ impl MemoryManager {
         let recall_store = RecallStore::new(&recall_db)?;
         if let Err(e) = recall_store.purge_expired() {
             log::warn!("Memory: purge failed: {}", e);
+        }
+        match recall_store.purge_by_current_rules() {
+            Ok(n) if n > 0 => info!("Memory: dropped {} stored questions — not memories", n),
+            Ok(_) => {}
+            Err(e) => log::warn!("Memory: rule purge failed: {}", e),
         }
 
         Ok(Self {
