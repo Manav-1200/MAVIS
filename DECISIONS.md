@@ -920,6 +920,22 @@ A small model asked a vague question after that pattern answers with the pattern
 
 **Evidence:** With an old-style database seeded with two stored questions and two statements: the questions are purged, "Mavis, can you hear me?" now recalls nothing at all, "what am I working on" recalls the sentinel statement, and "what is my name" recalls the name. Tested directly against the store.
 
+### Problem · "What's on my clipboard?" — "main" (2026-09-30, later run)
+**Symptom:** Three clipboard questions, three replies of `"main"`.
+**Actual cause:** The clipboard held 3,158 characters of copied terminal session. It was injected raw, newlines and all, so everything after the first line became its own line in Working Memory — shell prompts, `git reset --soft HEAD~1`, the lot — and the model answered with a word lifted from a shell prompt.
+**Fix:** the clipboard is flattened to a single line before injection, and when it's longer than 200 characters MAVIS says how long it is rather than pretending the fragment is the whole thing.
+
+### Decision · Recall surfaces facts, not conversation
+**Why:** Even after questions stopped being stored, recall kept returning ordinary chatter: answering a clipboard question, it offered "Earlier, user said: MAVIS, open Firefox browser." A command from last week is not context for anything.
+**Decision:** only memories scoring 8 or more — the band `score_importance` already reserves for something the user stated about themselves — are injected into prompts. Everything is still recorded; replay and the daily summaries read all of it.
+**Evidence:** against a seeded store, "What is on my clipboard, MAVIS?" now recalls nothing, while "what am I working on", "what is my name" and "what compositor" each recall the matching stated fact.
+
+### Decision · Scale audio that arrives above full scale
+**Context:** every utterance for three runs has arrived at 2.2–2.3× full scale. Whisper and Silero both expect samples within [-1, 1].
+**Decision:** the worker scales anything above 1.0 down to 0.95 before the speech detector sees it, and says so with the real figure.
+**Why this can help rather than just tidy up:** a signal that *saturates* is capped at 1.0 and the waveform is destroyed. A peak of 2.2 means gain was applied after capture — nothing is clipped at the ceiling, it is simply too loud — and scaling that back is exact. Where the microphone preamp itself distorted first, scaling still prevents the extra damage of feeding out-of-range samples into the mel filterbank.
+**Still the right fix:** turn the capture gain down. This is a guard, not a cure.
+
 ### Still open · The microphone
 `peak=2.259` in this run — the signal is not merely clipping, it is arriving at more than double full scale, so PipeWire is applying gain above 100%. The warning now prints the real figure instead of "1.0". Everything else on the audio path is downstream of this: at that level Whisper returned "Hello, Moogers" for "hello Mavis" and a 0.37 confidence.
 
