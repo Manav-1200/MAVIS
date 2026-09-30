@@ -79,6 +79,23 @@ impl WorkingMemory {
         true
     }
 
+    /// Begin a fresh conversation, keeping what MAVIS knows about the user.
+    ///
+    /// The event ring used to be restored from disk, so a new run started
+    /// mid-conversation: on 2026-09-30 "Mavis, can you hear me?" was
+    /// answered with the contents of the clipboard, because the last thing
+    /// in the restored history was a clipboard question and its answer.
+    /// Facts survive a restart — the name here, recall and the entity
+    /// graph in their own stores — but the thread of talk does not.
+    pub fn start_new_session(&mut self) -> usize {
+        let dropped = self.events.len();
+        self.events.clear();
+        self.current_intent = None;
+        self.active_plan = None;
+        self.ui_state = None;
+        dropped
+    }
+
     /// Drop a restored name that wasn't learned by the current rules.
     /// A bad name is persisted in working_memory.json, so without this a
     /// false match from an older build ("The user's name is Using.") comes
