@@ -27,6 +27,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **A fresh start answered with the last session's conversation** — "can you hear me" got the clipboard contents from days earlier. A restart now begins a new conversation; your name, memories, summaries and projects still carry over.
+- **Recall returning the question you just asked**, and questions recorded as memories by older builds — both now cleared at startup.
 - **MAVIS cut itself off on every reply** when barge-in first met real speakers: it measured its own voice during the silence before playback started, so its first word looked like someone interrupting. It now measures while sound is actually playing, tracks the loudest recent playback rather than an average, and an interruption pauses the reply instead of killing it — if what it heard turns out to be its own voice, the reply carries on.
 - **Capture now prefers PipeWire** (and an echo-cancelled source above everything) over the raw sound card, so system-level echo cancellation and the user's chosen source apply.
 - **`MAVIS_AUDIO_DEVICE` broke playback** — it names a microphone and was being passed to the audio player. Output now has its own variable, `MAVIS_AUDIO_OUTPUT`.
