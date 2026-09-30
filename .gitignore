@@ -47,4 +47,5 @@ Thumbs.db
 # ─── Cargo.lock ──────────────────────────────────
 # For a binary crate like mavis_core, Cargo recommends committing Cargo.lock
 # for reproducible builds. Remove this line if you want it tracked.
-Cargo.lockAI_CONTEXT.md
+Cargo.lock
+AI_CONTEXT.md
