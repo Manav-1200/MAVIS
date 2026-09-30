@@ -36,6 +36,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 15. [The 2026-09-22 live run](#15-the-2026-09-22-live-run)
 16. [The 2026-09-26 live run and barge-in](#16-the-2026-09-26-live-run-and-barge-in)
 17. [The 2026-09-27 run — MAVIS interrupting itself](#17-the-2026-09-27-run--mavis-interrupting-itself)
+18. [Memory that follows you into the next session](#18-memory-that-follows-you-into-the-next-session)
 
 ---
 
@@ -80,6 +81,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-22 | — | First live run after the audit: 60 s replies traced to the VAD, Whisper and the LLM; all three fixed (§15) |
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
+| 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
 
 ---
 
@@ -887,6 +889,39 @@ Long-known (§14), fixed here because it blocks the change above: the variable n
 - The worker's logs appeared for the first time, which is the only reason `peak=1.000` and the VAD-filter timings were visible at all.
 - Replies stayed fast: 0.5–3.9 s, median under a second.
 - The name came back right, including from "Mavis, what's my name?" — the phrasing that got it wrong on 09-26.
+
+---
+
+## 18. Memory that follows you into the next session
+
+**Symptom (2026-09-30):** MAVIS had just started. The user said "hello Mavis, can you hear me". MAVIS read out a shell command — the contents of the clipboard, from a session four days earlier.
+
+### Problem · A new run started mid-conversation
+**Actual cause:** working memory's event ring is written to disk and restored at startup, so the prompt for the very first utterance of a fresh run ended with:
+
+```
+- [user] What is on my clipboard, Mavis?
+- [mavis] MAVIS_SENTINEL=1 … cargo run 2>&1 | tee ~/mavis-test.log
+- [user] What is on my clipboard, Mavis?
+- [mavis] MAVIS_SENTINEL=1 … cargo run 2>&1 | tee ~/mavis-test.log
+```
+
+A small model asked a vague question after that pattern answers with the pattern. This is §16's echo problem again, except the history it copied from was days old and nothing in the session could explain it.
+
+**Fix:** a restart starts a new conversation. The event ring, the current intent and the active plan are dropped at startup; the user's name stays, and so do recall, the daily summaries and the entity graph, which are the things worth keeping. What MAVIS knows survives a restart. What was being said doesn't.
+
+**Reverses:** part of Phase 5's "session recovery" (2026-08-26), which restored the conversation so MAVIS could carry on after a crash. In practice restarts are far more often deliberate than crashes, and resuming a four-day-old thread is worse than starting clean.
+
+### Problem · Recall kept returning the question being asked
+**Symptom:** "Mavis, can you hear me?" recalled "Hello Robus, can you hear me?" and the hallucinated greeting from the 09-22 run.
+**Two causes:**
+1. Questions were stored as memories until 09-26. They aren't any more, but everything recorded before that is still in the database. `purge_by_current_rules()` now deletes, at startup, anything today's rules would not store — idempotent, and it reports how many went.
+2. Full-text search matched on the words that matter least. A recalled memory that is essentially the sentence being answered — 70% word overlap or more, measured both ways — is now dropped before it reaches the prompt.
+
+**Evidence:** With an old-style database seeded with two stored questions and two statements: the questions are purged, "Mavis, can you hear me?" now recalls nothing at all, "what am I working on" recalls the sentinel statement, and "what is my name" recalls the name. Tested directly against the store.
+
+### Still open · The microphone
+`peak=2.259` in this run — the signal is not merely clipping, it is arriving at more than double full scale, so PipeWire is applying gain above 100%. The warning now prints the real figure instead of "1.0". Everything else on the audio path is downstream of this: at that level Whisper returned "Hello, Moogers" for "hello Mavis" and a 0.37 confidence.
 
 ---
 
