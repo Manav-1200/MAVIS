@@ -342,7 +342,7 @@ Everything above communicates over the in-process event bus (`tokio::sync::broad
 
 ### 5.5 — Audio Device Selection
 - [x] `MAVIS_AUDIO_DEVICE` env var respected for mic (exact CPAL name match)
-- [x] `MAVIS_AUDIO_DEVICE` env var respected for output (`--device` for pw-play/paplay)
+- [x] Playback device selectable — `MAVIS_AUDIO_OUTPUT` (`--target` for pw-play, `--device` for paplay, `-D` for aplay). *Was `MAVIS_AUDIO_DEVICE` with the wrong flag, which broke playback; fixed 2026-09-27.*
 
 ### 5.6 — Bug Fixes (2026-08-29, corrected 2026-09-02)
 - [x] **Echo cancellation** — the 2026-08-29 fix added VAD-reset + 250ms cooldown logic to `stt.rs`, but the `tts_active` flag that logic checked was never connected to the executor's real TTS state — two separate `AtomicBool`s, never wired together. Confirmed via live testing (MAVIS's own TTS output getting transcribed back as new "user" speech) and fixed 2026-09-02: `SttHandle::start()` now takes the shared flag as a parameter instead of creating its own.
@@ -648,7 +648,7 @@ A full line-by-line audit, run against a clone of the repository. Every claimed 
 - [x] **Audio-thread deadlock** — a double `lock()` in the VAD, deadlocking under edition-2021 temporary lifetimes after any poisoning.
 - [x] **No new dependencies, no new language features** — nothing added to `Cargo.toml`.
 
-**Still open from the audit** — see [`DECISIONS.md` §14](DECISIONS.md#14-open-issues): a 300 s first STT timeout with serial processing, `pw-play --device` (should be `--target`), the worker socket at `0666`, the worker's idle-unload race, and several pieces of dead code.
+**Still open from the audit** — see [`DECISIONS.md` §14](DECISIONS.md#14-open-issues): a 300 s first STT timeout with serial processing, the worker socket at `0666`, the worker's idle-unload race, and several pieces of dead code.
 
 ---
 
@@ -864,7 +864,7 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ### B. Definition of Done for Each Phase
 
-- [ ] All code passes `cargo check` / `cargo clippy` / `cargo test` *(as of 2026-09-22: check, test and clippy pass — 123 tests, clippy with warnings only; the pre-commit hook still runs only `ruff`, so nothing enforces the Rust checks)*
+- [ ] All code passes `cargo check` / `cargo clippy` / `cargo test` *(as of 2026-09-30: check, test and clippy pass — 120 tests, clippy with warnings only; the pre-commit hook still runs only `ruff`, so nothing enforces the Rust checks)*
 - [ ] Python code passes `ruff` pre-commit
 - [ ] Feature documented in `docs/phase-N.md`
 - [ ] E2E test script exists and passes
