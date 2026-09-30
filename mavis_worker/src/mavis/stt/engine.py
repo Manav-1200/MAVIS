@@ -176,8 +176,8 @@ class STTEngine:
                 # no threshold or model change compensates — the input has
                 # to be quieter.
                 print(
-                    "[stt] Microphone is CLIPPING (peak 1.0). Lower the input gain: "
-                    "wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35",
+                    f"[stt] Microphone is CLIPPING (peak {peak:.2f}, should stay under 1.0). "
+                    "Lower the input gain: wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35",
                     flush=True,
                 )
             if not speech:
