@@ -89,6 +89,16 @@ impl RecallStore {
     /// Observed 2026-09-16 — 10 of 17 recalled entries were MAVIS quoting
     /// its own speculation, one carrying a mistranscription forward as
     /// though it were real.
+    /// Below this, a memory is conversation rather than knowledge, and
+    /// putting it in a prompt is noise. `score_importance` gives 9 to
+    /// something the user stated about themselves and 5 to ordinary talk,
+    /// so this line is the difference between recalling "I'm working on
+    /// the sentinel" and recalling "MAVIS, open Firefox browser" — which
+    /// is what came back on 2026-09-30, three times, while answering a
+    /// question about the clipboard. Everything is still stored; replay
+    /// and the daily summaries read it all.
+    const MIN_RECALL_IMPORTANCE: i64 = 8;
+
     pub fn recall(&self, query: &str, limit: usize) -> Result<Vec<Memory>> {
         let fts = match build_fts_query(query) {
             Some(q) => q,
@@ -98,11 +108,11 @@ impl RecallStore {
         let mut stmt = self.conn.prepare(
             "SELECT text, role, timestamp, importance
              FROM memory_fts
-             WHERE memory_fts MATCH ?1 AND role = 'user'
+             WHERE memory_fts MATCH ?1 AND role = 'user' AND importance >= ?2
              ORDER BY rank
-             LIMIT ?2",
+             LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![fts, limit as i64], |row| {
+        let rows = stmt.query_map(params![fts, Self::MIN_RECALL_IMPORTANCE, limit as i64], |row| {
             Ok(Memory {
                 text: row.get(0)?,
                 role: row.get(1)?,
