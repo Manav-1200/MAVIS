@@ -663,8 +663,11 @@ Kept so the same mistakes are recognisable next time.
 
 Known, recorded, not yet fixed. Roughly in the order they'd be felt.
 
-**Verification still owed**
-- A live run of the 2026-09-22 fixes (§15) — the VAD changes are proven in simulation, not yet on the target machine
+**Verification still owed** *(as of 2026-09-30)*
+- **Barge-in on real speakers**: talking over a reply, and MAVIS not interrupting itself. It did, on every reply, until the §17 fix — which has not been run since
+- **"stop" / "quiet" / "cancel"** going silent without an answer
+- **Any action actually launching.** No `[app]` action has ever appeared in a log; every "Opening Firefox" so far was the model narrating. The matcher was rewritten on 09-26 and hasn't been exercised
+- `MAVIS_BARGE_IN=0`, `MAVIS_SPEECH_GATE=0`, `MAVIS_AUDIO_OUTPUT` — all added, none ever set
 - GNOME crash fix on a real GNOME session
 - Calendar has-events path (the calendar is empty)
 - Windows and macOS app discovery; the RPM parser
@@ -672,11 +675,11 @@ Known, recorded, not yet fixed. Roughly in the order they'd be felt.
 **Latency and portability**
 - First STT attempt waits up to 300 s, and utterances are processed one at a time
 - A malformed STT reply is retried by re-running full transcription, up to 5 times
-- `pw-play` is given `--device`; its flag is `--target`, so `MAVIS_AUDIO_DEVICE` breaks playback
 - Resampling has no anti-aliasing filter — a plausible contributor to mistranscriptions. Less often reached since 2026-09-22: 16 kHz is now preferred in any sample format, and 192 kHz devices are no longer opened at their maximum rate
-- The VAD is still energy-based. It now follows the room, but speech only ~2× louder than steady noise can go unheard, and non-steady noise (typing, a video playing) can still start an utterance. A speech-trained VAD (WebRTC or Silero) is the next step if this bites
+- The VAD is still energy-based. It now follows the room, but speech only ~2× louder than steady noise can go unheard, and non-steady noise (typing, a video playing) can still start an utterance. Silero catches those on the worker side before Whisper sees them, so the cost is a wasted round trip rather than an invented sentence
+- Barge-in needs the user to be about twice as loud as MAVIS's own voice in the microphone. Echo cancellation (PipeWire's `module-echo-cancel`) or headphones remove the problem entirely; without either, false pauses happen — they cost a pause, not the reply
 - `n_gpu_layers` is 20 because full offload failed on 6 GB. Somewhere between 20 and 33 is probably faster and still fits — unmeasured
-- The microphone chosen is the raw ALSA `sysdefault` device, which bypasses PipeWire's own processing (and any noise suppression the user has set up there)
+- **Capture arrives at 2.2–2.3× full scale.** The PipeWire source volume is 0.60, so the gain is upstream in ALSA — capture level or mic boost, unconfirmed. Whisper confidence sits at 0.37–0.77 because of it. The worker scales anything over 1.0 back to 0.95, which limits the damage without fixing it. **This is the first thing to chase.**
 - Memory lives at `../memory`, relative to the working directory
 
 **Security**
