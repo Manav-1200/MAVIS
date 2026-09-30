@@ -110,7 +110,45 @@ impl RecallStore {
                 importance: row.get(3)?,
             })
         })?;
-        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.into())
+        let found: Vec<Memory> = rows.collect::<Result<Vec<_>, _>>()?;
+
+        // Drop anything that is essentially the sentence being answered.
+        // Full-text search is happy to return "Hello Robus, can you hear
+        // me?" for "Mavis, can you hear me?" — a match on the words that
+        // matter least, and MAVIS then answers as though the conversation
+        // were already under way.
+        Ok(found
+            .into_iter()
+            .filter(|m| !nearly_the_same(&m.text, query))
+            .collect())
+    }
+
+    /// Delete anything today's rules would no longer store.
+    ///
+    /// Questions stopped counting as memories on 2026-09-26 — they are
+    /// what the user asked, not what they told MAVIS — but rows recorded
+    /// before that are still in the database, and they kept coming back:
+    /// asking "Mavis, can you hear me?" recalled the same question from a
+    /// week earlier. Runs at startup and is idempotent.
+    pub fn purge_by_current_rules(&self) -> Result<usize> {
+        let mut stmt = self.conn.prepare("SELECT rowid, role, text FROM memory_fts")?;
+        let stale: Vec<i64> = stmt
+            .query_map([], |row| {
+                let rowid: i64 = row.get(0)?;
+                let role: String = row.get(1)?;
+                let text: String = row.get(2)?;
+                Ok((rowid, role, text))
+            })?
+            .filter_map(|r| r.ok())
+            .filter(|(_, role, text)| score_importance(role, text) < 2)
+            .map(|(rowid, _, _)| rowid)
+            .collect();
+
+        for rowid in &stale {
+            self.conn
+                .execute("DELETE FROM memory_fts WHERE rowid = ?1", params![rowid])?;
+        }
+        Ok(stale.len())
     }
 
     pub fn count(&self) -> Result<i64> {
@@ -218,6 +256,25 @@ pub fn build_fts_query(raw: &str) -> Option<String> {
     } else {
         Some(terms.join(" OR "))
     }
+}
+
+/// Do two utterances say the same thing? Word overlap both ways, so a
+/// long memory isn't judged similar just because it contains the short
+/// sentence's words.
+fn nearly_the_same(a: &str, b: &str) -> bool {
+    let words = |s: &str| -> std::collections::HashSet<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| w.len() > 2)
+            .map(|w| w.to_string())
+            .collect()
+    };
+    let (wa, wb) = (words(a), words(b));
+    if wa.is_empty() || wb.is_empty() {
+        return false;
+    }
+    let shared = wa.intersection(&wb).count() as f32;
+    shared / wa.len().min(wb.len()) as f32 >= 0.7
 }
 
 /// Rate how worth remembering an utterance is, 1-10.
