@@ -971,11 +971,27 @@ impl Planner {
         // every prompt.
         if context_source_enabled("MAVIS_CONTEXT_CLIPBOARD") && mentions_clipboard(current_intent) {
             if let Some(clipboard) = &snapshot.last_clipboard {
-                if !clipboard.is_empty() {
-                    let truncated: String = clipboard.chars().take(200).collect();
+                // Flattened to one line first. A copied terminal session
+                // is thousands of characters over dozens of lines, and
+                // pasting it raw broke the prompt apart: every line after
+                // the first read as its own context item, and on
+                // 2026-09-30 MAVIS answered "what's on my clipboard" with
+                // the single word "main", picked out of a shell prompt.
+                let flat = clipboard.split_whitespace().collect::<Vec<_>>().join(" ");
+                if !flat.is_empty() {
+                    let total = flat.chars().count();
+                    let shown: String = flat.chars().take(200).collect();
+                    let content = if total > 200 {
+                        format!(
+                            "The user's clipboard holds {} characters, beginning: \"{}…\"",
+                            total, shown
+                        )
+                    } else {
+                        format!("The user's clipboard contains: \"{}\"", shown)
+                    };
                     items.push(serde_json::json!({
                         "source": "clipboard",
-                        "content": format!("The user's clipboard currently contains: \"{}\"", truncated),
+                        "content": content,
                     }));
                 }
             }
