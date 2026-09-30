@@ -172,7 +172,7 @@ MAVIS remembers across sessions. Five tiers, all local SQLite:
 
 | Tier | Contents | Lifetime |
 |------|----------|----------|
-| Working | current session, context snapshot | in-RAM + JSON |
+| Working | current session, context snapshot | in-RAM + JSON; the conversation starts fresh each run |
 | Episodic | raw event log | indefinite |
 | Recall | what you said, importance-scored | 7–90 days by importance; stated facts kept |
 | Long-term | one summary per day | permanent |
