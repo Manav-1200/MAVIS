@@ -155,6 +155,25 @@ class STTEngine:
             return "", 0.0
 
         duration = audio.size / sample_rate
+
+        # Bring the level back inside range before anything looks at it.
+        #
+        # Audio has been arriving at peak 2.2–2.3 — more than twice full
+        # scale — because the capture gain is set above 100%. Whisper and
+        # the speech detector both expect samples in [-1, 1]; feeding them
+        # double that distorts everything downstream of it. Scaling can't
+        # restore a waveform the microphone itself squared off, but where
+        # the overshoot came from gain applied after capture, which a peak
+        # well above 1.0 suggests, this recovers it exactly.
+        peak_in = float(np.abs(audio).max())
+        if peak_in > 1.0:
+            audio = (audio / peak_in) * 0.95
+            print(
+                f"[stt] Input at {peak_in:.2f}× full scale — scaled down. "
+                "Lower the capture gain: wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35",
+                flush=True,
+            )
+
         gate = _speech_gate_enabled()
         if gate:
             from faster_whisper.vad import VadOptions, get_speech_timestamps
@@ -169,7 +188,7 @@ class STTEngine:
                 len(speech),
                 peak,
             )
-            if peak >= 0.99:
+            if peak >= 0.99 and peak_in <= 1.0:
                 # Every utterance in the 2026-09-27 run peaked at exactly
                 # 1.000: the signal is hitting the ceiling and the waveform
                 # is being squared off. Whisper degrades badly on that, and
