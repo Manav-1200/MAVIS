@@ -70,10 +70,10 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 | 2 — Core Runtime | Context engine, memory, system integration | :white_check_mark: Complete |
 | 3 — AI Worker | Local LLM, Rust–Python bridge | :white_check_mark: Complete |
 | 4 — Integration | Voice pipeline, intent system, automations | :white_check_mark: Complete |
-| 5 — Interaction Polish | TTS queue, interruption, session recovery, personality | :white_check_mark: Complete |
+| 5 — Interaction Polish | TTS queue, barge-in, personality | :white_check_mark: Complete |
 | 6 — Context Awareness | Active window, workspace, clipboard, IDE, terminal, project, calendar | :white_check_mark: Complete |
-| 6.5 — Action Execution | App launching, search, system control | :white_check_mark: Built |
-| 7 — Memory & Learning | Recall with decay, daily consolidation, replay, entity graph | :white_check_mark: 7.1–7.2 complete |
+| 6.5 — Action Execution | App launching, search, system control | :construction: Built; launching not yet seen working on hardware |
+| 7 — Memory & Learning | Recall with decay, daily consolidation, replay, entity graph | :white_check_mark: 7.1–7.2 complete; conversation no longer restored across runs |
 | 8 — Safety & Permissions | Risk scoring, permission gate, confirmation, audit log | :white_check_mark: Core built |
 | 8.5 — System Sentinel | Notices packages you didn't ask for | :construction: Detects and records; not yet speaking |
 | 9 — Skills Platform | Plugin API, manifest, sandboxing | Not started |
