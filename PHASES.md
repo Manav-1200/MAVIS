@@ -472,6 +472,9 @@ A fresh run answered "can you hear me" with a clipboard from four days earlier. 
 - [x] **Stored questions are purged at startup** by today's rules — they stopped being memories on 09-26, but old rows kept coming back
 - [x] **Recall drops what is essentially the question being asked** (70% word overlap either way)
 - [x] The clipping warning reports the measured peak
+- [x] **Clipboard flattened to one line** before it goes in a prompt, with its length stated when long
+- [x] **Recall injects stated facts only** (importance 8+); chatter stays in the store for replay
+- [x] **Over-range audio scaled back** to 0.95 before the speech detector and Whisper
 
 ---
 
