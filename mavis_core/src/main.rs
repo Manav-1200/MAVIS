@@ -118,6 +118,18 @@ async fn main() -> Result<()> {
     // Planner
     let bus_for_planner = Arc::clone(&bus);
     let installed_apps = platform.installed_apps();
+    // The planner's own sentinel.db connection, only when the Sentinel is on.
+    let sentinel_for_planner = if sentinel::enabled() {
+        match sentinel::store::SentinelStore::new(&data_dir.join("sentinel.db")) {
+            Ok(store) => Some(Arc::new(std::sync::Mutex::new(store))),
+            Err(e) => {
+                warn!("Planner: could not open sentinel.db, system changes won't be spoken: {}", e);
+                None
+            }
+        }
+    } else {
+        None
+    };
     let planner_handle = supervise("Planner", Arc::clone(&bus), move || {
         let mut planner = planner::Planner::new(
             Arc::clone(&bus_for_planner),
@@ -126,6 +138,7 @@ async fn main() -> Result<()> {
             recall_for_planner.clone(),
             long_term_for_planner.clone(),
             entities_for_planner.clone(),
+            sentinel_for_planner.clone(),
         );
         async move {
             planner.run().await;
