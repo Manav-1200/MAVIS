@@ -87,7 +87,29 @@ pub enum ChangeKind {
         from: String,
         to: String,
     },
+
+    // Step 3 — privilege surfaces. `login` marks a human account
+    // (UID at or above UID_MIN, with a real shell).
+    UserAdded { name: String, uid: u32, login: bool },
+    UserRemoved { name: String },
+    UserUidChanged { name: String, from: u32, to: u32 },
+    GroupAdded { name: String },
+    GroupRemoved { name: String },
+    GroupMemberAdded { group: String, user: String },
+    GroupMemberRemoved { group: String, user: String },
+    /// `label` is the key's comment, or its type when it has none.
+    SshKeyAdded { file: String, label: String },
+    SshKeyRemoved { file: String, label: String },
+    /// Content is root-only, so only the fact of a change is known.
+    SudoersChanged { path: String },
+    UnitEnabled { unit: String, scope: String },
+    UnitDisabled { unit: String, scope: String },
+    SetuidAdded { path: String, setuid: bool, root_owned: bool },
+    SetuidRemoved { path: String },
 }
+
+/// Groups whose members conventionally get root, or its equivalent.
+pub const PRIVILEGED_GROUPS: &[&str] = &["root", "wheel", "sudo", "admin", "docker"];
 
 /// One change, with everything needed to report it later.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -120,20 +142,7 @@ impl Change {
     /// twice. Deliberately includes the timestamp: the same package
     /// installed again later is a new event worth knowing about.
     pub fn fingerprint(&self) -> String {
-        let (verb, name, detail) = match &self.kind {
-            ChangeKind::PackageInstalled { name, version, .. } => {
-                ("installed", name.as_str(), version.clone())
-            }
-            ChangeKind::PackageRemoved { name, version } => {
-                ("removed", name.as_str(), version.clone())
-            }
-            ChangeKind::PackageUpgraded { name, from, to } => {
-                ("upgraded", name.as_str(), format!("{}>{}", from, to))
-            }
-            ChangeKind::PackageDowngraded { name, from, to } => {
-                ("downgraded", name.as_str(), format!("{}>{}", from, to))
-            }
-        };
+        let (verb, name, detail) = identity(&self.kind);
         format!(
             "{}:{}:{}:{}:{}",
             self.source,
@@ -142,6 +151,31 @@ impl Change {
             name,
             detail
         )
+    }
+}
+
+/// (verb, subject, detail) — the parts of a change that make it unique.
+fn identity(kind: &ChangeKind) -> (&'static str, String, String) {
+    use ChangeKind::*;
+    match kind {
+        PackageInstalled { name, version, .. } => ("installed", name.clone(), version.clone()),
+        PackageRemoved { name, version } => ("removed", name.clone(), version.clone()),
+        PackageUpgraded { name, from, to } => ("upgraded", name.clone(), format!("{}>{}", from, to)),
+        PackageDowngraded { name, from, to } => ("downgraded", name.clone(), format!("{}>{}", from, to)),
+        UserAdded { name, uid, .. } => ("user_added", name.clone(), uid.to_string()),
+        UserRemoved { name } => ("user_removed", name.clone(), String::new()),
+        UserUidChanged { name, from, to } => ("uid_changed", name.clone(), format!("{}>{}", from, to)),
+        GroupAdded { name } => ("group_added", name.clone(), String::new()),
+        GroupRemoved { name } => ("group_removed", name.clone(), String::new()),
+        GroupMemberAdded { group, user } => ("member_added", group.clone(), user.clone()),
+        GroupMemberRemoved { group, user } => ("member_removed", group.clone(), user.clone()),
+        SshKeyAdded { file, label } => ("key_added", file.clone(), label.clone()),
+        SshKeyRemoved { file, label } => ("key_removed", file.clone(), label.clone()),
+        SudoersChanged { path } => ("sudoers", path.clone(), String::new()),
+        UnitEnabled { unit, scope } => ("enabled", unit.clone(), scope.clone()),
+        UnitDisabled { unit, scope } => ("disabled", unit.clone(), scope.clone()),
+        SetuidAdded { path, .. } => ("setuid_added", path.clone(), String::new()),
+        SetuidRemoved { path } => ("setuid_removed", path.clone(), String::new()),
     }
 }
 
@@ -171,6 +205,29 @@ pub fn classify(kind: &ChangeKind) -> Severity {
 
         // Going backwards is unusual enough to mention.
         ChangeKind::PackageDowngraded { .. } => Severity::Notable,
+
+        // Privilege surfaces: anything that lets someone do more is Critical
+        // or Notable; anything that takes access away is Routine.
+        ChangeKind::UserAdded { uid: 0, .. } => Severity::Critical,
+        ChangeKind::UserAdded { login: true, .. } => Severity::Notable,
+        ChangeKind::UserUidChanged { to: 0, .. } => Severity::Critical,
+        ChangeKind::GroupMemberAdded { group, .. } if PRIVILEGED_GROUPS.contains(&group.as_str()) => {
+            Severity::Critical
+        }
+        ChangeKind::GroupMemberAdded { .. } => Severity::Notable,
+        ChangeKind::SshKeyAdded { .. } => Severity::Critical,
+        ChangeKind::SudoersChanged { .. } => Severity::Critical,
+        ChangeKind::SetuidAdded { .. } => Severity::Critical,
+        ChangeKind::UnitEnabled { .. } => Severity::Notable,
+        ChangeKind::UserAdded { .. }
+        | ChangeKind::UserRemoved { .. }
+        | ChangeKind::UserUidChanged { .. }
+        | ChangeKind::GroupAdded { .. }
+        | ChangeKind::GroupRemoved { .. }
+        | ChangeKind::GroupMemberRemoved { .. }
+        | ChangeKind::SshKeyRemoved { .. }
+        | ChangeKind::UnitDisabled { .. }
+        | ChangeKind::SetuidRemoved { .. } => Severity::Routine,
     }
 }
 
@@ -202,6 +259,42 @@ pub fn describe(kind: &ChangeKind) -> String {
             "{} went backwards from {} to {} — that's unusual.",
             name, from, to
         ),
+        ChangeKind::UserAdded { name, uid: 0, .. } => {
+            format!("New account {} has user ID 0, the same as root.", name)
+        }
+        ChangeKind::UserAdded { name, uid, login: true } => {
+            format!("New login account {} (user ID {}) was created.", name, uid)
+        }
+        ChangeKind::UserAdded { name, uid, .. } => {
+            format!("System account {} (user ID {}) was created.", name, uid)
+        }
+        ChangeKind::UserRemoved { name } => format!("Account {} was removed.", name),
+        ChangeKind::UserUidChanged { name, from, to } => {
+            format!("{}'s user ID changed from {} to {}.", name, from, to)
+        }
+        ChangeKind::GroupAdded { name } => format!("Group {} was created.", name),
+        ChangeKind::GroupRemoved { name } => format!("Group {} was removed.", name),
+        ChangeKind::GroupMemberAdded { group, user } => {
+            format!("{} was added to the {} group.", user, group)
+        }
+        ChangeKind::GroupMemberRemoved { group, user } => {
+            format!("{} was removed from the {} group.", user, group)
+        }
+        ChangeKind::SshKeyAdded { file, label } => {
+            format!("SSH key {} was added to {}.", label, file)
+        }
+        ChangeKind::SshKeyRemoved { file, label } => {
+            format!("SSH key {} was removed from {}.", label, file)
+        }
+        ChangeKind::SudoersChanged { path } => format!("{} changed.", path),
+        ChangeKind::UnitEnabled { unit, scope } => format!("{} was enabled ({}).", unit, scope),
+        ChangeKind::UnitDisabled { unit, scope } => format!("{} was disabled ({}).", unit, scope),
+        ChangeKind::SetuidAdded { path, setuid, root_owned } => {
+            let mode = if *setuid { "setuid" } else { "setgid" };
+            let owner = if *root_owned { " and owned by root" } else { "" };
+            format!("{} is new, {}{}.", path, mode, owner)
+        }
+        ChangeKind::SetuidRemoved { path } => format!("{} is no longer setuid or setgid.", path),
     }
 }
 
@@ -344,6 +437,53 @@ mod tests {
             )
         };
         assert_eq!(mk().fingerprint(), mk().fingerprint());
+    }
+
+    #[test]
+    fn privilege_gains_are_loud_and_losses_are_quiet() {
+        use ChangeKind::*;
+        let user = |uid, login| UserAdded { name: "x".into(), uid, login };
+        assert_eq!(classify(&user(0, false)), Severity::Critical);
+        assert_eq!(classify(&user(1001, true)), Severity::Notable);
+        assert_eq!(classify(&user(977, false)), Severity::Routine);
+        assert_eq!(classify(&UserUidChanged { name: "x".into(), from: 1000, to: 0 }), Severity::Critical);
+
+        let member = |g: &str| GroupMemberAdded { group: g.into(), user: "bob".into() };
+        assert_eq!(classify(&member("wheel")), Severity::Critical);
+        assert_eq!(classify(&member("video")), Severity::Notable);
+
+        let key = SshKeyAdded { file: "authorized_keys".into(), label: "me@laptop".into() };
+        assert_eq!(classify(&key), Severity::Critical);
+        assert_eq!(classify(&SudoersChanged { path: "/etc/sudoers".into() }), Severity::Critical);
+        let suid = SetuidAdded { path: "/usr/local/bin/x".into(), setuid: true, root_owned: true };
+        assert_eq!(classify(&suid), Severity::Critical);
+        assert_eq!(classify(&UnitEnabled { unit: "a.service".into(), scope: "system".into() }), Severity::Notable);
+
+        for loss in [
+            UserRemoved { name: "x".into() },
+            GroupMemberRemoved { group: "wheel".into(), user: "bob".into() },
+            SshKeyRemoved { file: "authorized_keys".into(), label: "k".into() },
+            UnitDisabled { unit: "a.service".into(), scope: "system".into() },
+            SetuidRemoved { path: "/x".into() },
+            GroupAdded { name: "g".into() },
+        ] {
+            assert_eq!(classify(&loss), Severity::Routine, "{:?}", loss);
+        }
+    }
+
+    #[test]
+    fn privilege_fingerprints_tell_changes_apart() {
+        let a = Change::new(
+            ChangeKind::GroupMemberAdded { group: "wheel".into(), user: "bob".into() },
+            "groups",
+            at(0),
+        );
+        let b = Change::new(
+            ChangeKind::GroupMemberAdded { group: "wheel".into(), user: "eve".into() },
+            "groups",
+            at(0),
+        );
+        assert_ne!(a.fingerprint(), b.fingerprint());
     }
 
     #[test]
