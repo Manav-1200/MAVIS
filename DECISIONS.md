@@ -82,6 +82,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 10-01 | 8.5 | Sentinel step 3: users, groups, SSH keys, sudoers, enabled units and setuid binaries watched; gains are Critical or Notable. Tested; not yet run on hardware (§20) |
 | 10-01 | 8.5 | Sentinel step 2b: pending changes spoken on the next utterance, "what changed?" and "what did that update do?" answered from the store. Built and tested; not yet heard on hardware (§19) |
 
 ---
@@ -1003,6 +1004,52 @@ With the Sentinel off, nothing here runs: the planner doesn't open `sentinel.db`
 - **Hardware.** Hearing the lead before a reply, barge-in over it, and the questions recognised through the real microphone — given the capture-gain problem, "what changed" may well transcribe as something else.
 - **Recognition is a positive grammar** in `sentinel/speech.rs`. "What changed in the Rust release?" goes to the model because "rust" isn't in it. Utterances that fall just outside will go to the model, which may invent an answer; widen the grammar from what real runs show, not speculatively.
 - `sentinel/speech.rs` is ~940 lines, about 60% tests. `planner.rs` grew by ~70 lines of code.
+
+## 20. Privilege surfaces — Phase 8.5 step 3
+
+**Date:** 2026-10-01. **Status:** built, `cargo test` and `cargo clippy` clean. **Not yet run on hardware**, and step 2b — which speaks these — hasn't been either.
+
+### Decision · Snapshots, not logs
+**Why:** packages have a transaction log; these surfaces don't. Each is read into a snapshot (item → detail), diffed against the one stored in `sentinel.db`, and replaced in the same transaction that records the changes. The first read of each surface is a silent baseline, as with package history. An unchanged snapshot writes nothing, so the steady state is reads only.
+
+### Decision · What is watched, and how loud
+| Surface | Read from | Critical | Notable | Routine |
+|---|---|---|---|---|
+| Users | `/etc/passwd` | new account with UID 0; UID changed to 0 | new login account (UID ≥ `UID_MIN`, real shell) | system accounts, removals |
+| Groups | `/etc/group` | joining root, wheel, sudo, admin or docker | joining any other group | new groups, leaving |
+| SSH keys | `~/.ssh/authorized_keys`, `authorized_keys2` | new key | — | removed key |
+| sudoers | `/etc/sudoers`, `/etc/sudoers.d` | any change | — | — |
+| systemd | `*.wants` / `*.requires` in `/etc/systemd/system`, `/etc/systemd/user`, `~/.config/systemd/user` | — | newly enabled unit | disabled unit |
+| setuid/setgid | `/usr/bin`, `/usr/sbin`, `/usr/lib`, `/usr/libexec`, `/usr/local`, `/opt` | new binary | — | removed |
+
+**Rule:** gaining access is Critical or Notable; losing it is Routine. Static, like every other severity (ADR-007).
+**Enabled units are Notable, not Critical:** the PHASES table didn't list them as Critical, and enabling a service is ordinary administration. Spoken once is enough.
+**The privileged groups are a fixed list of five.** Which groups actually grant sudo is in sudoers, which MAVIS can't read; these are the conventional ones, plus docker, whose members are root in all but name. Not a growing word list — a short statement of convention.
+
+### Decision · sudoers through metadata only
+`/etc/sudoers` is `0440 root`. MAVIS sees size, mtime and inode of each file — of the directory itself where it can't be listed, as on Arch — and reports that the sudo configuration changed, never what it says.
+
+### Decision · The setuid walk runs hourly and after package changes
+**Measured** in the sandbox: 123,304 files, 2.6 s cold and 0.6 s warm. Too much every minute. It runs at the first scan, whenever the package log moves (packages are how most binaries arrive), and at least hourly, in `spawn_blocking`. Symlinks are never followed. A binary dropped outside a package is caught within the hour.
+**Evidence:** on this sandbox's real filesystem the walk found the same 17 setuid/setgid binaries as an independent Python walk, and two consecutive reads of every surface diffed to nothing.
+
+### Problem · An unreadable surface would have caused a flood
+**Found:** while writing the collectors, before anything shipped.
+**Cause:** the obvious collector returns an empty snapshot when a file can't be read. Diffed against the last one, that is "every group removed" (Routine, silent), and the next good read is "every member added" — `manav` joining wheel, Critical, notified.
+**Fix:** an unreadable surface is left out of the scan entirely; its stored snapshot stays as it was. A missing `authorized_keys` is different — it means no keys, and is read as such.
+**Evidence:** **Proven.** Two tests — one on the collector, one through the Sentinel's scan with `/etc/group` moved away and back. Against an empty-on-failure collector both fail; with the fix both pass.
+
+### Decision · Spoken as a sentence per scan, by file name
+"Today, eve was added to the wheel group." "Today, a new program that runs as root appeared: helper." Paths are reduced to the file name in speech — a spoken path is all slashes — and kept in full in the store. Routine changes are never volunteered but are described when asked ("what changed?"), which now says "changes", not "updates", since a new SSH key isn't one.
+
+### Decision · Unix only
+The module is `#[cfg(unix)]`. Windows and macOS surfaces are step 5.
+
+### Still open
+- **Hardware.** A real `usermod -aG`, `systemctl enable`, a key added to `authorized_keys`, and seeing the notification and hearing the sentence.
+- **Only the running user's `authorized_keys`.** Root's and other users' aren't readable without root.
+- **No package attribution.** A setuid binary that arrived with a package is reported the same as one dropped by hand. Correlating with the package log would make it quieter and more useful; not done.
+- **`/etc/passwd` only** — LDAP, SSSD and systemd-homed accounts aren't seen.
 
 ---
 
