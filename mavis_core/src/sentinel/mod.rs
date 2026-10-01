@@ -26,6 +26,8 @@
 
 pub mod change;
 pub mod packages;
+#[cfg(unix)]
+pub mod privilege;
 pub mod speech;
 pub mod store;
 pub mod summary;
@@ -48,6 +50,11 @@ const SCAN_INTERVAL: Duration = Duration::from_secs(60);
 /// Wait before the first scan so startup isn't competing with model
 /// loading and the first transcription.
 const STARTUP_DELAY: Duration = Duration::from_secs(20);
+
+/// The setuid walk reads ~120k files (0.6–2.6 s), so it runs hourly and
+/// whenever the package log moves, not every minute.
+#[cfg(unix)]
+const SETUID_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Whether the sentinel is switched on. Same opt-in shape as the
 /// MAVIS_CONTEXT_* sources: reading the machine's package history is
@@ -104,6 +111,10 @@ pub struct Sentinel {
     /// only when this changes, so the steady-state cost of running the
     /// sentinel is one stat() per minute.
     last_mtime: Option<SystemTime>,
+    #[cfg(unix)]
+    surfaces: privilege::Surfaces,
+    #[cfg(unix)]
+    last_setuid_scan: Option<std::time::Instant>,
 }
 
 impl Sentinel {
@@ -115,6 +126,10 @@ impl Sentinel {
             store,
             manager,
             last_mtime: None,
+            #[cfg(unix)]
+            surfaces: privilege::Surfaces::system(),
+            #[cfg(unix)]
+            last_setuid_scan: None,
         })
     }
 
@@ -123,18 +138,16 @@ impl Sentinel {
             info!("Sentinel: disabled (set MAVIS_SENTINEL=1 to switch it on)");
             return;
         }
-        if self.manager == PackageManager::Unknown {
-            warn!(
-                "Sentinel: no supported package manager found — \
-                 package monitoring is off for this machine"
+        let watch_packages = self.manager != PackageManager::Unknown;
+        if watch_packages {
+            info!(
+                "Sentinel: watching {} ({})",
+                self.manager.log_path().unwrap_or("?"),
+                self.manager.source_name()
             );
-            return;
+        } else {
+            warn!("Sentinel: no supported package manager found — watching privilege surfaces only");
         }
-        info!(
-            "Sentinel: watching {} ({})",
-            self.manager.log_path().unwrap_or("?"),
-            self.manager.source_name()
-        );
 
         tokio::time::sleep(STARTUP_DELAY).await;
         let mut ticker = interval(SCAN_INTERVAL);
@@ -145,12 +158,64 @@ impl Sentinel {
                 info!("Sentinel: bus closed, shutting down");
                 return;
             }
-            match self.scan() {
-                Ok(changes) if !changes.is_empty() => self.publish(changes),
-                Ok(_) => {}
-                Err(e) => warn!("Sentinel: scan failed: {}", e),
+            let mut changes = Vec::new();
+            let mut log_moved = false;
+            if watch_packages {
+                let before = self.last_mtime;
+                match self.scan() {
+                    Ok(found) => changes.extend(found),
+                    Err(e) => warn!("Sentinel: package scan failed: {}", e),
+                }
+                log_moved = self.last_mtime != before;
+            }
+            #[cfg(unix)]
+            match self.scan_privileges(log_moved).await {
+                Ok(found) => changes.extend(found),
+                Err(e) => warn!("Sentinel: privilege scan failed: {}", e),
+            }
+            #[cfg(not(unix))]
+            let _ = log_moved;
+            if !changes.is_empty() {
+                self.publish(changes);
             }
         }
+    }
+
+    /// Diff each privilege surface against its stored snapshot. The first
+    /// read of a surface is a silent baseline, like the package history.
+    #[cfg(unix)]
+    async fn scan_privileges(&mut self, package_log_moved: bool) -> anyhow::Result<Vec<Change>> {
+        let setuid_due = package_log_moved
+            || self
+                .last_setuid_scan
+                .is_none_or(|t| t.elapsed() >= SETUID_INTERVAL);
+        let surfaces = self.surfaces.clone();
+        let snapshots =
+            tokio::task::spawn_blocking(move || privilege::collect_all(&surfaces, setuid_due)).await?;
+        if setuid_due {
+            self.last_setuid_scan = Some(std::time::Instant::now());
+        }
+
+        let now = chrono::Utc::now();
+        let mut found = Vec::new();
+        for (source, snapshot) in snapshots {
+            let first_run = self.store.watermark(source)?.is_none();
+            let previous = self.store.snapshot(source)?;
+            if !first_run && previous == snapshot {
+                continue;
+            }
+            let changes = if first_run {
+                info!("Sentinel: baseline for {} ({} items)", source, snapshot.len());
+                Vec::new()
+            } else {
+                privilege::diff(source, &previous, &snapshot, now)
+            };
+            found.extend(self.store.apply_snapshot(source, &snapshot, &changes, now)?);
+        }
+        if !found.is_empty() {
+            info!("Sentinel: {} privilege change(s)", found.len());
+        }
+        Ok(found)
     }
 
     /// One pass over the package log. Returns only changes not seen before.
@@ -447,6 +512,72 @@ mod tests {
         let recorded = import(&store, &[change], false).unwrap();
         assert_eq!(recorded.len(), 1);
         assert_eq!(store.unannounced(Severity::Notable).unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Surfaces in a temp dir: one account with wheel membership.
+    #[cfg(unix)]
+    fn temp_surfaces(dir: &std::path::Path) -> privilege::Surfaces {
+        std::fs::write(dir.join("passwd"), "manav:x:1000:1000::/home/manav:/bin/zsh\n").unwrap();
+        std::fs::write(dir.join("group"), "wheel:x:998:manav\n").unwrap();
+        privilege::Surfaces {
+            passwd: dir.join("passwd"),
+            group: dir.join("group"),
+            login_defs: dir.join("login.defs"),
+            authorized_keys: vec![dir.join("authorized_keys")],
+            sudoers: vec![],
+            systemd: vec![],
+            setuid_roots: vec![],
+        }
+    }
+
+    /// Baseline silently, then a new wheel member is Critical and raises
+    /// a desktop notification through the permission gate.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_new_wheel_member_is_noticed_and_notified() {
+        let dir = temp_dir("privilege");
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe();
+        let mut s = Sentinel::new(Arc::clone(&bus), &dir).expect("sentinel");
+        s.surfaces = temp_surfaces(&dir);
+
+        assert!(s.scan_privileges(false).await.unwrap().is_empty(), "first read is a baseline");
+        assert!(s.scan_privileges(false).await.unwrap().is_empty(), "nothing changed");
+
+        std::fs::write(dir.join("group"), "wheel:x:998:manav,eve\n").unwrap();
+        let found = s.scan_privileges(false).await.unwrap();
+        assert_eq!(found.len(), 1, "{:?}", found);
+        assert_eq!(found[0].severity, Severity::Critical);
+
+        s.publish(found);
+        let mut notified = false;
+        while let Ok(e) = rx.try_recv() {
+            if e.event_type == EventType::PlanReady && e.payload["plan"]["type"] == "notify" {
+                let msg = e.payload["plan"]["message"].as_str().unwrap_or("");
+                assert!(msg.contains("eve was added to the wheel group"), "{}", msg);
+                notified = true;
+            }
+        }
+        assert!(notified, "a Critical change must notify immediately");
+        assert_eq!(s.store.unannounced(Severity::Notable).unwrap().len(), 1, "and is still spoken later");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A surface that vanishes for one scan must not come back as a flood.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn an_unreadable_surface_does_not_cause_a_flood() {
+        let dir = temp_dir("flood");
+        let bus = Arc::new(EventBus::new());
+        let mut s = Sentinel::new(bus, &dir).expect("sentinel");
+        s.surfaces = temp_surfaces(&dir);
+        s.scan_privileges(false).await.unwrap();
+
+        std::fs::rename(dir.join("group"), dir.join("group.away")).unwrap();
+        assert!(s.scan_privileges(false).await.unwrap().is_empty());
+        std::fs::rename(dir.join("group.away"), dir.join("group")).unwrap();
+        assert!(s.scan_privileges(false).await.unwrap().is_empty(), "same members as before: no change");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
