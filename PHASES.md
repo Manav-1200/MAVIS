@@ -654,7 +654,7 @@ A full line-by-line audit, run against a clone of the repository. Every claimed 
 
 ## Phase 8.5 — System Sentinel
 
-**Status:** :construction: Steps 1–2a built (2026-09-20 — 2026-09-21). Detects and records; does not yet speak. Rationale in [`DECISIONS.md` §10](DECISIONS.md#10-system-sentinel--phase-85).
+**Status:** :construction: Steps 1–2b built (2026-09-20 — 2026-10-01). Detects, records, and speaks — 2b is tested against seeded stores and the event bus but **not yet heard on hardware**. Rationale in [`DECISIONS.md` §10](DECISIONS.md#10-system-sentinel--phase-85).
 
 **Goal:** Phase 8 audits what MAVIS does. The Sentinel audits what happened *to the machine* — so a package you never asked for doesn't sit unnoticed for days.
 
@@ -698,7 +698,10 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ### 8.5.3 — Remaining steps
 
-- [ ] **2b — Speaking.** Planner leads with pending Notable changes on your next utterance; "what changed recently?" and "what did that update do?" answered from the store; `mark_announced` so you're told once.
+- [x] **2b — Speaking.** Planner leads with pending Notable changes on your next utterance; "what changed recently?" and "what did that update do?" answered from the store; `mark_announced` so you're told once. *(2026-10-01 — built and tested, not yet heard on hardware; [`DECISIONS.md` §19](DECISIONS.md#19-the-sentinel-speaks--phase-85-step-2b))*
+  - Leads with at most two updates; older ones counted, all marked told.
+  - Deterministic end to end — the model never sees this path.
+  - Found and fixed on the way: the first-run import was briefly visible as news to a concurrent reader (proven, 2,990 rows seen against the old code).
 - [ ] **3 — Privilege surfaces.** New setuid/setgid binaries, newly enabled systemd services and timers, sudoers changes, new users and groups, new `authorized_keys` entries.
 - [ ] **4 — Integrity and advisories.** `pacman -Qkk` / `rpm -Va` / `debsums`; `arch-audit` and the Debian security tracker.
 - [ ] **5 — Windows and macOS.** Appx, winget, the uninstall registry, scheduled tasks and startup items — Windows is notorious for restoring removed apps on update — plus Defender's verdicts; Homebrew, launchd, `pkgutil` and XProtect on macOS.
@@ -904,4 +907,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-09-30*
+*Last updated: 2026-10-01*
