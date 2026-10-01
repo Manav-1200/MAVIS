@@ -654,7 +654,7 @@ A full line-by-line audit, run against a clone of the repository. Every claimed 
 
 ## Phase 8.5 — System Sentinel
 
-**Status:** :construction: Steps 1–2b built (2026-09-20 — 2026-10-01). Detects, records, and speaks — 2b is tested against seeded stores and the event bus but **not yet heard on hardware**. Rationale in [`DECISIONS.md` §10](DECISIONS.md#10-system-sentinel--phase-85).
+**Status:** :construction: Steps 1–3 built (2026-09-20 — 2026-10-01). Detects, records and speaks package and privilege changes. Steps 2b and 3 are tested but **not yet run on hardware**. Rationale in [`DECISIONS.md` §10](DECISIONS.md#10-system-sentinel--phase-85).
 
 **Goal:** Phase 8 audits what MAVIS does. The Sentinel audits what happened *to the machine* — so a package you never asked for doesn't sit unnoticed for days.
 
@@ -702,7 +702,10 @@ Reads the package manager's own transaction log rather than diffing package list
   - Leads with at most two updates; older ones counted, all marked told.
   - Deterministic end to end — the model never sees this path.
   - Found and fixed on the way: the first-run import was briefly visible as news to a concurrent reader (proven, 2,990 rows seen against the old code).
-- [ ] **3 — Privilege surfaces.** New setuid/setgid binaries, newly enabled systemd services and timers, sudoers changes, new users and groups, new `authorized_keys` entries.
+- [x] **3 — Privilege surfaces.** New setuid/setgid binaries, newly enabled systemd services and timers, sudoers changes, new users and groups, new `authorized_keys` entries. *(2026-10-01 — built and tested, not yet run on hardware; [`DECISIONS.md` §20](DECISIONS.md#20-privilege-surfaces--phase-85-step-3))*
+  - Snapshot per surface, diffed each minute; setuid walk hourly and after package changes.
+  - Gains are Critical (UID 0, privileged groups, SSH keys, sudoers, setuid) or Notable (login accounts, other groups, enabled units); losses are Routine.
+  - An unreadable surface is skipped, never read as empty — proven to prevent a Critical flood.
 - [ ] **4 — Integrity and advisories.** `pacman -Qkk` / `rpm -Va` / `debsums`; `arch-audit` and the Debian security tracker.
 - [ ] **5 — Windows and macOS.** Appx, winget, the uninstall registry, scheduled tasks and startup items — Windows is notorious for restoring removed apps on update — plus Defender's verdicts; Homebrew, launchd, `pkgutil` and XProtect on macOS.
 
