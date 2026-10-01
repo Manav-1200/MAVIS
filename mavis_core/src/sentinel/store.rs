@@ -53,6 +53,11 @@ impl SentinelStore {
             "CREATE INDEX IF NOT EXISTS idx_changes_announced ON changes(announced)",
             [],
         )?;
+        // For the planner's per-utterance "anything pending?" query.
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_changes_pending ON changes(announced, severity)",
+            [],
+        )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS watermarks (
                 source    TEXT PRIMARY KEY,
@@ -96,49 +101,55 @@ impl SentinelStore {
     /// Record a change. Returns false if this exact change was already
     /// recorded, which is the normal case when a log is re-read.
     pub fn record(&self, change: &Change) -> Result<bool> {
-        let kind = serde_json::to_string(&change.kind)?;
-        let affected = self.conn.execute(
-            "INSERT OR IGNORE INTO changes
-                (fingerprint, kind, severity, source, occurred_at, detail, announced, recorded_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
-            params![
-                change.fingerprint(),
-                kind,
-                change.severity.as_str(),
-                change.source,
-                change.occurred_at.to_rfc3339(),
-                change.detail,
-                Utc::now().to_rfc3339(),
-            ],
-        )?;
-        Ok(affected > 0)
+        insert(&self.conn, change, false)
     }
 
-    /// Record several changes, returning only the ones that were new.
+    /// Record several changes, returning only the new ones. One
+    /// transaction, so the planner never sees half an update.
     pub fn record_all(&self, changes: &[Change]) -> Result<Vec<Change>> {
+        self.record_batch(changes, false)
+    }
+
+    /// Like `record_all`, but already marked announced — for the
+    /// first-run import, so history is never briefly pending.
+    pub fn record_all_announced(&self, changes: &[Change]) -> Result<Vec<Change>> {
+        self.record_batch(changes, true)
+    }
+
+    fn record_batch(&self, changes: &[Change], announced: bool) -> Result<Vec<Change>> {
+        // Safe: the store is always behind a mutex when shared.
+        let tx = self.conn.unchecked_transaction()?;
         let mut fresh = Vec::new();
         for change in changes {
-            if self.record(change)? {
+            if insert(&tx, change, announced)? {
                 fresh.push(change.clone());
             }
         }
+        tx.commit()?;
         Ok(fresh)
     }
 
-    /// Changes at or above `min_severity` that the user has not been told
-    /// about yet, oldest first.
+    /// Changes at or above `min_severity` not yet told, oldest first.
+    /// Filtered in SQL: routine rows stay unannounced forever.
     pub fn unannounced(&self, min_severity: Severity) -> Result<Vec<Change>> {
-        let mut stmt = self.conn.prepare(
+        let wanted: Vec<&'static str> = [Severity::Routine, Severity::Notable, Severity::Critical]
+            .into_iter()
+            .filter(|s| *s >= min_severity)
+            .map(Severity::as_str)
+            .collect();
+        let placeholders = vec!["?"; wanted.len()].join(", ");
+        let sql = format!(
             "SELECT kind, severity, source, occurred_at, detail
-             FROM changes WHERE announced = 0
+             FROM changes WHERE announced = 0 AND severity IN ({})
              ORDER BY occurred_at ASC",
-        )?;
-        let rows = stmt.query_map([], row_to_change)?;
+            placeholders
+        );
+        let mut stmt = self.conn.prepare(&sql)?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(wanted), row_to_change)?;
         Ok(rows
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
             .flatten()
-            .filter(|c| c.severity >= min_severity)
             .collect())
     }
 
@@ -199,6 +210,27 @@ impl SentinelStore {
             .conn
             .query_row("SELECT COUNT(*) FROM changes", [], |r| r.get(0))?)
     }
+}
+
+/// Insert one change; false if its fingerprint is already stored.
+fn insert(conn: &Connection, change: &Change, announced: bool) -> Result<bool> {
+    let kind = serde_json::to_string(&change.kind)?;
+    let affected = conn.execute(
+        "INSERT OR IGNORE INTO changes
+            (fingerprint, kind, severity, source, occurred_at, detail, announced, recorded_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![
+            change.fingerprint(),
+            kind,
+            change.severity.as_str(),
+            change.source,
+            change.occurred_at.to_rfc3339(),
+            change.detail,
+            announced as i64,
+            Utc::now().to_rfc3339(),
+        ],
+    )?;
+    Ok(affected > 0)
 }
 
 /// Rebuild a Change from a row. Returns Ok(None) for a row that cannot be
@@ -364,6 +396,29 @@ mod tests {
     fn marking_an_unknown_fingerprint_is_harmless() {
         let s = store();
         s.mark_announced(&["nothing-like-this".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn a_silent_import_records_everything_and_leaves_nothing_pending() {
+        let s = store();
+        let fresh = s
+            .record_all_announced(&[pulled_in("hyprland", 0), upgraded("firefox", 1)])
+            .unwrap();
+        assert_eq!(fresh.len(), 2, "both are new rows");
+        assert_eq!(s.count().unwrap(), 2, "history is on record");
+        assert!(
+            s.unannounced(Severity::Routine).unwrap().is_empty(),
+            "but none of it is news"
+        );
+    }
+
+    #[test]
+    fn unannounced_respects_the_critical_threshold() {
+        let s = store();
+        s.record(&pulled_in("hyprland", 0)).unwrap();
+        s.record(&upgraded("firefox", 1)).unwrap();
+        assert!(s.unannounced(Severity::Critical).unwrap().is_empty());
+        assert_eq!(s.unannounced(Severity::Notable).unwrap().len(), 1);
     }
 
     #[test]
