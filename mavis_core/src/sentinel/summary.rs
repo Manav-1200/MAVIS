@@ -100,25 +100,25 @@ pub fn summarize(group: &[Change]) -> Option<String> {
         parts.push(match pulled_in.len() {
             1 => format!("pulled in {}, which you didn't ask for", pulled_in[0]),
             n => format!(
-                "pulled in {} packages you didn't ask for: {}",
+                "pulled in {} packages you didn't ask for{}",
                 n,
-                join_naturally(&pulled_in)
+                listed(&pulled_in)
             ),
         });
     }
     if !removed.is_empty() {
         parts.push(match removed.len() {
             1 => format!("removed {}", removed[0]),
-            n => format!("removed {} packages: {}", n, join_naturally(&removed)),
+            n => format!("removed {} packages{}", n, listed(&removed)),
         });
     }
     if !downgraded.is_empty() {
         parts.push(match downgraded.len() {
             1 => format!("put {} back to an older version", downgraded[0]),
             n => format!(
-                "put {} packages back to older versions: {}",
+                "put {} packages back to older versions{}",
                 n,
-                join_naturally(&downgraded)
+                listed(&downgraded)
             ),
         });
     }
@@ -138,9 +138,22 @@ pub fn summarize_all(changes: &[Change]) -> Vec<String> {
         .collect()
 }
 
+/// Past this many names, say the count and a few examples. An install
+/// can pull in a hundred dependencies; the full list stays in the store.
+pub const MAX_SPOKEN_NAMES: usize = 5;
+
+/// ": a, b and c", or past the cap ", including a, b, c, d and e".
+pub(super) fn listed(items: &[&str]) -> String {
+    if items.len() <= MAX_SPOKEN_NAMES {
+        format!(": {}", join_naturally(items))
+    } else {
+        format!(", including {}", join_naturally(&items[..MAX_SPOKEN_NAMES]))
+    }
+}
+
 /// How to refer to a day in speech. Anything older than a week gets a
 /// date, because "on Tuesday" stops being useful past seven days.
-fn relative_day(when: DateTime<Utc>) -> String {
+pub(super) fn relative_day(when: DateTime<Utc>) -> String {
     let local = when.with_timezone(&Local);
     let today = Local::now().date_naive();
     let that_day = local.date_naive();
@@ -153,14 +166,14 @@ fn relative_day(when: DateTime<Utc>) -> String {
     }
 }
 
-fn join_naturally(items: &[&str]) -> String {
+pub(super) fn join_naturally(items: &[&str]) -> String {
     let owned: Vec<String> = items.iter().map(|s| s.to_string()).collect();
     join_naturally_owned(&owned)
 }
 
 /// "a", "a and b", "a, b and c" — written out rather than comma-listed,
 /// because this is read aloud.
-fn join_naturally_owned(items: &[String]) -> String {
+pub(super) fn join_naturally_owned(items: &[String]) -> String {
     match items.len() {
         0 => String::new(),
         1 => items[0].clone(),
@@ -296,6 +309,27 @@ mod tests {
         // Routine upgrades are not mentioned at all.
         assert!(!line.contains("firefox"), "{}", line);
         assert!(!line.contains("mesa"), "{}", line);
+    }
+
+    #[test]
+    fn long_lists_are_cut_to_a_count_and_examples() {
+        let changes: Vec<Change> = (0..40)
+            .map(|i| installed(&format!("dep{:02}", i), false, 100 - i))
+            .collect();
+        let line = summarize(&changes).unwrap();
+        assert!(line.contains("pulled in 40 packages you didn't ask for, including"), "{}", line);
+        assert!(line.contains("dep00, dep01, dep02, dep03 and dep04"), "{}", line);
+        assert!(!line.contains("dep05"), "{}", line);
+    }
+
+    #[test]
+    fn a_list_at_the_cap_is_said_in_full() {
+        let changes: Vec<Change> = (0..MAX_SPOKEN_NAMES as i64)
+            .map(|i| installed(&format!("dep{}", i), false, 100 - i))
+            .collect();
+        let line = summarize(&changes).unwrap();
+        assert!(!line.contains("including"), "{}", line);
+        assert!(line.contains(&format!("dep{}", MAX_SPOKEN_NAMES - 1)), "{}", line);
     }
 
     /// Order follows the log, oldest first, so the sentence reads in the
