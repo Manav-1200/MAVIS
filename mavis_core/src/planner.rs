@@ -5,6 +5,8 @@ use crate::memory::long_term::LongTermMemory;
 use crate::memory::recall::{build_fts_query, RecallStore};
 use crate::memory::working::WorkingMemory;
 use crate::models::event::{Event, EventType};
+use crate::sentinel::speech::{self, Turn};
+use crate::sentinel::store::SentinelStore;
 use log::{info, warn};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
@@ -568,6 +570,10 @@ pub struct Planner {
     recall: Arc<Mutex<RecallStore>>,
     long_term: Arc<Mutex<LongTermMemory>>,
     entities: Arc<Mutex<EntityStore>>,
+    /// Only set when MAVIS_SENTINEL=1. Locked inside spawn_blocking only.
+    sentinel: Option<Arc<std::sync::Mutex<SentinelStore>>>,
+    /// The update MAVIS last spoke about, for "what did that update do?".
+    last_told: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
 }
 
 impl Planner {
@@ -580,9 +586,19 @@ impl Planner {
         recall: Arc<Mutex<RecallStore>>,
         long_term: Arc<Mutex<LongTermMemory>>,
         entities: Arc<Mutex<EntityStore>>,
+        sentinel: Option<Arc<std::sync::Mutex<SentinelStore>>>,
     ) -> Self {
         info!("Planner: {} installed applications available", apps.len());
-        Self { bus, working, apps, recall, long_term, entities }
+        Self {
+            bus,
+            working,
+            apps,
+            recall,
+            long_term,
+            entities,
+            sentinel,
+            last_told: std::sync::Mutex::new(None),
+        }
     }
 
     pub async fn run(&mut self) {
@@ -661,6 +677,22 @@ impl Planner {
             return Ok(());
         }
 
+        // Sentinel: answer a question about system changes outright, or say
+        // pending changes first. Plans are spoken in order, so a lead comes
+        // before the reply.
+        match self.sentinel_turn(intent).await {
+            Some(Turn::Answer(spoken)) => {
+                info!("Planner: answered from the Sentinel's store");
+                self.say(spoken.text);
+                return Ok(());
+            }
+            Some(Turn::Lead(spoken)) => {
+                info!("Planner: leading with pending system changes");
+                self.say(spoken.text);
+            }
+            None => {}
+        }
+
         // Deterministic deflection — no LLM round trip, no way to leak.
         if is_meta_instruction_question(intent) {
             let plan_event = Event {
@@ -716,6 +748,57 @@ impl Planner {
         };
         self.bus.publish(worker_req);
         Ok(())
+    }
+
+    /// The Sentinel's part in this turn. Failures return None, so a broken
+    /// store never blocks the actual reply.
+    async fn sentinel_turn(&self, intent: &str) -> Option<Turn> {
+        let store = self.sentinel.clone()?;
+        let window = parse_time_reference(intent).map(|(start, end, label)| speech::Window {
+            start: start.with_timezone(&chrono::Utc),
+            end: end.with_timezone(&chrono::Utc),
+            label,
+        });
+        let last_told = *self.last_told.lock().unwrap_or_else(|p| p.into_inner());
+        let text = intent.to_string();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let store = store.lock().unwrap_or_else(|p| p.into_inner());
+            speech::respond(&store, &text, window, last_told, chrono::Utc::now())
+        })
+        .await;
+
+        let turn = match result {
+            Ok(Ok(turn)) => turn?,
+            Ok(Err(e)) => {
+                warn!("Planner: Sentinel store unavailable this turn: {}", e);
+                return None;
+            }
+            Err(e) => {
+                warn!("Planner: Sentinel lookup did not finish: {}", e);
+                return None;
+            }
+        };
+        let about = match &turn {
+            Turn::Answer(s) | Turn::Lead(s) => s.about,
+        };
+        if about.is_some() {
+            *self.last_told.lock().unwrap_or_else(|p| p.into_inner()) = about;
+        }
+        Some(turn)
+    }
+
+    /// Publish a plain spoken reply.
+    fn say(&self, text: String) {
+        self.bus.publish(Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "planner".to_string(),
+            event_type: EventType::PlanReady,
+            payload: serde_json::json!({
+                "plan": {"type": "say", "text": text}
+            }),
+        });
     }
 
     async fn build_working_memory(
@@ -1292,5 +1375,127 @@ mod tests {
         assert_eq!(normalize("Code - OSS"), "code oss");
         assert_eq!(normalize("  Firefox  "), "firefox");
         assert_eq!(normalize(""), "");
+    }
+
+    use crate::sentinel::change::{Change, ChangeKind};
+
+    /// Planner on temp stores with one pending pulled-in package.
+    fn planner_with_pending_change(
+        tag: &str,
+    ) -> (Planner, tokio::sync::broadcast::Receiver<Event>, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "mavis_planner_{}_{}_{}",
+            tag,
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let sentinel = SentinelStore::new(&dir.join("sentinel.db")).unwrap();
+        let when = chrono::DateTime::from_timestamp(chrono::Utc::now().timestamp() - 3600, 0).unwrap();
+        sentinel
+            .record_all(&[Change::new(
+                ChangeKind::PackageInstalled {
+                    name: "hyprland".into(),
+                    version: "1.0".into(),
+                    requested: false,
+                },
+                "pacman",
+                when,
+            )])
+            .unwrap();
+
+        let bus = Arc::new(EventBus::new());
+        let rx = bus.subscribe();
+        let planner = Planner::new(
+            bus,
+            Arc::new(RwLock::new(WorkingMemory::new())),
+            vec![AppEntry { name: "Firefox".into(), exec: "firefox".into() }],
+            Arc::new(Mutex::new(RecallStore::new(&dir.join("recall.db")).unwrap())),
+            Arc::new(Mutex::new(LongTermMemory::new(&dir.join("long_term.db")).unwrap())),
+            Arc::new(Mutex::new(EntityStore::new(&dir.join("entities.db")).unwrap())),
+            Some(Arc::new(std::sync::Mutex::new(sentinel))),
+        );
+        (planner, rx, dir)
+    }
+
+    fn utterance(text: &str) -> Event {
+        Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "stt".into(),
+            event_type: EventType::UserIntent,
+            payload: serde_json::json!({ "text": text, "source": "voice" }),
+        }
+    }
+
+    fn drain(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> Vec<Event> {
+        let mut out = Vec::new();
+        while let Ok(e) = rx.try_recv() {
+            out.push(e);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn pending_changes_are_said_before_the_reply() {
+        let (planner, mut rx, dir) = planner_with_pending_change("lead");
+        planner.handle_event(utterance("open firefox")).await.unwrap();
+
+        let plans: Vec<serde_json::Value> = drain(&mut rx)
+            .into_iter()
+            .filter(|e| e.event_type == EventType::PlanReady)
+            .map(|e| e.payload["plan"].clone())
+            .collect();
+        assert_eq!(plans.len(), 2, "lead, then the action: {:#?}", plans);
+        let lead = plans[0]["text"].as_str().unwrap();
+        assert!(lead.contains("hyprland"), "{}", lead);
+        assert_eq!(plans[1][1]["type"], "app", "the request still runs: {}", plans[1]);
+
+        // Told once.
+        planner.handle_event(utterance("open firefox")).await.unwrap();
+        let plans = drain(&mut rx)
+            .into_iter()
+            .filter(|e| e.event_type == EventType::PlanReady)
+            .count();
+        assert_eq!(plans, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn change_questions_never_reach_the_model() {
+        let (planner, mut rx, dir) = planner_with_pending_change("answer");
+        planner.handle_event(utterance("MAVIS, what changed recently?")).await.unwrap();
+
+        let events = drain(&mut rx);
+        assert!(
+            !events.iter().any(|e| e.event_type == EventType::WorkerRequest),
+            "the model must not answer this"
+        );
+        let said: Vec<&str> = events
+            .iter()
+            .filter(|e| e.event_type == EventType::PlanReady)
+            .filter_map(|e| e.payload["plan"]["text"].as_str())
+            .collect();
+        assert_eq!(said.len(), 1, "one answer, no separate lead: {:?}", said);
+        assert!(said[0].contains("pulled in hyprland"), "{}", said[0]);
+
+        planner.handle_event(utterance("what did that update do")).await.unwrap();
+        let said: Vec<String> = drain(&mut rx)
+            .into_iter()
+            .filter(|e| e.event_type == EventType::PlanReady)
+            .filter_map(|e| e.payload["plan"]["text"].as_str().map(String::from))
+            .collect();
+        assert_eq!(said.len(), 1);
+        assert!(said[0].contains("hyprland"), "{}", said[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn stop_is_never_answered_with_news() {
+        let (planner, mut rx, dir) = planner_with_pending_change("stop");
+        planner.handle_event(utterance("stop")).await.unwrap();
+        assert!(!drain(&mut rx).iter().any(|e| e.event_type == EventType::PlanReady));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
