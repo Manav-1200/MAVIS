@@ -21,6 +21,7 @@ use super::change::{Change, ChangeKind, Severity};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub struct SentinelStore {
@@ -56,6 +57,16 @@ impl SentinelStore {
         // For the planner's per-utterance "anything pending?" query.
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_changes_pending ON changes(announced, severity)",
+            [],
+        )?;
+        // Last-seen state of each privilege surface (step 3).
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS snapshots (
+                source TEXT NOT NULL,
+                item   TEXT NOT NULL,
+                detail TEXT NOT NULL,
+                PRIMARY KEY (source, item)
+            )",
             [],
         )?;
         conn.execute(
@@ -125,6 +136,47 @@ impl SentinelStore {
                 fresh.push(change.clone());
             }
         }
+        tx.commit()?;
+        Ok(fresh)
+    }
+
+    /// The stored snapshot for a privilege surface; empty if never taken.
+    pub fn snapshot(&self, source: &str) -> Result<BTreeMap<String, String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT item, detail FROM snapshots WHERE source = ?1")?;
+        let rows = stmt.query_map(params![source], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Replace a surface's snapshot and record what changed, in one
+    /// transaction. Returns the changes that were new.
+    pub fn apply_snapshot(
+        &self,
+        source: &str,
+        snapshot: &BTreeMap<String, String>,
+        changes: &[Change],
+        at: DateTime<Utc>,
+    ) -> Result<Vec<Change>> {
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute("DELETE FROM snapshots WHERE source = ?1", params![source])?;
+        for (item, detail) in snapshot {
+            tx.execute(
+                "INSERT INTO snapshots (source, item, detail) VALUES (?1, ?2, ?3)",
+                params![source, item, detail],
+            )?;
+        }
+        let mut fresh = Vec::new();
+        for change in changes {
+            if insert(&tx, change, false)? {
+                fresh.push(change.clone());
+            }
+        }
+        tx.execute(
+            "INSERT INTO watermarks (source, last_seen) VALUES (?1, ?2)
+             ON CONFLICT(source) DO UPDATE SET last_seen = excluded.last_seen",
+            params![source, at.to_rfc3339()],
+        )?;
         tx.commit()?;
         Ok(fresh)
     }
@@ -446,6 +498,29 @@ mod tests {
         let recent = s.recent(2).unwrap();
         assert_eq!(recent.len(), 2);
         assert!(recent[0].detail.contains("c"), "newest first");
+    }
+
+    #[test]
+    fn snapshots_replace_and_record_together() {
+        let s = store();
+        assert!(s.snapshot("users").unwrap().is_empty());
+
+        let first: BTreeMap<String, String> = [("root".into(), "0:0".into())].into();
+        s.apply_snapshot("users", &first, &[], at(0)).unwrap();
+        assert_eq!(s.snapshot("users").unwrap(), first);
+        assert_eq!(s.watermark("users").unwrap(), Some(at(0)));
+
+        let second: BTreeMap<String, String> = [("toor".into(), "0:0".into())].into();
+        let change = Change::new(
+            ChangeKind::UserAdded { name: "toor".into(), uid: 0, login: false },
+            "users",
+            at(60),
+        );
+        let fresh = s.apply_snapshot("users", &second, &[change], at(60)).unwrap();
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(s.snapshot("users").unwrap(), second, "old items are gone");
+        assert_eq!(s.unannounced(Severity::Critical).unwrap().len(), 1);
+        assert!(s.snapshot("groups").unwrap().is_empty(), "sources are independent");
     }
 
     #[test]
