@@ -6,7 +6,7 @@
 use super::change::{Change, ChangeKind, Severity};
 use super::store::SentinelStore;
 use super::summary::{
-    group_transactions, join_naturally, join_naturally_owned, listed, relative_day, summarize,
+    describe_privilege, group_transactions, is_privilege, join_naturally, join_naturally_owned, listed, relative_day, summarize,
     TRANSACTION_GAP_SECS,
 };
 use chrono::{DateTime, Duration, Utc};
@@ -115,10 +115,10 @@ pub fn announcement(pending: &[Change], max: usize) -> Option<Announcement> {
     match earlier {
         0 => {}
         1 => sentences.push(
-            "There was also one earlier update. Ask me what changed to hear about it.".into(),
+            "There was also one earlier change. Ask me what changed to hear about it.".into(),
         ),
         n => sentences.push(format!(
-            "There were also {} earlier updates. Ask me what changed to hear about them.",
+            "There were also {} earlier changes. Ask me what changed to hear about them.",
             n
         )),
     }
@@ -147,7 +147,7 @@ fn answer_period(store: &SentinelStore, window: &Window) -> anyhow::Result<Spoke
     let mut sentences: Vec<String> = Vec::new();
     if skipped > 0 {
         sentences.push(format!(
-            "There were {} updates {}. The latest {}:",
+            "There were {} changes {}. The latest {}:",
             groups.len(),
             window.label,
             number_word(described.len())
@@ -235,6 +235,9 @@ fn mark_told(store: &SentinelStore, groups: &[Vec<Change>]) {
 /// Everything one update did: the Notable sentence, then what was asked
 /// for and how much was upgraded (named up to two, counted beyond).
 pub fn describe_transaction(group: &[Change]) -> Option<String> {
+    if group.iter().any(|c| is_privilege(&c.kind)) {
+        return describe_privilege(group);
+    }
     let first = group.iter().map(|c| c.occurred_at).min()?;
 
     let mut sorted: Vec<&Change> = group.iter().collect();
@@ -517,7 +520,7 @@ mod tests {
         assert!(a.text.contains("newer"), "{}", a.text);
         assert!(a.text.contains("newest"), "{}", a.text);
         assert!(!a.text.contains("oldest"), "{}", a.text);
-        assert!(a.text.contains("also 2 earlier updates"), "{}", a.text);
+        assert!(a.text.contains("also 2 earlier changes"), "{}", a.text);
         assert_eq!(a.fingerprints.len(), 4, "the counted ones are covered too");
         assert!(a.text.find("newer").unwrap() < a.text.find("newest").unwrap());
         assert_eq!(a.about, Some(ago(DAY)));
@@ -531,7 +534,7 @@ mod tests {
             installed("c", false, DAY),
         ];
         let a = announcement(&pending, 2).unwrap();
-        assert!(a.text.contains("also one earlier update"), "{}", a.text);
+        assert!(a.text.contains("also one earlier change"), "{}", a.text);
     }
 
     #[test]
@@ -654,7 +657,7 @@ mod tests {
         assert!(
             spoken
                 .text
-                .starts_with("There were 5 updates in the last week. The latest three:"),
+                .starts_with("There were 5 changes in the last week. The latest three:"),
             "{}",
             spoken.text
         );
