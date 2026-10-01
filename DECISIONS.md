@@ -82,6 +82,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 10-01 | 8.5 | Sentinel step 2b: pending changes spoken on the next utterance, "what changed?" and "what did that update do?" answered from the store. Built and tested; not yet heard on hardware (§19) |
 
 ---
 
@@ -560,6 +561,9 @@ It said nothing about the two packages that were asked for.
 ### Decision · `dnf` queries run with `--cacheonly`
 **Why:** A background scan must never stall on a slow mirror.
 
+### Status · Step 2b — speaking — is built (2026-10-01)
+See §19. Everything above still holds; 2b adds a reader, it doesn't change what is detected or how severe it is.
+
 ### Status · The RPM parser is unverified on real hardware
 Written from the documented format and unit-tested, but never run against a live Fedora system. Marked `UNVERIFIED ON REAL HARDWARE` in the source. If a Fedora user sees something strange, suspect the parser first.
 
@@ -941,6 +945,64 @@ A small model asked a vague question after that pattern answers with the pattern
 
 ### Still open · The microphone
 `peak=2.259` in this run — the signal is not merely clipping, it is arriving at more than double full scale, so PipeWire is applying gain above 100%. The warning now prints the real figure instead of "1.0". Everything else on the audio path is downstream of this: at that level Whisper returned "Hello, Moogers" for "hello Mavis" and a 0.37 confidence.
+
+## 19. The Sentinel speaks — Phase 8.5 step 2b
+
+**Date:** 2026-10-01. **Status:** built, `cargo test` and `cargo clippy` clean. **Not yet heard on hardware** — every claim below is about tests against seeded stores and the event bus, not a voice run.
+
+What it does, with `MAVIS_SENTINEL=1`:
+
+- **Leads.** On the next utterance, pending Notable (and, from step 3, Critical) changes are said first — the same one-sentence-per-update summary as step 2a — and then the utterance is handled as normal. Each change is marked announced so it is told once.
+- **"What changed recently?"** — answered from the store: every severity, the latest three updates at most, a week by default or the window the planner already recognises ("yesterday", "this morning", "last week").
+- **"What did that update do?"** — the update MAVIS last spoke about, or the most recent one if it hasn't spoken about any.
+
+With the Sentinel off, nothing here runs: the planner doesn't open `sentinel.db` and these questions go to the model exactly as before.
+
+### Decision · No LLM on this path, not even to phrase it
+**Why:** three reasons, any one sufficient. Worker replies are cut to two sentences and 180 characters, so a package list would be truncated. The 3.8B model is unreliable at keeping a list of names intact. And a model "summarising" what changed is a model choosing which packages are worth mentioning — a severity decision by another name, which ADR-007 and ADR-010 rule out. The sentences come from the store; the questions are recognised by phrase, like the action intents (ADR-006), and never reach the worker.
+**Evidence:** **Proven.** A planner-level test sends "MAVIS, what changed recently?" through `handle_event` and asserts no `WorkerRequest` is published; with the Sentinel wiring removed it fails.
+
+### Decision · The lead is its own plan, published before the reply
+**Why:** the permission gate reviews plans in order and the TTS queue plays in order, so a `say` published first is spoken first — and it fills the second or two the model takes to answer instead of adding to the wait. It also lands in the working-memory ring as something MAVIS said, so a follow-up about "hyprland" has context.
+**Not a lead:** "stop" — a request for silence is never answered with news. A question about changes — the answer covers it, so there is no separate lead.
+**Evidence:** **Proven** at the bus: "open firefox" with one pending change publishes the announcement and then the app plan, in that order; the same utterance again publishes only the app plan. Fails without the wiring. Whether it *sounds* right — order, pacing, barge-in over it — is untested until a hardware run.
+
+### Decision · Marked told before it is spoken, and not spoken if that fails
+**Why:** if marking failed and the announcement were spoken anyway, it would be repeated on every utterance until the database recovered — the most intrusive failure available. Silence plus a warning in the log is better.
+**Consequence:** "told" means "published to the queue", not "heard". If the user talks over it, it isn't repeated — it is still answerable by asking what changed.
+
+### Decision · A backlog is counted, not read
+**Context:** a machine left off for a fortnight might have five updates' worth of pending changes.
+**Decision:** the newest two updates are spoken; the rest are counted ("There were also 3 earlier updates. Ask me what changed to hear about them.") and **all** are marked told.
+**Rejected:** marking only the spoken ones. The rest would then lead the next utterance, and the one after — the same news dripped out two at a time.
+**Known gap:** "what changed?" defaults to the last week, so a counted update older than that needs "what changed last week" or it won't come back. Acceptable for now; noted rather than engineered around.
+
+### Decision · "That update" is the one last mentioned, not the newest
+**Why:** routine updates are never announced, so the common case is: Friday's update pulled in hyprland, Saturday's only upgraded things, MAVIS mentions Friday's on Monday, and the user asks "what did that update do?". The newest is Saturday's — the wrong answer. The planner keeps the start of the last update it spoke about; it is lost on a planner restart, which only means the question falls back to the newest.
+**Evidence:** **Proven** against a seeded store with exactly that shape.
+
+### Decision · Long lists give a count and five names
+**Why:** 2b is the first time these sentences are spoken, and "didn't ask for" includes every dependency of something the user *did* ask for — `pacman -S plasma` pulls in well over a hundred packages. Past five names a sentence now says "pulled in 140 packages you didn't ask for, including a, b, c, d and e". Upgrades are counted past two when describing an update. The full lists stay in the store.
+**Evidence:** **Proven** — a 40-package test sentence names five; at the cap all names are said.
+
+### Problem · The first-run import was visible as news
+**Found:** while wiring the planner, before it shipped. Not by a user.
+**Cause:** the first run recorded history and *then* marked it announced, as two steps. With nothing but the Sentinel reading the store that didn't matter. Once the planner asks for pending changes on every utterance, it does: the first run lands 20 s after startup — when the user is likely to be talking — and on the target machine is thousands of rows, each its own fsync in autocommit mode, so the gap was seconds long. A read in it would have seen the machine's entire history as unannounced, and the lead would have marked it all told while announcing a sample: "Your system update on 3 March pulled in… There were also 2,077 earlier updates."
+**Fix:** `record_all_announced` writes the rows already marked, in one transaction. Batch writes in general are now one transaction, so the planner can't see half an update either.
+**Evidence:** **Proven.** A test runs a 3,000-row first-run import on one connection while a second polls for pending changes. Against the old two-step import the poller saw **2,990** pending (failed 4 of 4 runs); with the fix it never sees one. It can't be flaky in the passing direction — inside one transaction there is no instant at which a pending row exists.
+
+### Problem · Every routine upgrade was loaded on every utterance
+**Cause:** `unannounced()` selected every row with `announced = 0` and filtered severity in Rust. Routine changes are never announced, so they accumulate there forever — harmless while nothing called it, a growing scan per utterance once the planner did.
+**Fix:** the severity filter is in SQL, with an `(announced, severity)` index.
+**Evidence:** reasoned, plus tests that every threshold still filters correctly. Not timed.
+
+### Decision · The planner has its own connection to `sentinel.db`
+**Why:** the Sentinel owns its store on its own task; sharing it would tie the planner's turn to the Sentinel's scan. SQLite coordinates two connections (rusqlite's default busy timeout is 5 s), and every planner query runs in `spawn_blocking` (rule 8). The Sentinel still only ever updates the `announced` flag, and now so does the planner — the change log stays append-only.
+
+### Still open
+- **Hardware.** Hearing the lead before a reply, barge-in over it, and the questions recognised through the real microphone — given the capture-gain problem, "what changed" may well transcribe as something else.
+- **Recognition is a positive grammar** in `sentinel/speech.rs`. "What changed in the Rust release?" goes to the model because "rust" isn't in it. Utterances that fall just outside will go to the model, which may invent an answer; widen the grammar from what real runs show, not speculatively.
+- `sentinel/speech.rs` is ~940 lines, about 60% tests. `planner.rs` grew by ~70 lines of code.
 
 ---
 
