@@ -63,6 +63,9 @@ pub fn summarize(group: &[Change]) -> Option<String> {
     if group.is_empty() {
         return None;
     }
+    if group.iter().any(|c| is_privilege(&c.kind)) {
+        return privilege_sentence(group, false);
+    }
 
     // Sort here rather than trusting the caller. `summarize_all` arrives
     // pre-sorted via grouping, but `summarize` is also called directly,
@@ -128,6 +131,168 @@ pub fn summarize(group: &[Change]) -> Option<String> {
         when,
         join_naturally_owned(&parts)
     ))
+}
+
+/// True for step 3's privilege-surface changes.
+pub fn is_privilege(kind: &ChangeKind) -> bool {
+    !matches!(
+        kind,
+        ChangeKind::PackageInstalled { .. }
+            | ChangeKind::PackageRemoved { .. }
+            | ChangeKind::PackageUpgraded { .. }
+            | ChangeKind::PackageDowngraded { .. }
+    )
+}
+
+/// Everything in a privilege group, routine changes included — for when
+/// the user asks.
+pub fn describe_privilege(group: &[Change]) -> Option<String> {
+    privilege_sentence(group, true)
+}
+
+/// One sentence for a scan's privilege changes: "Today, eve was added to
+/// the wheel group and a new SSH key, eve@box, was added to ~/.ssh/authorized_keys."
+fn privilege_sentence(group: &[Change], include_routine: bool) -> Option<String> {
+    use std::collections::BTreeMap;
+    let first = group.iter().map(|c| c.occurred_at).min()?;
+    let mut sorted: Vec<&Change> = group
+        .iter()
+        .filter(|c| include_routine || c.severity > Severity::Routine)
+        .collect();
+    sorted.sort_by_key(|c| c.occurred_at);
+
+    let mut root_ids = Vec::new();
+    let mut logins = Vec::new();
+    let mut joined: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut keys_added: Vec<(String, String)> = Vec::new();
+    let mut sudoers = false;
+    let mut enabled = Vec::new();
+    let mut setuid_root = Vec::new();
+    let mut setuid_other = Vec::new();
+    // Routine — only when asked.
+    let mut system_accounts = Vec::new();
+    let mut accounts_removed = Vec::new();
+    let mut uid_changed = Vec::new();
+    let mut groups_added = Vec::new();
+    let mut groups_removed = Vec::new();
+    let mut left: BTreeMap<&str, Vec<String>> = BTreeMap::new();
+    let mut keys_removed = Vec::new();
+    let mut disabled = Vec::new();
+    let mut setuid_gone = Vec::new();
+
+    for c in sorted {
+        match &c.kind {
+            ChangeKind::UserAdded { name, uid: 0, .. } => root_ids.push(name.clone()),
+            ChangeKind::UserUidChanged { name, to: 0, .. } => root_ids.push(name.clone()),
+            ChangeKind::UserAdded { name, login: true, .. } => logins.push(name.clone()),
+            ChangeKind::UserAdded { name, .. } => system_accounts.push(name.clone()),
+            ChangeKind::UserRemoved { name } => accounts_removed.push(name.clone()),
+            ChangeKind::UserUidChanged { name, .. } => uid_changed.push(name.clone()),
+            ChangeKind::GroupAdded { name } => groups_added.push(name.clone()),
+            ChangeKind::GroupRemoved { name } => groups_removed.push(name.clone()),
+            ChangeKind::GroupMemberAdded { group, user } => {
+                joined.entry(group).or_default().push(user.clone())
+            }
+            ChangeKind::GroupMemberRemoved { group, user } => {
+                left.entry(group).or_default().push(user.clone())
+            }
+            ChangeKind::SshKeyAdded { file, label } => keys_added.push((file.clone(), label.clone())),
+            ChangeKind::SshKeyRemoved { label, .. } => keys_removed.push(label.clone()),
+            ChangeKind::SudoersChanged { .. } => sudoers = true,
+            ChangeKind::UnitEnabled { unit, .. } => enabled.push(unit.clone()),
+            ChangeKind::UnitDisabled { unit, .. } => disabled.push(unit.clone()),
+            ChangeKind::SetuidAdded { path, setuid: true, root_owned: true } => setuid_root.push(file_name(path)),
+            ChangeKind::SetuidAdded { path, .. } => setuid_other.push(file_name(path)),
+            ChangeKind::SetuidRemoved { path } => setuid_gone.push(file_name(path)),
+            _ => {}
+        }
+    }
+
+    let mut clauses: Vec<String> = Vec::new();
+
+    clauses.extend(counted(&root_ids, &|n| format!("{} has user ID 0, the same as root", n), &|n| {
+        format!("{} accounts have user ID 0, the same as root", n)
+    }));
+    clauses.extend(counted(&logins, &|n| format!("a new login account, {}, was created", n), &|n| {
+        format!("{} new login accounts were created", n)
+    }));
+    for (group, users) in &joined {
+        let names: Vec<&str> = users.iter().map(String::as_str).collect();
+        let verb = if users.len() == 1 { "was" } else { "were" };
+        clauses.push(format!("{} {} added to the {} group", join_naturally(&names), verb, group));
+    }
+    if let Some((file, _)) = keys_added.first() {
+        let labels: Vec<String> = keys_added.iter().map(|(_, l)| l.clone()).collect();
+        clauses.extend(counted(&labels, &|l| format!("a new SSH key, {}, was added to {}", l, file), &|n| {
+            format!("{} new SSH keys were added to {}", n, file)
+        }));
+    }
+    if sudoers {
+        clauses.push("the sudo configuration changed".to_string());
+    }
+    clauses.extend(counted(&enabled, &|u| format!("{} was set to start automatically", u), &|n| {
+        format!("{} units were set to start automatically", n)
+    }));
+    clauses.extend(counted(&setuid_root, &|p| format!("a new program that runs as root appeared: {}", p), &|n| {
+        format!("{} new programs that run as root appeared", n)
+    }));
+    clauses.extend(counted(&setuid_other, &|p| format!("a new setuid or setgid program appeared: {}", p), &|n| {
+        format!("{} new setuid or setgid programs appeared", n)
+    }));
+    clauses.extend(counted(&system_accounts, &|n| format!("system account {} was created", n), &|n| {
+        format!("{} system accounts were created", n)
+    }));
+    clauses.extend(counted(&accounts_removed, &|n| format!("account {} was removed", n), &|n| {
+        format!("{} accounts were removed", n)
+    }));
+    clauses.extend(counted(&uid_changed, &|n| format!("{}'s user ID changed", n), &|n| {
+        format!("{} accounts changed user ID", n)
+    }));
+    clauses.extend(counted(&groups_added, &|n| format!("group {} was created", n), &|n| format!("{} groups were created", n)));
+    clauses.extend(counted(&groups_removed, &|n| format!("group {} was removed", n), &|n| format!("{} groups were removed", n)));
+    clauses.extend(counted(&keys_removed, &|l| format!("SSH key {} was removed", l), &|n| format!("{} SSH keys were removed", n)));
+    clauses.extend(counted(&disabled, &|u| format!("{} was disabled", u), &|n| format!("{} units were disabled", n)));
+    clauses.extend(counted(&setuid_gone, &|p| format!("{} is no longer setuid", p), &|n| {
+        format!("{} programs are no longer setuid", n)
+    }));
+    for (group, users) in &left {
+        let names: Vec<&str> = users.iter().map(String::as_str).collect();
+        let verb = if users.len() == 1 { "was" } else { "were" };
+        clauses.push(format!("{} {} removed from the {} group", join_naturally(&names), verb, group));
+    }
+
+    if clauses.is_empty() {
+        return None;
+    }
+    Some(format!("{}, {}.", capitalize(&relative_day(first)), join_naturally_owned(&clauses)))
+}
+
+/// "x was …" for one item, "N things …: a, b and c" for several.
+fn counted(items: &[String], one: &dyn Fn(&str) -> String, many: &dyn Fn(usize) -> String) -> Option<String> {
+    match items.len() {
+        0 => None,
+        1 => Some(one(&items[0])),
+        n => {
+            let names: Vec<&str> = items.iter().map(String::as_str).collect();
+            Some(format!("{}{}", many(n), listed(&names)))
+        }
+    }
+}
+
+/// File name only: a spoken path is all slashes.
+fn file_name(path: &str) -> String {
+    std::path::Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+fn capitalize(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
 }
 
 /// Sentences for a whole batch, one per transaction, newest last.
@@ -415,6 +580,43 @@ mod tests {
         // Older than a week: an actual date.
         let old = relative_day(Utc::now() - chrono::Duration::days(30));
         assert!(old.chars().any(|c| c.is_ascii_digit()), "{}", old);
+    }
+
+    fn privilege(kind: ChangeKind, source: &str, secs: i64) -> Change {
+        Change::new(kind, source, at(secs))
+    }
+
+    #[test]
+    fn privilege_changes_get_their_own_sentence() {
+        let group = vec![
+            privilege(ChangeKind::GroupMemberAdded { group: "wheel".into(), user: "eve".into() }, "groups", 10),
+            privilege(ChangeKind::GroupAdded { name: "eve".into() }, "groups", 10),
+        ];
+        let line = summarize(&group).unwrap();
+        assert_eq!(line, "Today, eve was added to the wheel group.");
+        assert!(!line.contains("system update"), "{}", line);
+    }
+
+    #[test]
+    fn several_ssh_keys_are_counted() {
+        let key = |l: &str| ChangeKind::SshKeyAdded { file: "~/.ssh/authorized_keys".into(), label: l.into() };
+        let line = summarize(&[privilege(key("a@x"), "ssh_keys", 10), privilege(key("b@y"), "ssh_keys", 10)]).unwrap();
+        assert_eq!(line, "Today, 2 new SSH keys were added to ~/.ssh/authorized_keys: a@x and b@y.");
+    }
+
+    #[test]
+    fn setuid_programs_are_named_by_file_not_path() {
+        let kind = ChangeKind::SetuidAdded { path: "/usr/local/bin/helper".into(), setuid: true, root_owned: true };
+        let line = summarize(&[privilege(kind, "setuid", 10)]).unwrap();
+        assert_eq!(line, "Today, a new program that runs as root appeared: helper.");
+    }
+
+    /// Routine privilege changes are never volunteered, but are described when asked.
+    #[test]
+    fn routine_privilege_changes_wait_to_be_asked() {
+        let group = [privilege(ChangeKind::UnitDisabled { unit: "bluetooth.service".into(), scope: "system".into() }, "systemd", 10)];
+        assert!(summarize(&group).is_none());
+        assert_eq!(describe_privilege(&group).unwrap(), "Today, bluetooth.service was disabled.");
     }
 
     #[test]
