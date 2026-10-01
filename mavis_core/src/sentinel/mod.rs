@@ -26,6 +26,7 @@
 
 pub mod change;
 pub mod packages;
+pub mod speech;
 pub mod store;
 pub mod summary;
 
@@ -81,6 +82,17 @@ fn fresh_since(
     match watermark {
         Some(mark) => packages::entries_since(entries, mark),
         None => entries.to_vec(),
+    }
+}
+
+/// Store a scan's changes, returning the new ones. The first run goes in
+/// already marked announced, in one step, so a concurrent reader never
+/// sees history as news.
+fn import(store: &SentinelStore, changes: &[Change], first_run: bool) -> anyhow::Result<Vec<Change>> {
+    if first_run {
+        store.record_all_announced(changes)
+    } else {
+        store.record_all(changes)
     }
 }
 
@@ -186,13 +198,10 @@ impl Sentinel {
 
         let explicit = packages::explicitly_installed(self.manager);
         let changes = packages::to_changes(&fresh_entries, &explicit, source);
-        let recorded = self.store.record_all(&changes)?;
+        let recorded = import(&self.store, &changes, first_run)?;
         self.store.set_watermark(source, newest)?;
 
         if first_run {
-            // Record, but treat as already told — this is history, not news.
-            let prints: Vec<String> = recorded.iter().map(|c| c.fingerprint()).collect();
-            self.store.mark_announced(&prints)?;
             info!(
                 "Sentinel: first run — imported {} past transactions from {} \
                  without announcing them. Changes from now on will be reported.",
@@ -362,6 +371,82 @@ mod tests {
         );
         assert_eq!(store.count().unwrap(), 3, "nothing duplicated in the store");
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A second connection (the planner) polls while the first run
+    /// imports; it must never see a pending change.
+    #[test]
+    fn a_first_run_import_is_never_visible_as_pending() {
+        use change::ChangeKind;
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        let dir = temp_dir("import_race");
+        let db = dir.join("sentinel.db");
+        drop(SentinelStore::new(&db).unwrap());
+
+        let history: Vec<Change> = (0..3000)
+            .map(|i| {
+                Change::new(
+                    ChangeKind::PackageInstalled {
+                        name: format!("dep-{}", i),
+                        version: "1.0".into(),
+                        requested: false, // Notable — the kind that gets announced
+                    },
+                    "pacman",
+                    chrono::DateTime::from_timestamp(1_700_000_000 + i, 0).unwrap(),
+                )
+            })
+            .collect();
+
+        let done = Arc::new(AtomicBool::new(false));
+        let worst_seen = Arc::new(AtomicUsize::new(0));
+
+        let reader = {
+            let (db, done, worst_seen) = (db.clone(), done.clone(), worst_seen.clone());
+            std::thread::spawn(move || {
+                let planner_side = SentinelStore::new(&db).unwrap();
+                while !done.load(Ordering::SeqCst) {
+                    // Busy means mid-commit; just retry.
+                    if let Ok(pending) = planner_side.unannounced(Severity::Notable) {
+                        worst_seen.fetch_max(pending.len(), Ordering::SeqCst);
+                    }
+                }
+            })
+        };
+
+        let sentinel_side = SentinelStore::new(&db).unwrap();
+        let imported = import(&sentinel_side, &history, true).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        done.store(true, Ordering::SeqCst);
+        reader.join().unwrap();
+
+        assert_eq!(imported.len(), 3000);
+        assert_eq!(
+            worst_seen.load(Ordering::SeqCst),
+            0,
+            "a concurrent reader saw first-run history as pending news"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn later_scans_leave_their_changes_pending() {
+        use change::ChangeKind;
+        let dir = temp_dir("later_scan");
+        let store = SentinelStore::new(&dir.join("sentinel.db")).unwrap();
+        let change = Change::new(
+            ChangeKind::PackageInstalled {
+                name: "hyprland".into(),
+                version: "1.0".into(),
+                requested: false,
+            },
+            "pacman",
+            chrono::Utc::now(),
+        );
+        let recorded = import(&store, &[change], false).unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(store.unannounced(Severity::Notable).unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
