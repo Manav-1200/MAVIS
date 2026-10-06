@@ -745,14 +745,14 @@ mod tests {
         (s, next, dir)
     }
 
-    const CHANGED_BINARY: (&str, &str) = ("/usr/bin/sudo", "content\t0\tsudo");
+    const CHANGED_BINARY: (&str, &str) = ("/usr/bin/example-tool", "content\t0\texample-pkg");
 
     /// Baseline silently; a changed binary is then Critical and notified;
     /// the same finding next time is not news.
     #[tokio::test]
     async fn a_changed_packaged_binary_is_critical_once() {
         let (mut s, next, dir) = sentinel_with_check("integrity", true);
-        let edited_config = ("/etc/pacman.conf", "content\t1\tpacman");
+        let edited_config = ("/etc/example.conf", "content\t1\texample-pkg");
         *next.lock().unwrap() = Some(snap(&[edited_config]));
         assert!(s.run_checks().await.is_empty(), "what was already there is the baseline");
 
@@ -767,7 +767,7 @@ mod tests {
             e.event_type == EventType::PlanReady
                 && e.payload["plan"]["message"]
                     .as_str()
-                    .is_some_and(|m| m.contains("sudo, from the sudo package, no longer matches what was installed"))
+                    .is_some_and(|m| m.contains("example-tool, from the example-pkg package, no longer matches what was installed"))
         });
         assert!(notified);
 
@@ -843,19 +843,19 @@ mod tests {
     async fn an_app_that_comes_back_is_reported_as_returning() {
         let dir = temp_dir("returning");
         let mut s = Sentinel::new(Arc::new(EventBus::new()), &dir).expect("sentinel");
-        let next = Arc::new(Mutex::new(snap(&[("Candy Crush", "1.0"), ("Notepad", "11")])));
+        let next = Arc::new(Mutex::new(snap(&[("example-app", "1.0"), ("other-app", "11")])));
         let source = Arc::clone(&next);
         s.checks = vec![checks::fake_apps(move || Some(source.lock().unwrap().clone()))];
 
         assert!(s.run_checks().await.is_empty(), "baseline");
-        *next.lock().unwrap() = snap(&[("Notepad", "11")]);
+        *next.lock().unwrap() = snap(&[("other-app", "11")]);
         assert_eq!(s.run_checks().await.len(), 1, "removed");
 
-        *next.lock().unwrap() = snap(&[("Candy Crush", "1.1"), ("Notepad", "11")]);
+        *next.lock().unwrap() = snap(&[("example-app", "1.1"), ("other-app", "11")]);
         let found = s.run_checks().await;
         assert!(matches!(&found[0].kind, ChangeKind::AppAdded { returned: true, .. }), "{:?}", found);
         let line = summary::summarize(&found).unwrap();
-        assert_eq!(line, "Today, Candy Crush is back after being removed.");
+        assert_eq!(line, "Today, example-app is back after being removed.");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
