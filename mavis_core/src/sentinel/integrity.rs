@@ -166,11 +166,11 @@ missing     /usr/lib/t/gone
 .......T.    /usr/lib/t/touched
 ";
 
-    // Real lines from dpkg 1.22.6 --verify (2026-10-06).
+    // Real lines from dpkg 1.22.6 --verify (2026-10-06), package name replaced.
     const DPKG: &str = "\
-??5??????   /usr/bin/debsums
-??5?????? c /etc/default/debsums
-missing     /usr/share/doc/debsums/copyright
+??5??????   /usr/bin/example-tool
+??5?????? c /etc/default/example-tool
+missing     /usr/share/doc/example-tool/copyright
 ";
 
     fn at() -> DateTime<Utc> {
@@ -209,9 +209,9 @@ missing     /usr/share/doc/debsums/copyright
         assert_eq!(rpm["/usr/lib/t/touched"], "timestamp\t0\t");
 
         let dpkg = parse_verify(DPKG);
-        assert_eq!(dpkg["/usr/bin/debsums"], "content\t0\t");
-        assert_eq!(dpkg["/etc/default/debsums"], "content\t1\t");
-        assert_eq!(dpkg["/usr/share/doc/debsums/copyright"], "missing\t0\t");
+        assert_eq!(dpkg["/usr/bin/example-tool"], "content\t0\t");
+        assert_eq!(dpkg["/etc/default/example-tool"], "content\t1\t");
+        assert_eq!(dpkg["/usr/share/doc/example-tool/copyright"], "missing\t0\t");
     }
 
     #[test]
