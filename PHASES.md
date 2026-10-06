@@ -25,7 +25,7 @@
 | 6.5 | Action Execution | App launching, YouTube, web search, system control; cross-platform app discovery. | Companion acts | :white_check_mark: Built |
 | 7 | Memory & Learning | Recall with decay, daily consolidation, episodic replay, entity graph. | Persistent memory | :white_check_mark: 7.1–7.2 complete |
 | 8 | Safety & Permissions | Risk scoring, permission gate, confirmation flow, append-only audit log. | Trust layer | :white_check_mark: Core built |
-| 8.5 | System Sentinel | Notices what changed on the machine: packages pulled in, removed, downgraded. | Machine awareness | :construction: Steps 1–2a |
+| 8.5 | System Sentinel | Notices what changed on the machine: packages, privileges, file integrity, advisories. | Machine awareness | :construction: Built — steps 2b–4 await a hardware run, step 5 unverified |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
 | 10 | Automation & Proactive Intelligence | Rule engine, predictive suggestions, workflow recording, wellness reminders, daily briefing. | Proactive assistant | Not started |
 | 11 | Vision & Advanced UX | OCR, screenshot understanding, UI element detection, secondary monitor dashboard, conversation history. | Sees the screen | Not started |
@@ -654,7 +654,7 @@ A full line-by-line audit, run against a clone of the repository. Every claimed 
 
 ## Phase 8.5 — System Sentinel
 
-**Status:** :construction: Steps 1–3 built (2026-09-20 — 2026-10-01). Detects, records and speaks package and privilege changes. Steps 2b and 3 are tested but **not yet run on hardware**. Rationale in [`DECISIONS.md` §10](DECISIONS.md#10-system-sentinel--phase-85).
+**Status:** :construction: All five steps built (2026-09-20 — 2026-10-06). Steps 2b, 3 and 4 are tested — step 4 against the real tools — but **not yet run on hardware**. Step 5 (Windows, macOS) is **unverified**: written from documentation, never run. Rationale in [`DECISIONS.md` §10](DECISIONS.md#10-system-sentinel--phase-85).
 
 **Goal:** Phase 8 audits what MAVIS does. The Sentinel audits what happened *to the machine* — so a package you never asked for doesn't sit unnoticed for days.
 
@@ -706,8 +706,15 @@ Reads the package manager's own transaction log rather than diffing package list
   - Snapshot per surface, diffed each minute; setuid walk hourly and after package changes.
   - Gains are Critical (UID 0, privileged groups, SSH keys, sudoers, setuid) or Notable (login accounts, other groups, enabled units); losses are Routine.
   - An unreadable surface is skipped, never read as empty — proven to prevent a Critical flood.
-- [ ] **4 — Integrity and advisories.** `pacman -Qkk` / `rpm -Va` / `debsums`; `arch-audit` and the Debian security tracker.
-- [ ] **5 — Windows and macOS.** Appx, winget, the uninstall registry, scheduled tasks and startup items — Windows is notorious for restoring removed apps on update — plus Defender's verdicts; Homebrew, launchd, `pkgutil` and XProtect on macOS.
+- [x] **4 — Integrity and advisories.** `pacman -Qkk` / `rpm -Va` / `debsums`; `arch-audit` and the Debian security tracker. *(2026-10-06 — built, run end to end against the real tools in a sandbox, not yet on hardware; [`DECISIONS.md` §21](DECISIONS.md#21-integrity-and-advisories--phase-85-step-4))*
+  - Daily, lowest priority, remembered across restarts. `MAVIS_SENTINEL_CHECK_NOW=1` forces a run at startup.
+  - Changed content in a packaged file is Critical; missing files and changed permissions Notable; config files and timestamps Routine.
+  - Advisories need `MAVIS_SENTINEL_ADVISORIES=1` (they download a list) and the scanner installed. High and critical are spoken, as the scanner's finding.
+  - `dpkg --verify` stands in for `debsums`; `debsecan` is the tracker's client, Debian only.
+  - A failed tool gives no result rather than an empty one, and a verify that overlaps a package transaction is discarded — both proven.
+- [x] **5 — Windows and macOS.** Appx, winget, the uninstall registry, scheduled tasks and startup items — Windows is notorious for restoring removed apps on update — plus Defender's verdicts; Homebrew, launchd, `pkgutil` and XProtect on macOS. *(2026-10-06 — :warning: **unverified on real hardware**; [`DECISIONS.md` §22](DECISIONS.md#22-windows-and-macos--phase-85-step-5))*
+  - An app that reappears after being removed is reported as back, not as new.
+  - **Not built:** winget (it shows the same two lists already read) and XProtect (no way to confirm its log format from here; a scanner verdict isn't something to guess at).
 
 ---
 
@@ -910,4 +917,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-10-04*
+*Last updated: 2026-10-06*
