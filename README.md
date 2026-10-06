@@ -75,7 +75,7 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 | 6.5 — Action Execution | App launching, search, system control | :construction: Built; launching not yet seen working on hardware |
 | 7 — Memory & Learning | Recall with decay, daily consolidation, replay, entity graph | :white_check_mark: 7.1–7.2 complete; conversation no longer restored across runs |
 | 8 — Safety & Permissions | Risk scoring, permission gate, confirmation, audit log | :white_check_mark: Core built |
-| 8.5 — System Sentinel | Notices packages you didn't ask for | :construction: Detects and records; not yet speaking |
+| 8.5 — System Sentinel | Notices what changed on the machine | :construction: Built; awaiting a hardware run |
 | 9 — Skills Platform | Plugin API, manifest, sandboxing | Not started |
 | 10 — Automation & Wellness | Rule engine, proactive suggestions, wellness | Not started |
 | 11 — Vision & Advanced UX | OCR, screenshot understanding, dashboard | Not started |
@@ -190,7 +190,13 @@ With `MAVIS_SENTINEL=1`, MAVIS reads your package manager's own log and notices 
 - Ordinary upgrades are never mentioned
 - It reports facts. It does not judge whether anything is malware.
 
-It currently detects and records. Speaking about changes and answering "what changed recently?" are next — see [`PHASES.md` Phase 8.5](PHASES.md#phase-85--system-sentinel).
+It also watches:
+
+- **Who can do what** — new accounts, group membership, SSH keys, sudoers, enabled services, setuid programs
+- **File integrity** — once a day, whether packaged files still match their packages
+- **Advisories** — with `MAVIS_SENTINEL_ADVISORIES=1` and `arch-audit` (Arch) or `debsecan` (Debian) installed, new high-risk advisories, reported as that tool's finding
+
+Changes worth knowing are said the next time you speak to MAVIS; anything that gives someone new power over the machine also raises a desktop notification. Ask "what changed recently?" for the rest. Everything since package detection is tested but not yet run on real hardware — see [`PHASES.md` Phase 8.5](PHASES.md#phase-85--system-sentinel).
 
 ### Context sources
 
@@ -217,7 +223,9 @@ Current date and time is always injected — it isn't private, and without it th
 | Variable | Default | Effect |
 |----------|---------|--------|
 | `MAVIS_CONTEXT_*` | off | The four context sources above |
-| `MAVIS_SENTINEL` | off | Package change detection |
+| `MAVIS_SENTINEL` | off | The System Sentinel: packages, privileges, file integrity |
+| `MAVIS_SENTINEL_ADVISORIES` | off | Also ask `arch-audit` / `debsecan` for security advisories — they download the advisory list |
+| `MAVIS_SENTINEL_CHECK_NOW` | off | Run the Sentinel's daily checks at startup even if they ran recently — for testing |
 | `MAVIS_TTS_ENGINE` | `piper` | `piper` or `kokoro` |
 | `MAVIS_VOICE_MODEL` | `~/.local/share/piper-voices/en_US-lessac-medium.onnx` | Piper voice model |
 | `MAVIS_KOKORO_VOICE` | `af_heart` | Kokoro voice |
