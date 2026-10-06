@@ -538,11 +538,11 @@ mod tests {
     fn past_changes_can_be_looked_up_by_verb_and_subject() {
         use crate::sentinel::change::APP_REMOVED;
         let s = store();
-        let removed = Change::new(ChangeKind::AppRemoved { name: "Candy Crush".into() }, "apps", at(0));
+        let removed = Change::new(ChangeKind::AppRemoved { name: "example-app".into() }, "apps", at(0));
         s.record(&removed).unwrap();
-        assert!(s.has_recorded("apps", APP_REMOVED, "Candy Crush").unwrap());
-        assert!(!s.has_recorded("apps", APP_REMOVED, "Candy").unwrap(), "whole name only");
-        assert!(!s.has_recorded("homebrew", APP_REMOVED, "Candy Crush").unwrap(), "per source");
+        assert!(s.has_recorded("apps", APP_REMOVED, "example-app").unwrap());
+        assert!(!s.has_recorded("apps", APP_REMOVED, "example").unwrap(), "whole name only");
+        assert!(!s.has_recorded("homebrew", APP_REMOVED, "example-app").unwrap(), "per source");
     }
 
     #[test]
