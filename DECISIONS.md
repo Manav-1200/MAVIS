@@ -82,6 +82,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 10-06 | 8.5 | Sentinel steps 4 and 5: file integrity and advisories, checked against real `pacman`, `rpm`, `dpkg`, `arch-audit` and `debsecan` output; Windows and macOS inventories written but unverified. Phase 8.5 is built; nothing since step 2a has had a hardware run (§21, §22) |
 | 10-01 | 8.5 | Sentinel step 3: users, groups, SSH keys, sudoers, enabled units and setuid binaries watched; gains are Critical or Notable. Tested; not yet run on hardware (§20) |
 | 10-01 | 8.5 | Sentinel step 2b: pending changes spoken on the next utterance, "what changed?" and "what did that update do?" answered from the store. Built and tested; not yet heard on hardware (§19) |
 
@@ -1050,6 +1051,132 @@ The module is `#[cfg(unix)]`. Windows and macOS surfaces are step 5.
 - **Only the running user's `authorized_keys`.** Root's and other users' aren't readable without root.
 - **No package attribution.** A setuid binary that arrived with a package is reported the same as one dropped by hand. Correlating with the package log would make it quieter and more useful; not done.
 - **`/etc/passwd` only** — LDAP, SSSD and systemd-homed accounts aren't seen.
+
+## 21. Integrity and advisories — Phase 8.5 step 4
+
+**Date:** 2026-10-06. **Status:** built, `cargo test` and `cargo clippy` clean. Run end to end in the sandbox against the **real tools** — see Evidence. **Not yet run on the target machine.**
+
+### Decision · Each check is a tool's output, snapshotted and diffed
+**Why:** same shape as step 3. A check runs a tool, its findings become a snapshot, and the snapshot is diffed against the last one in `sentinel.db`. The first run is a silent baseline — a real machine has plenty of standing mismatches (edited configs, files re-owned by install scripts) and they are history, not news.
+
+| Check | Tool | Runs |
+|---|---|---|
+| Integrity | `pacman -Qkk`, `rpm -Va`, `dpkg --verify` | daily |
+| Advisories | `arch-audit`, `debsecan` (Debian only) | daily, only with `MAVIS_SENTINEL_ADVISORIES=1` |
+
+A check whose tool isn't installed is switched off with one log line.
+
+### Decision · What a finding is worth
+| Finding | Severity |
+|---|---|
+| Content of a packaged file differs (size, checksum, type, link target) | **Critical** |
+| A packaged file is missing; its owner or permissions differ | Notable |
+| Only its timestamp differs | Routine |
+| Any of the above on a config file | Routine |
+| A file matches its package again | Routine |
+| New advisory the scanner rates high or critical | Notable |
+| New advisory rated lower; an advisory that no longer applies | Routine |
+
+**Why config files are Routine:** editing `/etc` is what `/etc` is for. pacman marks them `backup file:`, rpm and dpkg with a `c`.
+**Why advisories are never Critical:** an Arch machine carries dozens at any time, many unfixed for months. A desktop notification per advisory would be ignored within a week.
+**The scanner's rating is mapped, not judged.** "High" and "Critical" are arch-audit's words (and "high urgency" debsecan's); a fixed rule turns them into Notable. MAVIS says "arch-audit reported…" and nothing about what it means (ADR-010).
+
+### Decision · `dpkg --verify`, not `debsums`
+**Departs from PHASES as written.** `debsums` is a separate package most machines don't have; `dpkg --verify` ships with dpkg, checks the same md5sums, and prints the same format as `rpm -Va`, so one parser covers both. Confirmed on dpkg 1.22.6.
+
+### Decision · `debsecan` for the Debian tracker, and only on Debian
+`debsecan` is the tracker's own client. Reading the tracker directly means an HTTP client and a very large JSON file (rule 9). It is not run on Ubuntu: it would compare Ubuntu's versions against Debian's and report advisories that don't apply.
+
+### Decision · Advisories need a second opt-in
+**Why:** every other Sentinel source reads local files. These two download a list. Nothing about the machine is sent, but a background network request is a different kind of thing from reading a log, and "local-first" means the user decides. `MAVIS_SENTINEL_ADVISORIES=1`, default off.
+
+### Decision · Daily, remembered across restarts, lowest priority
+**Measured:** `dpkg --verify` over this sandbox's packaged files took **85 s**. A full verify reads every packaged file, so it runs once a day, under `nice -n 19`, with a 15-minute limit, and the store remembers when it last ran — restarting MAVIS ten times in an afternoon doesn't mean ten disk scans. `MAVIS_SENTINEL_CHECK_NOW=1` runs the daily checks at startup regardless, for testing. Tools run with `LC_ALL=C`: pacman translates its messages, and the parser matches English.
+**Cost:** the Sentinel's one-minute scans wait while a check runs. Quick scans are published first, so nothing already found is delayed.
+
+### Problem · A failed tool would have looked like a clean machine
+**Found:** while writing the runner. Same class as §20's flood.
+**Cause:** a tool that crashes, times out, or can't reach its data prints nothing. Read as an empty result, that is "every finding resolved" — and the next good run reports all of them as new, Critical ones included.
+**Fix:** a check returns a result only when the run demonstrably finished: `pacman -Qkk` must print a per-package summary line, `rpm -Va` must not print `error:`, `dpkg --verify`, `arch-audit` and `debsecan` must exit 0. Anything else is "no result" — the stored snapshot stays, and the check is retried in an hour.
+**Evidence:** **Proven.** With "no result" read as empty, `a_failed_check_does_not_cause_a_flood` fails. Also seen with the real arch-audit: with its source unreachable it exited 1 and the stored advisory stayed.
+
+### Problem · A verify during an upgrade sees half-installed files
+**Found:** by reasoning about Critical false alarms, before anything shipped.
+**Cause:** mid-transaction, new files are on disk while the package database still describes the old ones. Every one is a content mismatch — Critical.
+**Fix:** the integrity check doesn't start while pacman's `db.lck` exists, and its result is discarded if the lock appeared or the package log moved while it ran. It then stays due and retries next minute.
+**Evidence:** **Proven** for the lock — the test fails with the discard removed. **Reasoned** for dpkg and rpm, which have no lock file that shows whether it's held; they rely on the log moving, and a single package that takes minutes to unpack without writing a log line could slip through.
+
+### Problem · Without root, "Permission denied" is not a finding
+`pacman -Qkk` as a normal user prints `(Permission denied)` for every file it can't stat. Those lines are skipped; rpm's `?` flags and `(Permission denied)` suffix likewise. **Seen** in real pacman output as an unprivileged user. It means root-only files are simply not checked — a limit, not an alarm.
+
+### Evidence · The real tools, end to end
+**Date:** 2026-10-06, in the sandbox (Ubuntu 24.04; no Arch machine).
+- **pacman 6.0.2** — a package crafted into a real local database, then altered. `pacman -Qkk` output captured as root and as an unprivileged user; the fixture in `integrity.rs` is that output.
+- **rpm 4.18.2** — a real RPM built, installed and altered; `rpm -Va` output is the fixture.
+- **dpkg 1.22.6** — `dpkg --verify` against this system, with `/usr/bin/debsums` edited.
+- **arch-audit 0.1.20** — built from source and run against a crafted advisory list; the `--format` output is the fixture.
+- **debsecan 0.4.20.1** — run against a crafted data file; its output is the fixture.
+
+Then the whole path — runner, parser, store, diff, sentence — with the real binaries:
+```
+pacman + arch-audit   baseline: 0 changes
+  after altering      [critical] /opt/mavis-test/bin/hello (from testpkg) no longer matches…
+                      [routine]  …/etc/hello.conf (config)
+                      [notable]  …/libhello is missing
+                      [notable]  arch-audit reports testpkg is affected by CVE-2024-0001, rated critical
+  third run           0 changes
+dpkg                  baseline: 0 changes (9,395 standing findings — a container image without docs)
+  after altering      [critical] /usr/bin/debsums no longer matches what its package installed
+  after restoring     [routine]  /usr/bin/debsums matches its package again
+```
+What this does **not** show: a real Arch system's standing noise, how long `pacman -Qkk` takes on the target disk, or arch-audit against the live advisory feed.
+
+### Still open
+- **Hardware.** None of it has run on the target machine.
+- **Install scripts.** A new package whose scriptlet re-owns its own files will be reported once as "permissions changed on a packaged file". True, and probably unwanted.
+- **Root-only files aren't verified** without root.
+- **rpm and dpkg name no package** in a finding; only pacman's output carries it.
+- **No advisories on Fedora or Ubuntu.** PHASES names only arch-audit and the Debian tracker.
+
+---
+
+## 22. Windows and macOS — Phase 8.5 step 5
+
+**Date:** 2026-10-06. **Status:** **UNVERIFIED ON REAL HARDWARE**, like the RPM log parser before it. Compiles and is linted on Linux; parsers tested against samples written by hand in the shape the commands are documented to print. Nothing here has run on Windows or macOS, and MAVIS itself has not either.
+
+### What it watches
+| | Source | How | Loud when |
+|---|---|---|---|
+| Windows | Store apps and installed programs | `Get-AppxPackage` + the three Uninstall registry keys | an app appears (Notable) |
+| | Scheduled tasks, startup items | `Get-ScheduledTask`, `Win32_StartupCommand` | one is added (Notable) |
+| | Defender | `Get-MpThreatDetection` + `Get-MpThreat` | a new detection (Critical) |
+| macOS | Homebrew | `brew list --versions` | a formula or cask appears (Notable) |
+| | Installer packages | `pkgutil --pkgs`, without `com.apple.*` | a package appears (Notable) |
+| | launchd | `*.plist` in `/Library/LaunchDaemons`, `/Library/LaunchAgents`, `~/Library/LaunchAgents` | a job is added (Notable) |
+
+Hourly. Same snapshot-and-diff as steps 3 and 4, so the first run is a silent baseline.
+
+### Decision · An app that comes back is said to have come back
+**Context:** PHASES calls out Windows restoring removed apps on update. That is the Hyprland case on another platform.
+**Decision:** when an app appears and the store already holds its removal, the change is marked `returned` and spoken as "Candy Crush is back after being removed" rather than "was installed".
+**Evidence:** **Proven** at the Sentinel level with a fed inventory: baseline, removal, reappearance.
+
+### Decision · PowerShell prints an end marker
+Every script ends by printing `MAVIS-END`. Output without it was cut short and is discarded — the flood guard of §20 and §21 again, for a tool whose exit status says little.
+
+### Decision · A Defender detection is Critical and reported as Defender's
+"Microsoft Defender reported a detection: Trojan:Win32/…". The name is Defender's; MAVIS adds nothing (ADR-010). Entries ageing out of Defender's history are not changes.
+
+### Not built · winget
+`winget list` shows exactly the two lists already read — Store packages and the Uninstall registry — as a width-truncated table that can't be parsed reliably. Running it would add nothing but a fragile parser.
+
+### Not built · XProtect
+**Departs from PHASES as written.** XProtect has no command that lists detections; they are only in the unified log, in a format I could not confirm from here. A scanner verdict is the one thing in this subsystem that must not be guessed at: a wrong parse either invents a detection or hides one. Left unbuilt rather than written blind.
+
+### Still open
+- **Everything, on real hardware.** Cmdlet properties, PowerShell's output encoding, how noisy Windows' own scheduled tasks are after a feature update.
+- **One line is not even compiled:** the `#[cfg(windows)]` call that stops a console window flashing. The method exists in tokio 1.53; the build has never run on Windows.
+- **No "did you ask for it"** on either platform — every new app is Notable, including ones just installed on purpose.
 
 ---
 
