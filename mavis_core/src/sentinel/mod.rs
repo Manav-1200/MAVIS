@@ -24,8 +24,13 @@
 //
 // Off by default, like every other context source, via MAVIS_SENTINEL=1.
 
+pub mod advisories;
 pub mod change;
+pub mod checks;
+pub mod integrity;
+pub mod inventory;
 pub mod packages;
+mod phrases;
 #[cfg(unix)]
 pub mod privilege;
 pub mod speech;
@@ -34,12 +39,15 @@ pub mod summary;
 
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
-use change::{Change, Severity};
+use change::{Change, ChangeKind, Severity};
+use checks::{Check, Snapshot};
+use chrono::{DateTime, Utc};
 use log::{info, warn};
 use packages::PackageManager;
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 use store::SentinelStore;
 use tokio::time::{interval, Duration};
 
@@ -115,6 +123,15 @@ pub struct Sentinel {
     surfaces: privilege::Surfaces,
     #[cfg(unix)]
     last_setuid_scan: Option<std::time::Instant>,
+    /// The slow, external-tool checks for this machine (steps 4 and 5).
+    checks: Vec<Check>,
+    /// When each check was last tried in this process, and whether it worked.
+    attempts: HashMap<&'static str, (Instant, bool)>,
+    /// Present while the package manager is mid-transaction.
+    package_lock: Option<PathBuf>,
+    package_log: Option<PathBuf>,
+    /// So a held lock is logged once, not every minute.
+    lock_noted: bool,
 }
 
 impl Sentinel {
@@ -130,6 +147,11 @@ impl Sentinel {
             surfaces: privilege::Surfaces::system(),
             #[cfg(unix)]
             last_setuid_scan: None,
+            checks: Vec::new(),
+            attempts: HashMap::new(),
+            package_lock: (manager == PackageManager::Pacman).then(|| "/var/lib/pacman/db.lck".into()),
+            package_log: manager.log_path().map(PathBuf::from),
+            lock_noted: false,
         })
     }
 
@@ -146,7 +168,12 @@ impl Sentinel {
                 self.manager.source_name()
             );
         } else {
-            warn!("Sentinel: no supported package manager found — watching privilege surfaces only");
+            warn!("Sentinel: no supported package manager found — package history is not watched");
+        }
+
+        self.checks = checks::for_this_machine(self.manager);
+        if !checks::advisories_enabled() {
+            info!("Sentinel: security advisories are off (set MAVIS_SENTINEL_ADVISORIES=1 — it downloads the advisory list)");
         }
 
         tokio::time::sleep(STARTUP_DELAY).await;
@@ -178,7 +205,134 @@ impl Sentinel {
             if !changes.is_empty() {
                 self.publish(changes);
             }
+
+            // Slow checks last, so a long verify never delays the news above.
+            let found = self.run_checks().await;
+            if !found.is_empty() {
+                self.publish(found);
+            }
         }
+    }
+
+    /// Run whichever slow checks are due, one after another.
+    async fn run_checks(&mut self) -> Vec<Change> {
+        let mut found = Vec::new();
+        for i in 0..self.checks.len() {
+            let source = self.checks[i].source;
+            let needs_idle = self.checks[i].needs_idle_packages;
+            match self.is_due(&self.checks[i]) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    warn!("Sentinel: {} check skipped: {}", source, e);
+                    continue;
+                }
+            }
+            // A verify that overlaps a package transaction sees half-installed
+            // files as mismatches. Skip while one runs; discard if one started.
+            if needs_idle && self.packages_busy() {
+                if !self.lock_noted {
+                    info!("Sentinel: the package manager is busy — the {} check will wait for it", source);
+                    self.lock_noted = true;
+                }
+                continue;
+            }
+            self.lock_noted = false;
+            let log_before = self.package_log_mtime();
+
+            info!("Sentinel: running the {} check", source);
+            let snapshot = self.checks[i].snapshot().await;
+
+            if needs_idle && (self.packages_busy() || self.package_log_mtime() != log_before) {
+                info!("Sentinel: packages changed during the {} check — result discarded, will retry", source);
+                continue;
+            }
+            self.attempts.insert(source, (Instant::now(), snapshot.is_some()));
+            let Some(snapshot) = snapshot else { continue };
+
+            let check = &self.checks[i];
+            let applied = self
+                .apply(source, &snapshot, |old, new, at| self.mark_returning(check.diff(old, new, at)))
+                .and_then(|changes| {
+                    self.store.set_watermark(source, Utc::now())?;
+                    Ok(changes)
+                });
+            match applied {
+                Ok(changes) => found.extend(changes),
+                Err(e) => warn!("Sentinel: could not record the {} check: {}", source, e),
+            }
+        }
+        found
+    }
+
+    /// Due if it has never run, or last ran longer ago than its interval.
+    /// The store remembers the last run, so a restart doesn't repeat a
+    /// full disk verify.
+    fn is_due(&self, check: &Check) -> anyhow::Result<bool> {
+        if let Some((at, ok)) = self.attempts.get(check.source) {
+            let wait = if *ok { check.every } else { checks::RETRY };
+            return Ok(at.elapsed() >= wait);
+        }
+        if checks::check_now() {
+            return Ok(true);
+        }
+        Ok(match self.store.watermark(check.source)? {
+            None => true,
+            Some(last) => (Utc::now() - last).to_std().map_or(true, |age| age >= check.every),
+        })
+    }
+
+    fn packages_busy(&self) -> bool {
+        self.package_lock.as_ref().is_some_and(|lock| lock.exists())
+    }
+
+    fn package_log_mtime(&self) -> Option<SystemTime> {
+        let log = self.package_log.as_ref()?;
+        std::fs::metadata(log).and_then(|m| m.modified()).ok()
+    }
+
+    /// An app that was removed earlier and has appeared again is marked
+    /// as returning — the case of an update quietly restoring it.
+    fn mark_returning(&self, changes: Vec<Change>) -> Vec<Change> {
+        changes
+            .into_iter()
+            .map(|c| match &c.kind {
+                ChangeKind::AppAdded { name, version, .. }
+                    if self.store.has_recorded(&c.source, change::APP_REMOVED, name).unwrap_or(false) =>
+                {
+                    let kind = ChangeKind::AppAdded {
+                        name: name.clone(),
+                        version: version.clone(),
+                        returned: true,
+                    };
+                    Change::new(kind, &c.source, c.occurred_at)
+                }
+                _ => c,
+            })
+            .collect()
+    }
+
+    /// Store a source's new snapshot and return what changed. The first
+    /// snapshot of a source is a silent baseline, like the package history.
+    fn apply(
+        &self,
+        source: &str,
+        snapshot: &Snapshot,
+        diff: impl Fn(&Snapshot, &Snapshot, DateTime<Utc>) -> Vec<Change>,
+    ) -> anyhow::Result<Vec<Change>> {
+        let now = Utc::now();
+        let first_run = self.store.watermark(source)?.is_none();
+        let previous = self.store.snapshot(source)?;
+        if !first_run && previous == *snapshot {
+            return Ok(Vec::new());
+        }
+        let changes = if first_run {
+            info!("Sentinel: baseline for {} ({} items)", source, snapshot.len());
+            Vec::new()
+        } else {
+            diff(&previous, snapshot, now)
+        };
+        self.store.apply_snapshot(source, snapshot, &changes, now)
     }
 
     /// Diff each privilege surface against its stored snapshot. The first
@@ -196,21 +350,9 @@ impl Sentinel {
             self.last_setuid_scan = Some(std::time::Instant::now());
         }
 
-        let now = chrono::Utc::now();
         let mut found = Vec::new();
         for (source, snapshot) in snapshots {
-            let first_run = self.store.watermark(source)?.is_none();
-            let previous = self.store.snapshot(source)?;
-            if !first_run && previous == snapshot {
-                continue;
-            }
-            let changes = if first_run {
-                info!("Sentinel: baseline for {} ({} items)", source, snapshot.len());
-                Vec::new()
-            } else {
-                privilege::diff(source, &previous, &snapshot, now)
-            };
-            found.extend(self.store.apply_snapshot(source, &snapshot, &changes, now)?);
+            found.extend(self.apply(source, &snapshot, |old, new, at| privilege::diff(source, old, new, at))?);
         }
         if !found.is_empty() {
             info!("Sentinel: {} privilege change(s)", found.len());
@@ -578,6 +720,142 @@ mod tests {
         assert!(s.scan_privileges(false).await.unwrap().is_empty());
         std::fs::rename(dir.join("group.away"), dir.join("group")).unwrap();
         assert!(s.scan_privileges(false).await.unwrap().is_empty(), "same members as before: no change");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---------------------------------------------------------------
+    // Steps 4 and 5 — slow checks
+    // ---------------------------------------------------------------
+
+    use std::sync::Mutex;
+
+    fn snap(items: &[(&str, &str)]) -> Snapshot {
+        items.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// A Sentinel whose only check returns whatever `next` currently holds.
+    fn sentinel_with_check(tag: &str, needs_idle: bool) -> (Sentinel, Arc<Mutex<Option<Snapshot>>>, std::path::PathBuf) {
+        let dir = temp_dir(tag);
+        let mut s = Sentinel::new(Arc::new(EventBus::new()), &dir).expect("sentinel");
+        let next = Arc::new(Mutex::new(Some(Snapshot::new())));
+        let source = Arc::clone(&next);
+        s.checks = vec![checks::fake_integrity(needs_idle, move || source.lock().unwrap().clone())];
+        s.package_lock = Some(dir.join("db.lck"));
+        s.package_log = None;
+        (s, next, dir)
+    }
+
+    const CHANGED_BINARY: (&str, &str) = ("/usr/bin/sudo", "content\t0\tsudo");
+
+    /// Baseline silently; a changed binary is then Critical and notified;
+    /// the same finding next time is not news.
+    #[tokio::test]
+    async fn a_changed_packaged_binary_is_critical_once() {
+        let (mut s, next, dir) = sentinel_with_check("integrity", true);
+        let edited_config = ("/etc/pacman.conf", "content\t1\tpacman");
+        *next.lock().unwrap() = Some(snap(&[edited_config]));
+        assert!(s.run_checks().await.is_empty(), "what was already there is the baseline");
+
+        *next.lock().unwrap() = Some(snap(&[edited_config, CHANGED_BINARY]));
+        let found = s.run_checks().await;
+        assert_eq!(found.len(), 1, "{:?}", found);
+        assert_eq!(found[0].severity, Severity::Critical);
+
+        let mut rx = s.bus.subscribe();
+        s.publish(found);
+        let notified = std::iter::from_fn(|| rx.try_recv().ok()).any(|e| {
+            e.event_type == EventType::PlanReady
+                && e.payload["plan"]["message"]
+                    .as_str()
+                    .is_some_and(|m| m.contains("sudo, from the sudo package, no longer matches what was installed"))
+        });
+        assert!(notified);
+
+        assert!(s.run_checks().await.is_empty(), "told once");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A check that fails must leave the last snapshot alone. Read as
+    /// empty, the next good run would report every old finding as new.
+    #[tokio::test]
+    async fn a_failed_check_does_not_cause_a_flood() {
+        let (mut s, next, dir) = sentinel_with_check("check_flood", false);
+        *next.lock().unwrap() = Some(snap(&[CHANGED_BINARY]));
+        s.run_checks().await;
+
+        *next.lock().unwrap() = None;
+        assert!(s.run_checks().await.is_empty());
+        assert!(!s.is_due(&s.checks[0]).unwrap(), "a failure waits for the retry interval");
+
+        s.attempts.clear();
+        *next.lock().unwrap() = Some(snap(&[CHANGED_BINARY]));
+        assert!(s.run_checks().await.is_empty(), "same finding as before the failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A verify that overlaps a package transaction sees half-installed
+    /// files. Its result is thrown away and the check stays due.
+    #[tokio::test]
+    async fn a_check_that_overlaps_a_package_transaction_is_discarded() {
+        let (mut s, _next, dir) = sentinel_with_check("overlap", true);
+        s.run_checks().await; // clean baseline
+
+        // The transaction starts while the check is running.
+        let lock = dir.join("db.lck");
+        let (during, result) = (lock.clone(), snap(&[CHANGED_BINARY]));
+        s.checks = vec![checks::fake_integrity(true, move || {
+            std::fs::write(&during, b"").unwrap();
+            Some(result.clone())
+        })];
+        s.attempts.clear();
+        assert!(s.run_checks().await.is_empty(), "mid-upgrade mismatches are not findings");
+        assert!(s.attempts.is_empty(), "and the check is still due");
+
+        // Still locked: the check doesn't even start.
+        assert!(s.run_checks().await.is_empty());
+
+        // Transaction over, and the file still differs: now it is a finding.
+        std::fs::remove_file(&lock).unwrap();
+        s.checks = vec![checks::fake_integrity(true, || Some(snap(&[CHANGED_BINARY])))];
+        assert_eq!(s.run_checks().await.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The store remembers when a check last ran, so a restart doesn't
+    /// repeat a daily check.
+    #[tokio::test]
+    async fn a_restart_does_not_repeat_a_recent_check() {
+        let (mut s, _next, dir) = sentinel_with_check("cadence", false);
+        s.run_checks().await;
+
+        let mut restarted = Sentinel::new(Arc::new(EventBus::new()), &dir).expect("sentinel");
+        let mut daily = checks::fake_integrity(false, || Some(Snapshot::new()));
+        daily.every = std::time::Duration::from_secs(24 * 3600);
+        assert!(!restarted.is_due(&daily).unwrap());
+        restarted.checks = vec![daily];
+        assert!(restarted.attempts.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows restoring an app the user removed: the second appearance
+    /// is reported as a return, not as a new install.
+    #[tokio::test]
+    async fn an_app_that_comes_back_is_reported_as_returning() {
+        let dir = temp_dir("returning");
+        let mut s = Sentinel::new(Arc::new(EventBus::new()), &dir).expect("sentinel");
+        let next = Arc::new(Mutex::new(snap(&[("Candy Crush", "1.0"), ("Notepad", "11")])));
+        let source = Arc::clone(&next);
+        s.checks = vec![checks::fake_apps(move || Some(source.lock().unwrap().clone()))];
+
+        assert!(s.run_checks().await.is_empty(), "baseline");
+        *next.lock().unwrap() = snap(&[("Notepad", "11")]);
+        assert_eq!(s.run_checks().await.len(), 1, "removed");
+
+        *next.lock().unwrap() = snap(&[("Candy Crush", "1.1"), ("Notepad", "11")]);
+        let found = s.run_checks().await;
+        assert!(matches!(&found[0].kind, ChangeKind::AppAdded { returned: true, .. }), "{:?}", found);
+        let line = summary::summarize(&found).unwrap();
+        assert_eq!(line, "Today, Candy Crush is back after being removed.");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
