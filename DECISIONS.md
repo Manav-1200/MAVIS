@@ -1158,7 +1158,7 @@ Hourly. Same snapshot-and-diff as steps 3 and 4, so the first run is a silent ba
 
 ### Decision · An app that comes back is said to have come back
 **Context:** PHASES calls out Windows restoring removed apps on update. That is the Hyprland case on another platform.
-**Decision:** when an app appears and the store already holds its removal, the change is marked `returned` and spoken as "Candy Crush is back after being removed" rather than "was installed".
+**Decision:** when an app appears and the store already holds its removal, the change is marked `returned` and spoken as "<app> is back after being removed" rather than "was installed".
 **Evidence:** **Proven** at the Sentinel level with a fed inventory: baseline, removal, reappearance.
 
 ### Decision · PowerShell prints an end marker
