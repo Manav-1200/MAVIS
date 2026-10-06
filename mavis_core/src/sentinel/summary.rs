@@ -180,7 +180,7 @@ fn privilege_sentence(group: &[Change], include_routine: bool) -> Option<String>
     let mut disabled = Vec::new();
     let mut setuid_gone = Vec::new();
 
-    for c in sorted {
+    for c in &sorted {
         match &c.kind {
             ChangeKind::UserAdded { name, uid: 0, .. } => root_ids.push(name.clone()),
             ChangeKind::UserUidChanged { name, to: 0, .. } => root_ids.push(name.clone()),
@@ -208,7 +208,10 @@ fn privilege_sentence(group: &[Change], include_routine: bool) -> Option<String>
         }
     }
 
-    let mut clauses: Vec<String> = Vec::new();
+    // Step 4 and 5 kinds are phrased in phrases.rs: loud ones first,
+    // routine ones last.
+    let extra = super::phrases::clauses(&sorted);
+    let mut clauses: Vec<String> = extra.loud;
 
     clauses.extend(counted(&root_ids, &|n| format!("{} has user ID 0, the same as root", n), &|n| {
         format!("{} accounts have user ID 0, the same as root", n)
@@ -261,6 +264,7 @@ fn privilege_sentence(group: &[Change], include_routine: bool) -> Option<String>
         clauses.push(format!("{} {} removed from the {} group", join_naturally(&names), verb, group));
     }
 
+    clauses.extend(extra.quiet);
     if clauses.is_empty() {
         return None;
     }
@@ -268,7 +272,7 @@ fn privilege_sentence(group: &[Change], include_routine: bool) -> Option<String>
 }
 
 /// "x was …" for one item, "N things …: a, b and c" for several.
-fn counted(items: &[String], one: &dyn Fn(&str) -> String, many: &dyn Fn(usize) -> String) -> Option<String> {
+pub(super) fn counted(items: &[String], one: &dyn Fn(&str) -> String, many: &dyn Fn(usize) -> String) -> Option<String> {
     match items.len() {
         0 => None,
         1 => Some(one(&items[0])),
@@ -280,7 +284,7 @@ fn counted(items: &[String], one: &dyn Fn(&str) -> String, many: &dyn Fn(usize) 
 }
 
 /// File name only: a spoken path is all slashes.
-fn file_name(path: &str) -> String {
+pub(super) fn file_name(path: &str) -> String {
     std::path::Path::new(path)
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
