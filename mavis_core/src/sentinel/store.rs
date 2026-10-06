@@ -140,6 +140,17 @@ impl SentinelStore {
         Ok(fresh)
     }
 
+    /// Whether a change with this verb and subject was ever recorded for
+    /// a source — e.g. "was this app removed before?".
+    pub fn has_recorded(&self, source: &str, verb: &str, name: &str) -> Result<bool> {
+        let needle = format!(":{}:{}:", verb, name);
+        Ok(self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM changes WHERE source = ?1 AND instr(fingerprint, ?2) > 0)",
+            params![source, needle],
+            |r| r.get(0),
+        )?)
+    }
+
     /// The stored snapshot for a privilege surface; empty if never taken.
     pub fn snapshot(&self, source: &str) -> Result<BTreeMap<String, String>> {
         let mut stmt = self
@@ -521,6 +532,17 @@ mod tests {
         assert_eq!(s.snapshot("users").unwrap(), second, "old items are gone");
         assert_eq!(s.unannounced(Severity::Critical).unwrap().len(), 1);
         assert!(s.snapshot("groups").unwrap().is_empty(), "sources are independent");
+    }
+
+    #[test]
+    fn past_changes_can_be_looked_up_by_verb_and_subject() {
+        use crate::sentinel::change::APP_REMOVED;
+        let s = store();
+        let removed = Change::new(ChangeKind::AppRemoved { name: "Candy Crush".into() }, "apps", at(0));
+        s.record(&removed).unwrap();
+        assert!(s.has_recorded("apps", APP_REMOVED, "Candy Crush").unwrap());
+        assert!(!s.has_recorded("apps", APP_REMOVED, "Candy").unwrap(), "whole name only");
+        assert!(!s.has_recorded("homebrew", APP_REMOVED, "Candy Crush").unwrap(), "per source");
     }
 
     #[test]
