@@ -29,7 +29,7 @@ pub fn parse_arch_audit(output: &str) -> Snapshot {
 }
 
 /// "package\tCVE" -> "severity\tfix\tCVE", from debsecan's default output:
-/// `CVE-2024-0001 bash (fixed, remotely exploitable, high urgency)`.
+/// `CVE-2024-0001 pkg-a (fixed, remotely exploitable, high urgency)`.
 pub fn parse_debsecan(output: &str) -> Snapshot {
     output
         .lines()
@@ -95,12 +95,13 @@ testpkg\tHigh risk\t\tCVE-2024-0001, CVE-2024-0002
 otherpkg\tLow risk\t2.1-1\tCVE-2024-0003
 ";
 
-    // Real output of debsecan 0.4.20.1 (2026-10-06).
+    // Real output of debsecan 0.4.20.1 (2026-10-06), package names replaced.
+    // The last line, with no notes, is hand-written.
     const DEBSECAN: &str = "\
-CVE-2024-0001 bash (fixed, remotely exploitable, high urgency)
-CVE-2024-0002 bash (low urgency)
-CVE-2024-0003 coreutils (medium urgency)
-CVE-2024-0004 zlib1g
+CVE-2024-0001 pkg-a (fixed, remotely exploitable, high urgency)
+CVE-2024-0002 pkg-a (low urgency)
+CVE-2024-0003 pkg-b (medium urgency)
+CVE-2024-0004 pkg-c
 ";
 
     fn at() -> DateTime<Utc> {
@@ -118,9 +119,9 @@ CVE-2024-0004 zlib1g
     #[test]
     fn debsecan_lines_are_read_per_cve() {
         let s = parse_debsecan(DEBSECAN);
-        assert_eq!(s["bash\tCVE-2024-0001"], "high\t1\tCVE-2024-0001");
-        assert_eq!(s["bash\tCVE-2024-0002"], "low\t0\tCVE-2024-0002");
-        assert_eq!(s["zlib1g\tCVE-2024-0004"], "\t0\tCVE-2024-0004", "no notes at all");
+        assert_eq!(s["pkg-a\tCVE-2024-0001"], "high\t1\tCVE-2024-0001");
+        assert_eq!(s["pkg-a\tCVE-2024-0002"], "low\t0\tCVE-2024-0002");
+        assert_eq!(s["pkg-c\tCVE-2024-0004"], "\t0\tCVE-2024-0004", "no notes at all");
         assert_eq!(s.len(), 4);
     }
 
