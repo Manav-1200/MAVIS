@@ -199,16 +199,16 @@ mod tests {
     }
 
     // Hand-written in the shape the scripts print. Not real output.
-    const APPS: &str = "Microsoft.WindowsCalculator\t11.2405.2.0\r\nMozilla Firefox (x64 en-US)\t131.0\r\nNo Version App\t\r\nMAVIS-END\r\n";
+    const APPS: &str = "Example.StoreApp\t11.2405.2.0\r\nExample Program (x64)\t131.0\r\nNo Version App\t\r\nMAVIS-END\r\n";
 
     #[test]
     fn marked_output_is_read_and_unmarked_output_is_refused() {
         let s = parse_marked(APPS).unwrap();
-        assert_eq!(s["Microsoft.WindowsCalculator"], "11.2405.2.0");
-        assert_eq!(s["Mozilla Firefox (x64 en-US)"], "131.0");
+        assert_eq!(s["Example.StoreApp"], "11.2405.2.0");
+        assert_eq!(s["Example Program (x64)"], "131.0");
         assert_eq!(s["No Version App"], "");
 
-        assert!(parse_marked("Microsoft.WindowsCalculator\t11.0\r\n").is_none(), "cut short");
+        assert!(parse_marked("Example.StoreApp\t11.0\r\n").is_none(), "cut short");
         assert!(parse_marked("").is_none());
         assert_eq!(parse_marked("MAVIS-END\n"), Some(Snapshot::new()), "finished, nothing found");
     }
@@ -217,8 +217,8 @@ mod tests {
     fn a_new_app_is_notable_and_an_update_is_routine() {
         let old = parse_marked(APPS).unwrap();
         let mut new = old.clone();
-        new.insert("Candy Crush".into(), "1.0".into());
-        new.insert("Mozilla Firefox (x64 en-US)".into(), "132.0".into());
+        new.insert("example-app".into(), "1.0".into());
+        new.insert("Example Program (x64)".into(), "132.0".into());
         new.remove("No Version App");
 
         let changes = diff_apps("apps", &old, &new, at());
@@ -231,8 +231,8 @@ mod tests {
 
     #[test]
     fn a_new_scheduled_task_is_noticed() {
-        let old = parse_marked_pairs("startup\tOneDrive\nMAVIS-END\n").unwrap();
-        let new = parse_marked_pairs("startup\tOneDrive\nscheduled task\t\\Updater\\Nightly\nMAVIS-END\n").unwrap();
+        let old = parse_marked_pairs("startup\texample-startup\nMAVIS-END\n").unwrap();
+        let new = parse_marked_pairs("startup\texample-startup\nscheduled task\t\\Updater\\Nightly\nMAVIS-END\n").unwrap();
         let changes = diff_autostart("autostart", &old, &new, at());
         assert_eq!(changes.len(), 1);
         assert!(matches!(
@@ -244,19 +244,19 @@ mod tests {
 
     #[test]
     fn a_new_detection_is_critical_and_old_history_is_not_news() {
-        let old = parse_marked("{A1}\tTrojan:Win32/Old\tfile:_C:\\old.exe\nMAVIS-END\n").unwrap();
-        let new = parse_marked("{B2}\tTrojan:Win32/New\tfile:_C:\\new.exe\nMAVIS-END\n").unwrap();
+        let old = parse_marked("{A1}\tExample.OldThreat\tfile:_C:\\old.exe\nMAVIS-END\n").unwrap();
+        let new = parse_marked("{B2}\tExample.NewThreat\tfile:_C:\\new.exe\nMAVIS-END\n").unwrap();
         let changes = diff_detections("defender", "Microsoft Defender", &old, &new, at());
         assert_eq!(changes.len(), 1, "the entry that aged out is not a change");
         assert_eq!(changes[0].severity, Severity::Critical);
-        assert!(changes[0].detail.starts_with("Microsoft Defender reported Trojan:Win32/New"));
+        assert!(changes[0].detail.starts_with("Microsoft Defender reported Example.NewThreat"));
     }
 
     #[test]
     fn brew_and_pkgutil_lists_are_read() {
-        let brew = parse_brew("wget 1.24.5\npython@3.12 3.12.3 3.12.4\n\n");
-        assert_eq!(brew["wget"], "1.24.5");
-        assert_eq!(brew["python@3.12"], "3.12.4", "the newest installed version");
+        let brew = parse_brew("tool-a 1.24.5\ntool-b@3 3.12.3 3.12.4\n\n");
+        assert_eq!(brew["tool-a"], "1.24.5");
+        assert_eq!(brew["tool-b@3"], "3.12.4", "the newest installed version");
 
         let pkgs = parse_pkgutil("com.apple.pkg.Core\norg.example.tool\n\n");
         assert_eq!(pkgs.len(), 1);
