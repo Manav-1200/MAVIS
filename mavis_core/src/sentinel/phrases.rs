@@ -168,24 +168,24 @@ mod tests {
     /// Reported as the scanner's finding, in the scanner's words.
     #[test]
     fn advisories_are_attributed_to_the_scanner() {
-        let one = summarize(&[advisory("openssl", "high")]).unwrap();
-        assert_eq!(one, "Today, arch-audit reported a new high-risk advisory for openssl.");
+        let one = summarize(&[advisory("pkg-a", "high")]).unwrap();
+        assert_eq!(one, "Today, arch-audit reported a new high-risk advisory for pkg-a.");
 
-        let two = summarize(&[advisory("openssl", "high"), advisory("curl", "critical"), advisory("zlib", "low")]).unwrap();
-        assert_eq!(two, "Today, arch-audit reported new high or critical advisories for 2 packages: openssl and curl.");
+        let two = summarize(&[advisory("pkg-a", "high"), advisory("pkg-b", "critical"), advisory("pkg-c", "low")]).unwrap();
+        assert_eq!(two, "Today, arch-audit reported new high or critical advisories for 2 packages: pkg-a and pkg-b.");
     }
 
     #[test]
     fn low_rated_advisories_wait_to_be_asked() {
-        let group = [advisory("zlib", "low")];
+        let group = [advisory("pkg-c", "low")];
         assert!(summarize(&group).is_none());
-        assert_eq!(describe_privilege(&group).unwrap(), "Today, arch-audit listed a lower-rated advisory for zlib.");
+        assert_eq!(describe_privilege(&group).unwrap(), "Today, arch-audit listed a lower-rated advisory for pkg-c.");
     }
 
     #[test]
     fn changed_files_are_named_without_a_verdict() {
-        let line = summarize(&[file("/usr/bin/sudo", "sudo", "content", false)]).unwrap();
-        assert_eq!(line, "Today, sudo, from the sudo package, no longer matches what was installed.");
+        let line = summarize(&[file("/usr/bin/example-tool", "example-pkg", "content", false)]).unwrap();
+        assert_eq!(line, "Today, example-tool, from the example-pkg package, no longer matches what was installed.");
         for word in ["malware", "tamper", "infect", "compromis", "attack"] {
             assert!(!line.contains(word), "{}", line);
         }
@@ -194,19 +194,19 @@ mod tests {
     /// An edited config file is never volunteered, only described when asked.
     #[test]
     fn edited_config_files_wait_to_be_asked() {
-        let group = [file("/etc/pacman.conf", "pacman", "content", true)];
+        let group = [file("/etc/example.conf", "example-pkg", "content", true)];
         assert!(summarize(&group).is_none());
-        assert_eq!(describe_privilege(&group).unwrap(), "Today, pacman.conf differs from its packaged version.");
+        assert_eq!(describe_privilege(&group).unwrap(), "Today, example.conf differs from its packaged version.");
     }
 
     #[test]
     fn a_detection_is_reported_as_the_scanners_own() {
         let kind = ChangeKind::ScannerDetection {
             scanner: "Microsoft Defender".into(),
-            threat: "Trojan:Win32/Example".into(),
+            threat: "Example.Threat".into(),
             resource: "file:_C:\\x.exe".into(),
         };
         let line = summarize(&[change(kind, "defender")]).unwrap();
-        assert_eq!(line, "Today, Microsoft Defender reported a detection: Trojan:Win32/Example.");
+        assert_eq!(line, "Today, Microsoft Defender reported a detection: Example.Threat.");
     }
 }
