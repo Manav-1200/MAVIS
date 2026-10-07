@@ -399,8 +399,14 @@ class WorkerServer:
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
 
-        server = await asyncio.start_unix_server(self.handle_client, path=self.socket_path)
-        os.chmod(self.socket_path, 0o666)
+        # Owner only. Anyone who can connect can use the models and read
+        # the replies, so the socket is never open to other local users.
+        old_umask = os.umask(0o177)
+        try:
+            server = await asyncio.start_unix_server(self.handle_client, path=self.socket_path)
+        finally:
+            os.umask(old_umask)
+        os.chmod(self.socket_path, 0o600)
 
         print(f"[worker] Listening on {self.socket_path}", flush=True)
 
