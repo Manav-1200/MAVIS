@@ -74,7 +74,7 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 | 6 — Context Awareness | Active window, workspace, clipboard, IDE, terminal, project, calendar | :white_check_mark: Complete |
 | 6.5 — Action Execution | App launching, search, system control | :construction: Built; launching not yet seen working on hardware |
 | 7 — Memory & Learning | Recall with decay, daily consolidation, replay, entity graph | :white_check_mark: 7.1–7.2 complete; conversation no longer restored across runs |
-| 8 — Safety & Permissions | Risk scoring, permission gate, confirmation, audit log | :white_check_mark: Core built |
+| 8 — Safety & Permissions | Risk scoring, permission gate, confirmation, undo, audit log | :white_check_mark: Built |
 | 8.5 — System Sentinel | Notices what changed on the machine | :construction: Built; awaiting a hardware run |
 | 9 — Skills Platform | Plugin API, manifest, sandboxing | Not started |
 | 10 — Automation & Wellness | Rule engine, proactive suggestions, wellness | Not started |
@@ -160,11 +160,11 @@ Every plan is scored for risk before anything runs:
 | Risk | What happens |
 |------|--------------|
 | 0–2 | Runs silently — speaking, notifications, volume, launching an app |
-| 3–7 | "Shall I?" — waits up to 20 seconds for a clear yes |
+| 3–7 | "Shall I run …?" — reads out the command and waits up to 20 seconds for a clear yes |
 | 8+ | Requires you to say "yes, administrator" |
 | Irreversible | Refused, whatever you say |
 
-Anything that isn't a clear yes cancels. A "no" anywhere in the answer always wins. Every decision is written to `memory/audit.db`, which MAVIS can add to but never edit.
+Anything that isn't a clear yes cancels. A "no" anywhere in the answer always wins. Before a destructive command runs, the files it names are copied — say "undo that" within five minutes to get them back. Every decision is written to `memory/audit.db`, which MAVIS can add to but never edit.
 
 ### Memory
 
