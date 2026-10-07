@@ -15,9 +15,10 @@
 
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
+use crate::safety::rollback::{Rollback, UNDO_WINDOW};
 use anyhow::Result;
 use log::{debug, error, info, warn};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
@@ -28,12 +29,18 @@ use tokio::time::{sleep, Duration};
 pub struct Executor {
     bus: Arc<EventBus>,
     tts_queue: TtsQueue,
+    rollback: Rollback,
 }
 
 impl Executor {
-    pub fn new(bus: Arc<EventBus>, tts_active: Arc<AtomicBool>) -> Self {
+    /// `backup_root` is where files are copied before a destructive
+    /// command, so it can be undone.
+    pub fn new(bus: Arc<EventBus>, tts_active: Arc<AtomicBool>, backup_root: PathBuf) -> Self {
         let tts_queue = TtsQueue::new(bus.clone(), tts_active);
-        Self { bus, tts_queue }
+        let rollback = Rollback::new(backup_root);
+        // Copies left by an earlier run are past their window by now.
+        rollback.prune();
+        Self { bus, tts_queue, rollback }
     }
 
     pub async fn run(&mut self) {
@@ -116,6 +123,9 @@ impl Executor {
             let result = if action_type == "say" {
                 tts_queued = true;
                 self.run_say(action).await
+            } else if action_type == "undo" {
+                tts_queued = true;
+                self.run_undo().await
             } else {
                 self.execute_action(action).await
             };
@@ -158,17 +168,10 @@ impl Executor {
         Ok(())
     }
 
+    /// Same reading of a plan as the permission gate, so what was scored
+    /// is what runs.
     fn extract_actions(plan: &serde_json::Value) -> Vec<serde_json::Value> {
-        if let Some(arr) = plan.as_array() {
-            return arr.clone();
-        }
-        if let Some(obj) = plan.as_object() {
-            if let Some(actions) = obj.get("actions").and_then(|v| v.as_array()) {
-                return actions.clone();
-            }
-            return vec![plan.clone()];
-        }
-        Vec::new()
+        crate::safety::risk::actions(plan)
     }
 
     async fn execute_action(&self, action: &serde_json::Value) -> Result<String> {
@@ -227,6 +230,7 @@ impl Executor {
 
     async fn run_shell(&self, command: &str) -> Result<String> {
         info!("Executor: shell exec: {}", command);
+        self.save_for_undo(command).await;
         let output = Command::new("sh")
             .arg("-c")
             .arg(command)
@@ -249,6 +253,41 @@ impl Executor {
         };
 
         Ok(result.trim().to_string())
+    }
+
+    /// Copy the files a destructive command names, and drop the copy once
+    /// the undo window has passed.
+    async fn save_for_undo(&self, command: &str) {
+        let (rollback, command) = (self.rollback.clone(), command.to_string());
+        let saved = tokio::task::spawn_blocking(move || rollback.snapshot(&command)).await;
+        if let Ok(Some(count)) = saved {
+            info!("Executor: saved {} path(s) — say \"undo\" within five minutes to restore", count);
+            let rollback = self.rollback.clone();
+            tokio::spawn(async move {
+                sleep(UNDO_WINDOW + Duration::from_secs(1)).await;
+                let _ = tokio::task::spawn_blocking(move || rollback.prune()).await;
+            });
+        }
+    }
+
+    /// Put back what the last destructive command changed, and say so.
+    async fn run_undo(&self) -> Result<String> {
+        let rollback = self.rollback.clone();
+        let restored = tokio::task::spawn_blocking(move || rollback.undo()).await?;
+        let message = match restored.as_deref() {
+            Ok([]) => "There's nothing I can undo.".to_string(),
+            Ok([one]) => {
+                let name = Path::new(one).file_name().map(|n| n.to_string_lossy().to_string());
+                format!("Restored {}.", name.unwrap_or_else(|| one.clone()))
+            }
+            Ok(many) => format!("Restored {} items.", many.len()),
+            Err(e) => {
+                warn!("Executor: undo failed: {}", e);
+                "I couldn't undo that.".to_string()
+            }
+        };
+        self.run_say_text(&message).await?;
+        Ok(message)
     }
 
     async fn run_app(&self, target: &str, args: Vec<String>) -> Result<String> {
@@ -479,7 +518,7 @@ impl TtsQueue {
     ) -> Result<bool> {
         let wav_path = match synthesize_via_worker(text).await {
             Ok(bytes) => {
-                let path = std::env::temp_dir().join("mavis_tts_kokoro.wav");
+                let path = crate::util::runtime_dir().join("mavis_tts_kokoro.wav");
                 tokio::fs::write(&path, &bytes).await?;
                 path
             }
@@ -528,7 +567,7 @@ impl TtsQueue {
             return Ok(false);
         }
 
-        let wav_path = std::env::temp_dir().join("mavis_tts_piper.wav");
+        let wav_path = crate::util::runtime_dir().join("mavis_tts_piper.wav");
         run_piper_to_file(text, &voice_model, &wav_path).await?;
 
         let mut child = spawn_audio_player(&wav_path).await?;
@@ -638,7 +677,7 @@ async fn run_piper_to_file(text: &str, voice_model: &str, wav_path: &Path) -> Re
             "--model",
             voice_model,
             "--output_file",
-            wav_path.to_str().unwrap_or("/tmp/mavis_tts_piper.wav"),
+            &wav_path.to_string_lossy(),
             "--length-scale",
             "1.15",
             "--sentence-silence",
@@ -789,6 +828,32 @@ mod tests {
         let plan = serde_json::json!({"type": "notify", "message": "test"});
         let actions = Executor::extract_actions(&plan);
         assert_eq!(actions.len(), 1);
+    }
+
+    /// A destructive command run through the executor can be undone.
+    #[tokio::test]
+    async fn a_deleted_file_is_restored_by_undo() {
+        let dir = std::env::temp_dir().join(format!(
+            "mavis_exec_undo_{}_{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "important").unwrap();
+
+        let executor = Executor::new(
+            Arc::new(EventBus::new()),
+            Arc::new(AtomicBool::new(false)),
+            dir.join(".mavis-backup"),
+        );
+        executor.run_shell(&format!("rm '{}'", file.display())).await.unwrap();
+        assert!(!file.exists(), "the command really ran");
+
+        assert_eq!(executor.run_undo().await.unwrap(), "Restored notes.txt.");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "important");
+        assert_eq!(executor.run_undo().await.unwrap(), "There's nothing I can undo.");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
