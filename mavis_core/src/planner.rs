@@ -5,6 +5,7 @@ use crate::memory::long_term::LongTermMemory;
 use crate::memory::recall::{build_fts_query, RecallStore};
 use crate::memory::working::WorkingMemory;
 use crate::models::event::{Event, EventType};
+use crate::safety::SharedAwaiting;
 use crate::sentinel::speech::{self, Turn};
 use crate::sentinel::store::SentinelStore;
 use log::{info, warn};
@@ -404,6 +405,16 @@ fn is_stop_request(text: &str) -> bool {
         || t == "be quiet"
 }
 
+/// "Undo that" — put back what the last destructive command changed.
+/// Whole utterance only, so "how do I undo a commit" still goes to the model.
+fn is_undo_request(text: &str) -> bool {
+    let lower = text.to_lowercase();
+    matches!(
+        normalize(strip_address(&lower)).as_str(),
+        "undo" | "undo that" | "undo it" | "undo the last one" | "undo the last thing" | "take that back"
+    )
+}
+
 /// Returns a plan (say + action) when the utterance is a clear command.
 /// None means "not a command" — the utterance goes to the LLM as normal.
 fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Value> {
@@ -572,6 +583,8 @@ pub struct Planner {
     entities: Arc<Mutex<EntityStore>>,
     /// Only set when MAVIS_SENTINEL=1. Locked inside spawn_blocking only.
     sentinel: Option<Arc<std::sync::Mutex<SentinelStore>>>,
+    /// Whether the permission gate has a question open.
+    awaiting: SharedAwaiting,
     /// The update MAVIS last spoke about, for "what did that update do?".
     last_told: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
 }
@@ -597,8 +610,16 @@ impl Planner {
             long_term,
             entities,
             sentinel,
+            awaiting: SharedAwaiting::default(),
             last_told: std::sync::Mutex::new(None),
         }
+    }
+
+    /// Share the permission gate's "question open" state, so the answer
+    /// to a confirmation isn't planned as well.
+    pub fn with_confirmations(mut self, awaiting: SharedAwaiting) -> Self {
+        self.awaiting = awaiting;
+        self
     }
 
     pub async fn run(&mut self) {
@@ -655,6 +676,13 @@ impl Planner {
             intent.to_string()
         };
 
+        // The answer to "Shall I?" belongs to the permission gate. Planning
+        // it as well made MAVIS reply to "yes" as if it were a question.
+        if self.awaiting.lock().unwrap_or_else(|p| p.into_inner()).claims(event.id) {
+            info!("Planner: that answers a confirmation — left to the permission gate");
+            return Ok(());
+        }
+
         // "Stop" is a request for silence, not for an answer. Playback
         // was already killed when the user started speaking; all that's
         // left is to drain anything queued behind it and say nothing.
@@ -705,6 +733,18 @@ impl Planner {
                 }),
             };
             self.bus.publish(plan_event);
+            return Ok(());
+        }
+
+        if is_undo_request(intent) {
+            info!("Planner: undo request");
+            self.bus.publish(Event {
+                id: uuid::Uuid::new_v4(),
+                timestamp: chrono::Utc::now(),
+                source: "planner".to_string(),
+                event_type: EventType::PlanReady,
+                payload: serde_json::json!({ "plan": { "type": "undo" } }),
+            });
             return Ok(());
         }
 
@@ -1488,6 +1528,50 @@ mod tests {
             .collect();
         assert_eq!(said.len(), 1);
         assert!(said[0].contains("hyprland"), "{}", said[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// While the gate has a question open, the next utterance is its
+    /// answer. The planner must not also reply to it, lead with news on
+    /// it, or act on it.
+    #[tokio::test]
+    async fn the_answer_to_a_confirmation_is_left_to_the_gate() {
+        let (planner, mut rx, dir) = planner_with_pending_change("awaiting");
+        let audit = crate::safety::audit::AuditLog::new(&dir.join("audit.db")).unwrap();
+        let mut gate = crate::safety::PermissionGate::new(
+            Arc::new(EventBus::new()),
+            Arc::new(Mutex::new(audit)),
+            planner.awaiting.clone(),
+        );
+        gate.ask_for_test(serde_json::json!([{ "type": "shell", "command": "rm notes.txt" }])).await;
+
+        planner.handle_event(utterance("yes")).await.unwrap();
+        assert!(drain(&mut rx).is_empty(), "nothing planned, nothing led with");
+
+        // Once answered, speech is ordinary again.
+        gate.answer_for_test(&utterance("no")).await;
+        planner.handle_event(utterance("open firefox")).await.unwrap();
+        assert!(!drain(&mut rx).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_is_recognised_only_as_a_whole_request() {
+        for said in ["undo", "Undo that.", "MAVIS, undo it", "take that back"] {
+            assert!(is_undo_request(said), "{}", said);
+        }
+        for said in ["how do I undo a commit", "undo the migration in the database", "don't undo that", ""] {
+            assert!(!is_undo_request(said), "{}", said);
+        }
+    }
+
+    #[tokio::test]
+    async fn undo_becomes_an_undo_plan_without_the_model() {
+        let (planner, mut rx, dir) = planner_with_pending_change("undo");
+        planner.handle_event(utterance("undo that")).await.unwrap();
+        let events = drain(&mut rx);
+        assert!(!events.iter().any(|e| e.event_type == EventType::WorkerRequest));
+        assert!(events.iter().any(|e| e.event_type == EventType::PlanReady && e.payload["plan"]["type"] == "undo"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
