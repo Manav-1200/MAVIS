@@ -446,7 +446,9 @@ impl LinuxScreen {
 
 impl ScreenGrabber for LinuxScreen {
     fn capture_focused(&self) -> Result<Screenshot, PlatformError> {
-        let tmp = "/tmp/mavis_screenshot.png";
+        let tmp = crate::util::runtime_dir().join("mavis_screenshot.png");
+        let tmp = tmp.to_string_lossy();
+        let tmp = tmp.as_ref();
         if self.wayland {
             std::process::Command::new("grim")
                 .arg(tmp)
