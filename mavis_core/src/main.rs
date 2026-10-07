@@ -130,6 +130,10 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    // Shared with the permission gate: while it has a question open, the
+    // next utterance is the answer, not something to plan.
+    let awaiting = safety::SharedAwaiting::default();
+    let awaiting_for_planner = awaiting.clone();
     let planner_handle = supervise("Planner", Arc::clone(&bus), move || {
         let mut planner = planner::Planner::new(
             Arc::clone(&bus_for_planner),
@@ -139,7 +143,8 @@ async fn main() -> Result<()> {
             long_term_for_planner.clone(),
             entities_for_planner.clone(),
             sentinel_for_planner.clone(),
-        );
+        )
+        .with_confirmations(awaiting_for_planner.clone());
         async move {
             planner.run().await;
         }
@@ -151,7 +156,7 @@ async fn main() -> Result<()> {
     let audit_for_gate = audit.clone();
     let gate_handle = supervise("PermissionGate", Arc::clone(&bus), move || {
         let mut gate =
-            safety::PermissionGate::new(Arc::clone(&bus_for_gate), audit_for_gate.clone());
+            safety::PermissionGate::new(Arc::clone(&bus_for_gate), audit_for_gate.clone(), awaiting.clone());
         async move {
             gate.run().await;
         }
@@ -160,9 +165,13 @@ async fn main() -> Result<()> {
     // Executor
     let bus_for_exec = Arc::clone(&bus);
     let tts_active_for_exec = tts_active.clone();
+    let backup_root = data_dir.join(".mavis-backup");
     let exec_handle = supervise("Executor", Arc::clone(&bus), move || {
-        let mut executor =
-            executor::Executor::new(Arc::clone(&bus_for_exec), tts_active_for_exec.clone());
+        let mut executor = executor::Executor::new(
+            Arc::clone(&bus_for_exec),
+            tts_active_for_exec.clone(),
+            backup_root.clone(),
+        );
         async move {
             executor.run().await;
         }
@@ -520,6 +529,8 @@ async fn main() -> Result<()> {
         info!("Orb: initialized");
 
         let mut rx = bus_clone.subscribe();
+        // True while the permission gate is waiting for a yes or no.
+        let mut asking = false;
         loop {
             match rx.recv().await {
                 Ok(event) => {
@@ -527,18 +538,7 @@ async fn main() -> Result<()> {
                         if let Some(state_str) =
                             event.payload.get("state").and_then(|v| v.as_str())
                         {
-                            let state = match state_str {
-                                "idle" => ui::OrbState::Idle,
-                                "listening" => ui::OrbState::Listening,
-                                "thinking" => ui::OrbState::Thinking,
-                                "speaking" => ui::OrbState::Speaking,
-                                "working" => ui::OrbState::Working,
-                                "error" => ui::OrbState::Error,
-                                "asleep" => ui::OrbState::Asleep,
-                                "celebrating" => ui::OrbState::Celebrating,
-                                _ => ui::OrbState::Idle,
-                            };
-                            orb.set_state(state);
+                            orb.set_state(ui::OrbState::from_event(state_str, &mut asking));
                         }
                     }
                 }
