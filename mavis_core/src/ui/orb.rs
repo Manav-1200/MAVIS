@@ -200,6 +200,7 @@ fn render_orb(buffer: &mut [u32], time: f32, state: OrbState, energy: f32) {
         OrbState::Error => 1.0 + 0.20 * (time * 6.0).sin(),
         OrbState::Asleep => 1.0 + 0.02 * (time * 0.8).sin(),
         OrbState::Celebrating => 1.0 + 0.18 * (time * 6.0).sin(),
+        OrbState::Asking => 1.0 + 0.14 * (time * 2.0).sin(),
     };
 
     let radius = base_radius * pulse;
@@ -213,6 +214,8 @@ fn render_orb(buffer: &mut [u32], time: f32, state: OrbState, energy: f32) {
         OrbState::Error => (255, 50, 50),
         OrbState::Asleep => (80, 80, 120),
         OrbState::Celebrating => (255, 215, 0),
+        // Orange: between thinking yellow and error red.
+        OrbState::Asking => (255, 140, 0),
     };
 
     // Voice activity LED scaling per state
@@ -225,6 +228,7 @@ fn render_orb(buffer: &mut [u32], time: f32, state: OrbState, energy: f32) {
         OrbState::Error => 0.20,
         OrbState::Asleep => 0.05,
         OrbState::Celebrating => 0.15,
+        OrbState::Asking => 0.30,
     };
 
     // Normalize RMS energy (typical range 0.0–0.05) to 0.0–1.0
