@@ -3,7 +3,30 @@
 
 use crate::event_bus::EventBus;
 use log::{error, info, warn};
+use std::path::PathBuf;
 use std::sync::Arc;
+
+/// A directory only this user can write to, for short-lived files. In
+/// shared /tmp another local user can plant a link where a fixed
+/// filename is about to be written.
+pub fn runtime_dir() -> PathBuf {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    if let Some(dir) = runtime.filter(|d| d.is_dir()) {
+        return dir;
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let dir = PathBuf::from(home).join(".cache/mavis");
+        if std::fs::create_dir_all(&dir).is_ok() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+            }
+            return dir;
+        }
+    }
+    std::env::temp_dir()
+}
 
 /// How many times a subsystem may panic before MAVIS stops restarting it.
 /// A deterministic panic would otherwise spin forever; five attempts is
@@ -123,6 +146,15 @@ mod tests {
     #[test]
     fn exact_length_is_unchanged() {
         assert_eq!(truncate_bytes("hello", 5), "hello");
+    }
+
+    #[test]
+    fn the_runtime_dir_exists_and_is_not_shared_tmp_when_a_private_one_is_available() {
+        let dir = runtime_dir();
+        assert!(dir.is_dir(), "{}", dir.display());
+        if std::env::var_os("XDG_RUNTIME_DIR").is_some() || std::env::var_os("HOME").is_some() {
+            assert_ne!(dir, std::env::temp_dir());
+        }
     }
 
     #[test]
