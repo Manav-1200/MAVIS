@@ -18,6 +18,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **System Sentinel** (Phase 8.5, opt-in via `MAVIS_SENTINEL=1`) — reads the pacman, dpkg or dnf transaction log and notices packages you didn't ask for, removals and downgrades. First run imports history silently; one sentence per update; routine upgrades never mentioned. Pending changes are said the next time you speak; "what changed recently?" and "what did that update do?" are answered from its record, without the model. Also watches who can do what: new accounts, group membership, SSH keys, sudoers, enabled services and setuid binaries — gaining root-level access raises a desktop notification immediately. Once a day it checks that packaged files still match their packages (`pacman -Qkk`, `rpm -Va`, `dpkg --verify`) and, with `MAVIS_SENTINEL_ADVISORIES=1`, relays new high-risk advisories from `arch-audit` or `debsecan`. Windows and macOS sources (installed apps, startup items, Defender detections, Homebrew, launchd) are written but unverified.
 - **Permission gate** (Phase 8) — every plan is scored 0–10 and recorded before the executor sees it. Silent below 3, "Shall I?" from 3, "yes, administrator" from 8, irreversible commands refused.
 - **Append-only audit log** — `audit.db`, with no update or delete path.
+- **Undo** — before a destructive command runs, the files it names are copied; "undo that" restores them within five minutes.
+- **The confirmation question reads out the command**, and the orb turns orange while MAVIS waits for the answer.
 - **Subsystem supervision** — a panicking subsystem is logged and restarted instead of silently disappearing.
 - **Memory** (Phase 7) — FTS5 recall with importance-based decay, hourly daily-summary consolidation, time-range replay ("what was I doing yesterday afternoon"), and an entity graph of projects, apps and files.
 - **Actions** (Phase 6.5) — launch any installed app, YouTube and web search, URLs, and voice control of volume, media and brightness. Apps discovered from `.desktop` files, Start Menu shortcuts or `.app` bundles.
@@ -27,6 +29,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **A plan wrapped as `{"actions": [...]}` was asked about instead of refused** — `rm -rf /` in that shape needed only a "yes". The gate and executor now read plans the same way.
+- **Commands launched as an "app" skipped risk scoring** — `sudo …` and `sh -c …` ran silently at risk 2.
+- **"Okay, so what about…" counted as consent.** The whole answer now has to be a yes.
+- **The answer to "Shall I?" was also sent to the model**, which would have replied to "yes".
+- **The worker socket was open to every local user** (`0666`); now owner-only. Speech audio no longer goes through fixed names in `/tmp`.
 - **"What's on my clipboard?" answered with a single word from a shell prompt** — a multi-line clipboard was pasted into the prompt raw, breaking it into fragments. It's now flattened to one line, with its true length stated when it's long.
 - **Recall offering old commands as context** — only things you stated about yourself are put into prompts now; everything is still recorded for replay and summaries.
 - **Audio arriving above full scale** (2.2× in recent runs) is scaled back before transcription instead of being passed on distorted.
