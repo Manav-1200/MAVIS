@@ -82,6 +82,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 10-07 | 8 | Phase 8 finished except per-skill permissions: four gate gaps closed (one of them new — a wrapped plan turned a refusal into a question), strict consent, the command read out before running, an orb state while asking, rollback and "undo", worker socket owner-only. None of it reachable by voice until Phase 9 gives the gate something to ask about (§23) |
 | 10-06 | 8.5 | Sentinel steps 4 and 5: file integrity and advisories, checked against real `pacman`, `rpm`, `dpkg`, `arch-audit` and `debsecan` output; Windows and macOS inventories written but unverified. Phase 8.5 is built; nothing since step 2a has had a hardware run (§21, §22) |
 | 10-01 | 8.5 | Sentinel step 3: users, groups, SSH keys, sudoers, enabled units and setuid binaries watched; gains are Critical or Notable. Tested; not yet run on hardware (§20) |
 | 10-01 | 8.5 | Sentinel step 2b: pending changes spoken on the next utterance, "what changed?" and "what did that update do?" answered from the store. Built and tested; not yet heard on hardware (§19) |
@@ -411,7 +412,7 @@ These are the rules every decision below was measured against. When two entries 
 **Why it mattered:** an append-only log that misreports what happened is worse than no log.
 
 ### Not built from the Phase 8 plan
-- **Rollback** (`.mavis-backup/` snapshots) — not built.
+- **Rollback** — built 2026-10-07, see §23.
 - **Per-skill permissions** — blocked on Phase 9, which doesn't exist yet.
 - **LLM second-pass risk** — replaced by static scoring (ADR-007).
 
@@ -688,11 +689,13 @@ Known, recorded, not yet fixed. Roughly in the order they'd be felt.
 - **Capture arrives at 2.2–2.3× full scale.** The PipeWire source volume is 0.60, so the gain is upstream in ALSA — capture level or mic boost, unconfirmed. Whisper confidence sits at 0.37–0.77 because of it. The worker scales anything over 1.0 back to 0.95, which limits the damage without fixing it. **This is the first thing to chase.**
 - Memory lives at `../memory`, relative to the working directory
 
-**Security**
-- `app` actions bypass shell risk scoring: `ELEVATED_TOKENS` have trailing spaces, so `"sudo".contains("sudo ")` is false, and `args` aren't scored. `{"type":"app","target":"sh","args":["-c","…"]}` scores 2 and runs. Not reachable from voice today.
-- Worker socket is `0666` in `/tmp`
-- `"ok"` counts as consent
-- Fixed temp WAV paths in `/tmp`; `kill -15 <pid>` can hit a reused PID
+**Security** *(the first four closed 2026-10-07, §23)*
+- ~~`app` actions bypass shell risk scoring~~ — fixed
+- ~~Worker socket is `0666`~~ — now `0600`. It is still in `/tmp` under a fixed name; another local user can't connect, but could squat the name before MAVIS starts and stop the worker launching
+- ~~`"ok"` counts as consent~~ — fixed
+- ~~Fixed temp WAV paths in `/tmp`~~ — moved to the user's runtime directory
+- `kill -15 <pid>` can hit a reused PID. The PID is cleared the moment playback ends, so the window is microseconds; closing it properly means signalling from the task that owns the process, which touches barge-in and can't be tested without speakers
+- The hotkey and browser sockets are also fixed names in `/tmp`
 
 **Worker**
 - Idle unload can race an in-flight inference; `WorkerServer.lock` guards nothing
@@ -705,9 +708,9 @@ Known, recorded, not yet fixed. Roughly in the order they'd be felt.
 - Unused platform traits and fields: `AudioCapture`, `ScreenGrabber`, `LinuxScreen.wayland`, `parse_png_dimensions`, `_shutdown_tx`
 
 **Not built**
-- Sentinel steps 2b–5: speaking pending changes, answering "what changed?", privilege surfaces, integrity and CVE checks, Windows and macOS
 - `wlr-layer-shell` for the orb on native Wayland
-- Phase 8 rollback; per-skill permissions (needs Phase 9)
+- Per-skill permissions (needs Phase 9); confirming by tapping the orb
+- Sentinel: winget and XProtect (§22)
 
 ---
 
@@ -1177,6 +1180,67 @@ Every script ends by printing `MAVIS-END`. Output without it was cut short and i
 - **Everything, on real hardware.** Cmdlet properties, PowerShell's output encoding, how noisy Windows' own scheduled tasks are after a feature update.
 - **One line is not even compiled:** the `#[cfg(windows)]` call that stops a console window flashing. The method exists in tokio 1.53; the build has never run on Windows.
 - **No "did you ask for it"** on either platform — every new app is Notable, including ones just installed on purpose.
+
+## 23. Finishing Phase 8
+
+**Date:** 2026-10-07. **Status:** built, `cargo test` (203 → 233 tests), `cargo clippy` and `ruff` clean. **Nothing here can be reached by voice yet**: the planner only produces actions that score 0–2, so the gate never asks. Everything below is proven on the event bus, with the real gate, executor and files — not heard.
+
+### Problem · A wrapped plan turned a refusal into a question
+**Found:** reading the gate next to the executor. Not in §8.4; new.
+**Cause:** the executor accepts three plan shapes — an array, a bare action, and `{"actions": [...]}`. The gate knew only the first two. A wrapped plan was scored as one action of unknown type: 5, "Shall I?".
+**Why it mattered:** `{"actions":[{"type":"shell","command":"rm -rf /"}]}` should be refused outright. It was asked about instead, and a plain "yes" would have run it. Administrator-level commands likewise needed only "yes".
+**Fix:** one function, `risk::actions`, reads a plan. The gate scores what it returns and the executor runs what it returns.
+**Evidence:** **Proven.** On the old code the wrapped `rm -rf /` scored `5 Confirm`; now `Deny` in all three shapes.
+
+### Problem · A command launched as an "app" scored 2 (§8.4)
+**Cause:** `ELEVATED_TOKENS` carry a trailing space, so a target of exactly `sudo` never matched, and `args` were not looked at.
+**Fix:** an `app` whose program is one the shell rules name (`sudo`, `rm`, `systemctl`…), or which is handed code to run (`-c`, `-e`), is scored as the command line it amounts to. Program names are matched whole — `shutdown-timer` is an application — and a URL is never read as a command, or "play shutdown on YouTube" would have been refused.
+**The names come from the existing rules** (the first word of each pattern), so there is no second list to keep in step.
+**Evidence:** **Proven.** Old code: `sh -c "rm -rf ~/x"` → `2 Allow`, `sudo rm -rf /etc` → `2 Allow`. Now 6 and 9, and `bash -c "rm -rf /"` is refused.
+
+### Problem · "Okay, so what about…" was a yes (§8.4)
+**Cause:** `is_affirmative` looked for an agreeing word anywhere in the sentence.
+**Fix:** the whole utterance has to be agreement. Every word must belong to a small grammar — the yes-words and what sits around them ("please", "go ahead", "administrator"). Anything else, including every negation, falls outside it.
+**Same shape as §19's question matching**, and for the same reason: a list of things that are *not* consent never ends.
+**Evidence:** **Proven.** "okay so what about the weather", "is the answer yes or what" and "do it tomorrow" were consent before and are not now; every phrase in the existing tests still is.
+
+### Problem · A second question replaced the first without a trace (§8.4)
+**Fix:** the older one is closed in the audit log as `superseded`, and "yes" then means the question asked last. A question also now lapses on time — `expired` is recorded after 20 s, rather than whenever the user next speaks.
+
+### Problem · MAVIS would have answered "yes" twice
+**Found:** tracing who listens to `UserIntent`. Never seen, because the gate has never asked.
+**Cause:** the gate reads the next utterance as the answer. So does the planner, as an ordinary utterance — it would have sent "yes" to the model, and with step 2b, led with pending system changes on it.
+**Fix:** the gate and planner share one small piece of state: whether a question is open, and which utterance answered it. The planner leaves that utterance alone. It holds whichever of the two sees the utterance first.
+**Evidence:** **Proven** — the test fails with the planner's check removed.
+
+### Decision · The question says what would run
+**PHASES called this dry-run mode.** "Shall I? Modifies or deletes data." became "Shall I run rm notes.txt? It modifies or deletes data." Commands are cut at 100 bytes. Above risk 8: "That needs administrator permission. I would run … Say 'yes, administrator' to go ahead."
+
+### Decision · The orb shows that it is waiting
+A new state, orange, held from the question until the answer or the timeout. Without it the orb fell back to idle the moment the question finished playing — while MAVIS was in fact waiting on the user.
+**Not built:** confirming by tapping the orb. A tap is indistinguishable from the start of a drag without changes to the window loop that can't be tested here.
+
+### Decision · Rollback copies what a command names, for five minutes
+**As planned:** `.mavis-backup/` snapshots before destructive actions, undo within five minutes. It lives in the memory directory.
+**How:** before `rm`, `rmdir`, `mv`, `shred` or `truncate` runs, the files it names are copied. "Undo", "undo that" or "take that back" puts the latest copy back and discards it. Copies are deleted after five minutes, and at startup.
+**"Where possible" is taken literally.** No copy is made when the command uses anything whose effect can't be read off it — globs, variables, pipes, several commands, `sudo` — or when the copy would pass 200 MB or 5,000 files. The command still runs; it just can't be undone. Guessing what `rm *.txt` will match, and being wrong, is worse than saying there is nothing to undo.
+**Undo never deletes.** It restores what was there. After `mv a b` and an undo, both exist.
+**Links are copied as links**, never followed, so a snapshot can't wander outside what was named.
+**Evidence:** **Proven** end to end on one bus: a held `rm`, nothing touched until "yes", the file gone, an undo plan, the file back with its contents — and the audit log reading `held_for_confirmation, confirmed, allowed`.
+
+### Decision · The worker socket is owner-only
+`0666` let any local user send prompts to the models and read the replies. Now created under a `0177` umask and set to `0600`.
+**Evidence:** **Measured.** As another user: connects at `0666`, `Permission denied` at `0600`. The worker itself could not be started here (no models), so the change is checked in isolation, not in the running voice loop.
+
+### Decision · Speech audio leaves shared `/tmp`
+TTS wrote `mavis_tts_*.wav` under a fixed name in `/tmp`, where another local user could plant a link and have MAVIS overwrite the file it points to. They now go to `$XDG_RUNTIME_DIR`, or `~/.cache/mavis` at `0700`.
+**Not verified here:** that piper and the players are happy with the new path. It is only a different directory, but the voice loop is the one thing that can't be run in the sandbox.
+
+### Still open
+- **A hardware run of the confirmation flow** — impossible until something voice-reachable needs confirming. Phase 9's skills are what will exercise it.
+- **Per-skill permissions** — Phase 9.
+- **Tap to confirm.**
+- **The rest of §14's security list**: PID reuse, fixed socket names in `/tmp`.
 
 ---
 
