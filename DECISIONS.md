@@ -1,3 +1,4 @@
+<!-- DECISIONS.md -->
 # MAVIS — Decision Log
 
 Every significant decision made while building MAVIS: what was decided, why, what else was considered, and every real problem hit along the way — what the symptom was, what the cause actually turned out to be, and how it was fixed.
@@ -37,6 +38,12 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 16. [The 2026-09-26 live run and barge-in](#16-the-2026-09-26-live-run-and-barge-in)
 17. [The 2026-09-27 run — MAVIS interrupting itself](#17-the-2026-09-27-run--mavis-interrupting-itself)
 18. [Memory that follows you into the next session](#18-memory-that-follows-you-into-the-next-session)
+19. [The Sentinel speaks — Phase 8.5 step 2b](#19-the-sentinel-speaks--phase-85-step-2b)
+20. [Privilege surfaces — Phase 8.5 step 3](#20-privilege-surfaces--phase-85-step-3)
+21. [Integrity and advisories — Phase 8.5 step 4](#21-integrity-and-advisories--phase-85-step-4)
+22. [Windows and macOS — Phase 8.5 step 5](#22-windows-and-macos--phase-85-step-5)
+23. [Finishing Phase 8](#23-finishing-phase-8)
+24. [Everything up to Phase 8](#24-everything-up-to-phase-8)
 
 ---
 
@@ -82,6 +89,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 10-08 | 4–8 | Everything owed up to Phase 8: push to talk chosen at setup, tap the orb to confirm, older turns compressed into the prompt, two worker races fixed, dead code removed, SIGTERM saves memory. Embeddings, an LLM risk check and the learning engine stay out, by decision (§24) |
 | 10-07 | 8 | Phase 8 finished except per-skill permissions: four gate gaps closed (one of them new — a wrapped plan turned a refusal into a question), strict consent, the command read out before running, an orb state while asking, rollback and "undo", worker socket owner-only. None of it reachable by voice until Phase 9 gives the gate something to ask about (§23) |
 | 10-06 | 8.5 | Sentinel steps 4 and 5: file integrity and advisories, checked against real `pacman`, `rpm`, `dpkg`, `arch-audit` and `debsecan` output; Windows and macOS inventories written but unverified. Phase 8.5 is built; nothing since step 2a has had a hardware run (§21, §22) |
 | 10-01 | 8.5 | Sentinel step 3: users, groups, SSH keys, sudoers, enabled units and setuid binaries watched; gains are Critical or Notable. Tested; not yet run on hardware (§20) |
@@ -697,15 +705,16 @@ Known, recorded, not yet fixed. Roughly in the order they'd be felt.
 - `kill -15 <pid>` can hit a reused PID. The PID is cleared the moment playback ends, so the window is microseconds; closing it properly means signalling from the task that owns the process, which touches barge-in and can't be tested without speakers
 - The hotkey and browser sockets are also fixed names in `/tmp`
 
-**Worker**
-- Idle unload can race an in-flight inference; `WorkerServer.lock` guards nothing
-- Ctrl+C removes the socket but never stops `serve_forever()`
-- Dropped utterances under back-pressure aren't logged
+**Worker** *(all three closed 2026-10-08, §24)*
+- ~~Idle unload can race an in-flight inference; `WorkerServer.lock` guards nothing~~ — fixed
+- ~~Ctrl+C removes the socket but never stops `serve_forever()`~~ — fixed
+- ~~Dropped utterances under back-pressure aren't logged~~ — logged
 
-**Dead code**
-- `EpisodicStore` is written, never read, never pruned
-- `MAVIS_ACTIVE_LISTEN` can't cross the process boundary it's meant to
-- Unused platform traits and fields: `AudioCapture`, `ScreenGrabber`, `LinuxScreen.wayland`, `parse_png_dimensions`, `_shutdown_tx`
+**Dead code** *(removed 2026-10-08, §24)*
+- ~~`EpisodicStore` is written, never read, never pruned~~
+- ~~`MAVIS_ACTIVE_LISTEN` can't cross the process boundary it's meant to~~ — now a field in the request
+- ~~Unused platform traits and fields: `AudioCapture`, `ScreenGrabber`, `LinuxScreen.wayland`, `parse_png_dimensions`, `_shutdown_tx`~~
+- Still there on purpose: the Windows and macOS window and clipboard stubs, which Phase 12 fills in
 
 **Not built**
 - `wlr-layer-shell` for the orb on native Wayland
@@ -1239,8 +1248,69 @@ TTS wrote `mavis_tts_*.wav` under a fixed name in `/tmp`, where another local us
 ### Still open
 - **A hardware run of the confirmation flow** — impossible until something voice-reachable needs confirming. Phase 9's skills are what will exercise it.
 - **Per-skill permissions** — Phase 9.
-- **Tap to confirm.**
+- ~~**Tap to confirm.**~~ — built, §24.
 - **The rest of §14's security list**: PID reuse, fixed socket names in `/tmp`.
+
+---
+
+## 24. Everything up to Phase 8
+
+*2026-10-08.* What PHASES still owed before Phase 9, built or decided. Nothing here has run on hardware yet.
+
+### Decision · Push to talk is a choice made at setup
+**Before:** always listening was the only way, by decision (Phase 5.7). Some people won't want a microphone that is always open, and some rooms are too noisy for it.
+**Now:** `setup.sh` asks once — always, or push to talk — and writes `listen_mode` under `[voice]` in `config/config.toml`. `MAVIS_LISTEN_MODE` overrides it. Always stays the default.
+**How push to talk works:** the audio thread drops every sample until a hotkey press or an orb tap opens a window. It then hears one utterance and closes. A second press before you speak cancels. A window you don't use closes after 8 s, so a stray press doesn't leave the microphone open.
+**The hotkey** is `toggle_listen.sh`, which sends `toggle_listen` to the existing hotkey socket. Binding a key is the compositor's job. MAVIS has no global key grab on Wayland, and adding one would mean a different method on every compositor. Setup prints the line for niri, sway and Hyprland.
+**An asked-for utterance is trusted more.** The worker already had a looser confidence check for speech the user asked it to hear. It was switched by `MAVIS_ACTIVE_LISTEN`, an environment variable the core set in its own process, where the worker could never see it. It is now an `active_listen` field on the STT request.
+**Evidence:** **Proven** on the capture path. In a test, push mode stays deaf until a press, then ships exactly one utterance. That test fails with the gate taken out. **Not run on hardware:** the hotkey binding, and how it feels.
+
+### Decision · A tap on the orb is a yes
+**What a tap is:** a press released within 400 ms, having moved less than 4 px. Anything longer or further is a drag, so moving the orb never answers a question.
+**What it means:**
+- While a 3–7 question is open, a tap answers yes. It is audited as `confirmed`, with the reason "user tapped the orb".
+- **A tap never confirms an administrator action.** Those still need the words. MAVIS says so and keeps the question open.
+- In push-to-talk mode, with no question open, a tap starts listening. In always mode it does nothing.
+**Shared with the planner:** the gate marks the tap as the answer, the same way it marks a spoken "yes", so the listening toggle ignores that tap.
+**Evidence:** **Proven** at the gate: a tap approves, a tap on an administrator question doesn't, and a tap with nothing open does nothing. Telling a tap from a drag is unit-tested. **Not tested:** the click inside the real orb window. The sandbox has no display.
+
+### Decision · Older turns become one line, not a summary
+**Before:** the prompt saw the last 12 events. Anything earlier was gone, and so was anything pushed out of the 50-event ring.
+**Now:** working memory keeps the last 10 things the user said as they leave the ring, 80 bytes each. The prompt gains one item: *Earlier in this conversation the user said: "…"; "…".* It holds the last five, from the ring and from that list.
+**User words only.** This is the same reason recall leaves out MAVIS's replies (§7): replaying its own guesses back turns them into facts.
+**Why not an LLM summary:** it would cost a model call on every turn. The model is already the slowest step.
+**Evidence:** **Proven.** A test sends 56 utterances. The first one leaves the ring and still reaches the prompt.
+
+### Problem · The worker could unload a model mid-reply
+**Cause:** the idle monitor checked only the time since the last request finished. A transcription or reply taking longer than the idle timeout was treated as idle. The worker's lock was never taken, so it guarded nothing.
+**Fix:** a count of requests in flight. The monitor waits while it is above zero. The unused lock is removed.
+**Evidence:** **Proven** with stub engines in a one-off test, since there are no models here. The test is not kept in the repo. On the old worker, one unload happened during a request. On the new one, none did.
+
+### Problem · Ctrl+C left the worker running
+**Cause:** `shutdown()` removed the socket, but `serve_forever()` never returned.
+**Fix:** the server waits on a stop event. `shutdown()` sets it.
+**Evidence:** **Proven** with the same stubs. The old `run()` was still serving 3 s after shutdown. The new one returns.
+
+### Problem · `kill` lost the conversation
+**Found:** while removing `_shutdown_tx`. The channel's sender was never used, so the only way out was Ctrl+C. A plain `kill`, or a service manager stopping MAVIS, ended it before working memory was saved.
+**Fix:** MAVIS waits for Ctrl+C or SIGTERM, and both take the same path: save, close the bus, stop STT.
+**Evidence:** **Measured.** Started the core here, sent SIGTERM, and saw "Terminate signal received" and "MAVIS shutdown complete" in the log. `working_memory.json` was written.
+
+### Problem · A dropped utterance left no trace
+When transcription was still busy, a new utterance was thrown away silently. It is now logged as a warning.
+
+### Decision · Dead code removed
+- **`EpisodicStore`.** Every utterance, action and plan was written to `episodic.db`, which was never read and never pruned, so it only grew. Replay reads `recall.db`. An existing `memory/episodic.db` can be deleted.
+- **Platform traits nothing called:** `AudioCapture`, `AudioStream`, `ScreenGrabber` and their types, both `subscribe_changes` methods, `LinuxScreen`, and `parse_png_dimensions`. Audio is captured in `stt.rs` with cpal. Screen capture belongs to Phase 11 and will be written against what it needs.
+**Kept:** the Windows and macOS window and clipboard stubs, which Phase 12 fills in.
+**Evidence:** builds and all tests pass; clippy's never-used warnings for all of these are gone, and no new warning appears.
+
+### Decision · Two things stay out, for the product's sake
+**Vector embeddings for recall.** Only stated facts (importance 8+) reach the prompt. That is a small set of short sentences, and FTS5 already finds them by their words. Embeddings would add a model download to install, and a worker round trip on every utterance, to improve a search that hasn't yet been seen to miss. The trigger to revisit is a real miss: a fact the user stated that wasn't recalled when it should have been.
+**An LLM check on risk.** The same command has to get the same answer every time, or the confirmation flow can't be trusted. Static scoring does that. If a model pass is added, it may only raise a score (Appendix A.11). Nothing reachable by voice needs a second opinion until Phase 9's skills, so it waits for them.
+
+### Not changed
+**The learning engine (7.3)** stays deferred. There is still not enough history for routine detection to find anything real.
 
 ---
 
