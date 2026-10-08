@@ -663,6 +663,7 @@ impl SttManager {
         bus: Arc<EventBus>,
         speech_start_tx: Option<mpsc::Sender<()>>,
         tts_active: Arc<AtomicBool>,
+        listen: Arc<crate::listen::ListenGate>,
     ) -> anyhow::Result<(SttHandle, mpsc::Receiver<Vec<f32>>, mpsc::Receiver<f32>)> {
         let running = Arc::new(AtomicBool::new(true));
         let running_stream = running.clone();
@@ -740,6 +741,8 @@ impl SttManager {
             energy_tx,
             bus,
             speech_start: speech_start_tx,
+            listen,
+            was_hearing: true,
         };
 
         // Most devices offer f32, but some USB microphones and plain ALSA
@@ -823,6 +826,9 @@ struct Capture {
     energy_tx: mpsc::Sender<f32>,
     bus: Arc<EventBus>,
     speech_start: Option<mpsc::Sender<()>>,
+    /// Push to talk: whether the microphone is being heard at all.
+    listen: Arc<crate::listen::ListenGate>,
+    was_hearing: bool,
 }
 
 impl Capture {
@@ -897,6 +903,22 @@ impl Capture {
         if self.stream_opened_at.elapsed() < STREAM_SETTLE_TIME {
             return;
         }
+
+        // Push to talk: deaf unless a window is open — or the user is
+        // already mid-sentence, so a window lapsing can't cut them off.
+        let hearing = self.listen.hearing();
+        if !hearing && !self.speaking() {
+            if self.was_hearing {
+                self.publish_state("idle"); // the window lapsed unused
+            }
+            self.was_hearing = false;
+            self.reset_vad();
+            return;
+        }
+        if hearing && !self.was_hearing {
+            self.publish_state("listening");
+        }
+        self.was_hearing = hearing;
 
         let playing = self.tts_active.load(Ordering::Relaxed);
 
@@ -985,7 +1007,14 @@ impl Capture {
                 return;
             }
             info!("STT: shipping utterance ({} samples)", utterance.len());
-            let _ = self.tx.try_send(utterance);
+            if let Err(e) = self.tx.try_send(utterance) {
+                // The transcriber is behind; say so rather than lose it silently.
+                warn!("STT: dropped an utterance — transcription is still busy ({})", e);
+                abandon(self);
+                return;
+            }
+            self.listen.shipped();
+            self.was_hearing = false;
             self.publish_state("thinking");
         } else if was_speaking && !now_speaking {
             // The VAD ended an utterance and dropped it as room noise.
@@ -1081,6 +1110,71 @@ mod vad_tests {
             out.push((u, fed));
         }
         out
+    }
+
+    /// A Capture fed straight from a buffer — the same path a microphone
+    /// callback takes, minus the device.
+    fn capture(
+        mode: crate::listen::ListenMode,
+    ) -> (Capture, mpsc::Receiver<Vec<f32>>, Arc<crate::listen::ListenGate>) {
+        let (tx, rx) = mpsc::channel(4);
+        let (energy_tx, _energy_rx) = mpsc::channel(10_000);
+        let listen = Arc::new(crate::listen::ListenGate::new(mode));
+        let config = SttConfig::default();
+        let c = Capture {
+            running: Arc::new(AtomicBool::new(true)),
+            tts_active: Arc::new(AtomicBool::new(false)),
+            stream_opened_at: Instant::now() - STREAM_SETTLE_TIME * 2,
+            was_tts_active: false,
+            post_tts_cooldown: None,
+            channels: 1,
+            device_rate: 16_000,
+            target_rate: 16_000,
+            min_max_energy: config.min_max_energy,
+            barge_in: true,
+            vad: Arc::new(Mutex::new(vad())),
+            tx,
+            energy_tx,
+            bus: Arc::new(EventBus::new()),
+            speech_start: None,
+            listen: Arc::clone(&listen),
+            was_hearing: true,
+        };
+        (c, rx, listen)
+    }
+
+    fn sentence(seed: u32) -> Vec<f32> {
+        let mut s = seed;
+        let mut audio = noise(0.033, 60, &mut s);
+        audio.extend(speech(0.2, 0.033, 1500, &mut s));
+        audio.extend(noise(0.033, 60, &mut s));
+        audio
+    }
+
+    fn shipped(c: &mut Capture, rx: &mut mpsc::Receiver<Vec<f32>>, audio: &[f32]) -> usize {
+        for chunk in audio.chunks(1024) {
+            c.on_samples(chunk);
+        }
+        std::iter::from_fn(|| rx.try_recv().ok()).count()
+    }
+
+    #[test]
+    fn always_mode_hears_without_being_asked() {
+        let (mut c, mut rx, _) = capture(crate::listen::ListenMode::Always);
+        assert_eq!(shipped(&mut c, &mut rx, &sentence(1)), 1);
+        assert_eq!(shipped(&mut c, &mut rx, &sentence(2)), 1);
+    }
+
+    #[test]
+    fn push_mode_hears_only_after_a_press_and_only_once() {
+        let (mut c, mut rx, listen) = capture(crate::listen::ListenMode::Push);
+        assert_eq!(shipped(&mut c, &mut rx, &sentence(1)), 0, "deaf until asked");
+
+        listen.toggle();
+        assert_eq!(shipped(&mut c, &mut rx, &sentence(2)), 1);
+        assert!(listen.take_explicit(), "marked as asked for");
+
+        assert_eq!(shipped(&mut c, &mut rx, &sentence(3)), 0, "the window closed after one");
     }
 
     #[test]
