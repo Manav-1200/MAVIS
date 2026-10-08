@@ -48,6 +48,12 @@ pub enum EventType {
     /// (Phase 8.5). Carries the changes and their peak severity so a
     /// listener can decide how loudly to surface them.
     SystemChange,
+    /// The orb was tapped (clicked without dragging). Answers an open
+    /// confirmation; otherwise, in push-to-talk mode, starts listening.
+    OrbTap,
+    /// Push to talk: start listening for one utterance, or stop. Sent by
+    /// the hotkey socket (`toggle_listen`).
+    ListenToggle,
 }
 
 #[cfg(test)]
