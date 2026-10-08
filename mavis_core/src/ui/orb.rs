@@ -13,6 +13,14 @@ use crate::ui::states::OrbState;
 const ORB_SIZE: usize = 80;
 const BUFFER_LEN: usize = ORB_SIZE * ORB_SIZE;
 
+/// A press shorter than this that barely moves is a tap, not a drag.
+const TAP_MAX_HOLD: Duration = Duration::from_millis(400);
+const TAP_MAX_TRAVEL: f32 = 4.0;
+
+fn is_tap(held: Duration, travel: f32) -> bool {
+    held <= TAP_MAX_HOLD && travel < TAP_MAX_TRAVEL
+}
+
 #[derive(Clone)]
 pub struct Orb {
     state_tx: Sender<OrbState>,
@@ -21,7 +29,9 @@ pub struct Orb {
 }
 
 impl Orb {
-    pub fn new() -> Self {
+    /// `on_tap` runs (on the orb's thread) when the orb is clicked
+    /// without being dragged.
+    pub fn new(on_tap: impl Fn() + Send + 'static) -> Self {
         let (state_tx, state_rx) = channel::<OrbState>();
         let (shutdown_tx, shutdown_rx) = channel::<()>();
         let (energy_tx, energy_rx) = channel::<f32>();
@@ -94,6 +104,9 @@ impl Orb {
             let mut is_dragging = false;
             let mut was_mouse_down = false;
             let mut drag_anchor: (f32, f32) = (0.0, 0.0);
+            // How long the button has been held, and how far it has moved.
+            let mut pressed_at = Instant::now();
+            let mut travel = 0.0f32;
 
             while window.is_open() && !window.is_key_down(Key::Escape) {
                 // Poll state updates
@@ -132,7 +145,12 @@ impl Orb {
                 if mouse_down && !was_mouse_down {
                     is_dragging = true;
                     drag_anchor = mouse_pos;
+                    pressed_at = Instant::now();
+                    travel = 0.0;
                 } else if !mouse_down {
+                    if was_mouse_down && is_tap(pressed_at.elapsed(), travel) {
+                        on_tap();
+                    }
                     is_dragging = false;
                 }
                 was_mouse_down = mouse_down;
@@ -144,6 +162,9 @@ impl Orb {
                     let dx = mouse_pos.0 - drag_anchor.0;
                     let dy = mouse_pos.1 - drag_anchor.1;
                     if dx.abs() >= 1.0 || dy.abs() >= 1.0 {
+                        // Summed: the window follows the pointer, so the
+                        // offset from the anchor stays small while dragging.
+                        travel += dx.abs().max(dy.abs());
                         let new_x = win_pos.0 + dx as isize;
                         let new_y = win_pos.1 + dy as isize;
                         window.set_position(new_x, new_y);
@@ -256,5 +277,22 @@ fn render_orb(buffer: &mut [u32], time: f32, state: OrbState, energy: f32) {
                 buffer[y * ORB_SIZE + x] = (alpha << 24) | (pr << 16) | (pg << 8) | pb;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quick_still_click_is_a_tap() {
+        assert!(is_tap(Duration::from_millis(120), 0.0));
+        assert!(is_tap(Duration::from_millis(400), 3.0));
+    }
+
+    #[test]
+    fn a_drag_or_a_long_press_is_not() {
+        assert!(!is_tap(Duration::from_millis(120), 30.0), "moved");
+        assert!(!is_tap(Duration::from_millis(900), 0.0), "held");
     }
 }
