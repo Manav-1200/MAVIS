@@ -1,3 +1,4 @@
+<!-- README.md -->
 # MAVIS
 **Modular Autonomous Virtual Intelligence System**
 
@@ -73,7 +74,7 @@ A persistent desktop-native AI companion. Not a chatbot. Not a web app.
 | 5 — Interaction Polish | TTS queue, barge-in, personality | :white_check_mark: Complete |
 | 6 — Context Awareness | Active window, workspace, clipboard, IDE, terminal, project, calendar | :white_check_mark: Complete |
 | 6.5 — Action Execution | App launching, search, system control | :construction: Built; launching not yet seen working on hardware |
-| 7 — Memory & Learning | Recall with decay, daily consolidation, replay, entity graph | :white_check_mark: 7.1–7.2 complete; conversation no longer restored across runs |
+| 7 — Memory & Learning | Recall with decay, daily consolidation, replay, entity graph, context compression | :white_check_mark: 7.1–7.2 complete; learning engine deferred |
 | 8 — Safety & Permissions | Risk scoring, permission gate, confirmation, undo, audit log | :white_check_mark: Built |
 | 8.5 — System Sentinel | Notices what changed on the machine | :construction: Built; awaiting a hardware run |
 | 9 — Skills Platform | Plugin API, manifest, sandboxing | Not started |
@@ -101,6 +102,9 @@ Full roadmap in [`PHASES.md`](PHASES.md). **Why** each thing is built the way it
 ## Development
 
 ```bash
+# First time: choose how MAVIS listens (always, or push to talk)
+setup.sh
+
 # Rust core — run from inside mavis_core/ (memory lives at ../memory, relative to here)
 cd mavis_core
 cargo run
@@ -114,6 +118,15 @@ python -m mavis
 ```
 
 `cargo test` runs the unit tests. `cargo clippy` passes with warnings — mostly Sentinel code waiting for its next step, and platform stubs.
+
+### Listening
+
+`setup.sh` asks how MAVIS should listen, and saves the answer as `listen_mode` in `config/config.toml`:
+
+- **Always** (the default) — MAVIS hears everything you say.
+- **Push to talk** — the microphone is ignored until you press your hotkey or tap the orb. MAVIS then hears one thing you say (you have 8 seconds to start), and stops listening again. Pressing again before you speak cancels.
+
+For the hotkey, bind a key to `toggle_listen.sh` in your compositor. Setup prints the line for niri, sway and Hyprland. `MAVIS_LISTEN_MODE=push` or `always` overrides the file for one run.
 
 ### Voice commands
 
@@ -160,20 +173,19 @@ Every plan is scored for risk before anything runs:
 | Risk | What happens |
 |------|--------------|
 | 0–2 | Runs silently — speaking, notifications, volume, launching an app |
-| 3–7 | "Shall I run …?" — reads out the command and waits up to 20 seconds for a clear yes |
-| 8+ | Requires you to say "yes, administrator" |
+| 3–7 | "Shall I run …?" — reads out the command and waits up to 20 seconds for a clear yes, or a tap on the orb |
+| 8+ | Requires you to say "yes, administrator" — a tap is not enough |
 | Irreversible | Refused, whatever you say |
 
 Anything that isn't a clear yes cancels. A "no" anywhere in the answer always wins. Before a destructive command runs, the files it names are copied — say "undo that" within five minutes to get them back. Every decision is written to `memory/audit.db`, which MAVIS can add to but never edit.
 
 ### Memory
 
-MAVIS remembers across sessions. Five tiers, all local SQLite:
+MAVIS remembers across sessions. Four tiers, all local SQLite:
 
 | Tier | Contents | Lifetime |
 |------|----------|----------|
-| Working | current session, context snapshot | in-RAM + JSON; the conversation starts fresh each run |
-| Episodic | raw event log | indefinite |
+| Working | current session, context snapshot; older turns kept as one short line | in-RAM + JSON; the conversation starts fresh each run |
 | Recall | what you said, importance-scored | 7–90 days by importance; stated facts kept |
 | Long-term | one summary per day | permanent |
 | Entities | projects, apps, files and what co-occurs | permanent |
@@ -236,6 +248,7 @@ Current date and time is always injected — it isn't private, and without it th
 | `MAVIS_ORB_POS` | — | `x,y` start position. Honoured on X11/XWayland; native Wayland ignores it |
 | `MAVIS_VAD_DEBUG` | off | Logs microphone level and the current start/end thresholds, every ~3 s |
 | `MAVIS_SPEECH_GATE` | on | `0` sends audio to Whisper even when no speech was detected in it — for diagnosing dropped speech only; it lets hallucinations back in |
+| `MAVIS_LISTEN_MODE` | from `config/config.toml`, else `always` | `push` listens only after a hotkey press or an orb tap |
 | `MAVIS_BARGE_IN` | on | `0` mutes the microphone while MAVIS speaks, so it can't be interrupted by voice |
 
 ## Troubleshooting
