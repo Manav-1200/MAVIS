@@ -1,3 +1,4 @@
+<!-- PHASES.md -->
 # MAVIS — Project Phases
 
 > **Tagline:** A persistent desktop-native AI companion. Not a chatbot.
@@ -23,7 +24,7 @@
 | 5 | Interaction Polish | TTS queue, interruption, session recovery, personality foundation. | Daily polish | :white_check_mark: Complete |
 | 6 | Context Awareness | Active window, open windows, workspace, clipboard, IDE, terminal, project, calendar. | Companion senses | :white_check_mark: Complete |
 | 6.5 | Action Execution | App launching, YouTube, web search, system control; cross-platform app discovery. | Companion acts | :white_check_mark: Built |
-| 7 | Memory & Learning | Recall with decay, daily consolidation, episodic replay, entity graph. | Persistent memory | :white_check_mark: 7.1–7.2 complete |
+| 7 | Memory & Learning | Recall with decay, daily consolidation, episodic replay, entity graph, context compression. | Persistent memory | :white_check_mark: 7.1–7.2 complete; 7.3 deferred |
 | 8 | Safety & Permissions | Risk scoring, permission gate, confirmation flow, rollback, append-only audit log. | Trust layer | :white_check_mark: Built (per-skill permissions wait on Phase 9) |
 | 8.5 | System Sentinel | Notices what changed on the machine: packages, privileges, file integrity, advisories. | Machine awareness | :construction: Built — steps 2b–4 await a hardware run, step 5 unverified |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
@@ -111,7 +112,7 @@ Everything above communicates over the in-process event bus (`tokio::sync::broad
 - [x] `worker_bridge.rs` — UDS client stub
 - [x] `memory/manager.rs` — `MemoryManager` facade
 - [x] `memory/working.rs` — in-memory store
-- [x] `memory/permanent.rs`, `episodic.rs` — SQLite stubs *(`permanent.rs` removed 2026-09-19 — never read)*
+- [x] `memory/permanent.rs`, `episodic.rs` — SQLite stubs *(`permanent.rs` removed 2026-09-19, `episodic.rs` 2026-10-08 — neither was ever read)*
 - [x] `memory/long_term.rs`, `session.rs` — empty stubs *(`long_term.rs` made real in Phase 7; `session.rs` removed 2026-09-19)*
 - [x] `system/dbus.rs`, `hotkeys.rs`, `watcher.rs` — empty stubs
 
@@ -141,7 +142,7 @@ Everything above communicates over the in-process event bus (`tokio::sync::broad
 ### 2.1 — Context Engine
 - [x] Maintains `WorkingMemory` (50-event context window)
 - [x] `process_event()` routes all `EventType` variants
-- [x] Auto-persists `UserIntent`, `ActionComplete`, `PlanReady` to EpisodicStore
+- [x] Auto-persists `UserIntent`, `ActionComplete`, `PlanReady` to EpisodicStore *(removed 2026-10-08: written, never read; recall.db covers replay)*
 - [x] Routes `WorkerResponse` -> `ContextUpdate` or passes to Planner
 - [x] **Fix:** Removed double-publish of `PlanReady` (was causing duplicate execution)
 
@@ -307,8 +308,8 @@ Everything above communicates over the in-process event bus (`tokio::sync::broad
 - [x] LLM response quality (no `===`/markdown/repetition)
 - [x] TTS naturalness (prosody settings)
 - [x] Idle unload verified with both models
-- [ ] Fan noise robust filtering (may need silero-vad)
-- [ ] Niri hotkey binding for push-to-talk (deferred to Phase 5)
+- [x] Fan noise robust filtering — the VAD follows the room's noise floor, and Silero decides what is speech before Whisper hears it *(2026-09-22, §6.4; DECISIONS §15)*
+- [x] Hotkey binding for push-to-talk — `toggle_listen.sh`; setup prints the binding for niri, sway and Hyprland *(2026-10-08)*
 
 ---
 
@@ -355,7 +356,7 @@ Everything above communicates over the in-process event bus (`tokio::sync::broad
 ### 5.7 — Conversation Style, TTS Abstraction, Push-to-Talk (2026-09-02)
 - [x] **Conversation style baseline** — added warmth/confidence/anti-leakage rules to `SYSTEM_PROMPT`; fixed `LlamaEngine.chat()` to apply style post-processing to every model path (previously only ran for Phi-3/TinyLlama's manually-templated branch — a native-chat-template model would have skipped it entirely).
 - [x] **TTS voice abstraction** — found already implemented (`MAVIS_TTS_ENGINE=piper|kokoro`, one dispatch point in `executor.rs`, rest of the executor untouched by engine choice). Removed a dead, fully disconnected duplicate Piper implementation (`LinuxTts`/`TtsPlayer` trait across `platform/mod.rs`, `linux.rs`, `windows.rs`, `macos.rs`) that nothing ever called.
-- [ ] **Push-to-talk / active listening** — **skipped by decision, not abandoned.** No hotkey is bound; passive always-on listening is the sole interaction model, matching "always present, never intrusive." Candidate for revisiting if a hotkey (e.g. repurposing the laptop's unused Copilot key) gets bound later.
+- [x] **Push-to-talk / active listening** *(2026-10-08)* — a choice, made at setup (`setup.sh`) and stored as `listen_mode` in `config/config.toml`. **Always** stays the default. **Push to talk** ignores the microphone until a hotkey press or an orb tap, then hears one utterance (8 s to start) and closes. The utterance is marked as asked-for, so the worker doesn't second-guess it as noise. Proven by the capture test; not yet heard on hardware. See [`DECISIONS.md` §24](DECISIONS.md#24-everything-up-to-phase-8).
 
 ### 5.8 — Full E2E Verification (2026-09-02)
 Real bugs found through live voice testing on target hardware — not simulated, not assumed fixed from code review alone:
@@ -525,7 +526,6 @@ Two deliberate departures from the original plan, both made to avoid dependencie
 | Tier | Contents | Lifetime | Store |
 |------|----------|----------|-------|
 | Working | current session state, context snapshot | in-RAM, JSON snapshot on shutdown | `working_memory.json` |
-| Episodic | raw event log | indefinite | `episodic.db` |
 | Recall | user utterances and MAVIS replies, importance-scored | decays by importance | `recall.db` (FTS5) |
 | Long-term | one compressed summary per day | permanent | `long_term.db` (FTS5) |
 | Entities | projects, apps, files and their co-occurrence | permanent | `entities.db` |
@@ -538,19 +538,19 @@ Two deliberate departures from the original plan, both made to avoid dependencie
 - [x] **Automatic summaries** — consolidation task runs hourly, looking back 7 days for any completed day not yet summarized. Hourly rather than a fixed-time cron because MAVIS isn't guaranteed to be running at 3am; "check whether yesterday still needs doing" is more robust. Skips already-summarized days without an LLM call, and skips days with fewer than 3 meaningful memories.
 - [x] **Long-term consolidation** — summaries stored in `long_term.db` with FTS5 search. No vector embeddings (see 7.2).
 - [x] **Episodic replay** — "what was I doing yesterday afternoon" maps to a concrete time window. Recognised: `yesterday`, `today`, `this/yesterday morning|afternoon|evening`, `last week`, `this week`. Deliberately a small fixed set rather than general date parsing — a wrong window is worse than none, since it would inject unrelated history into the prompt.
-- [ ] **Context compression** — not built. Working memory is capped at 50 events and evicts oldest-first rather than compressing.
+- [x] **Context compression** *(2026-10-08)* — the prompt carries the last 12 events in full. Anything older, including what has already left the 50-event ring, becomes one line: "Earlier in this conversation the user said: …" — the last five things the user said, 80 bytes each. User words only, for the reason recall keeps only them (§7.4). No LLM summary: that would cost a model call per turn.
 
 ### 7.2 Advanced Memory
 
 - [x] **Semantic recall** — implemented with SQLite **FTS5**, not embeddings. The plan called for `sentence-transformers` (~80 MB model) plus FAISS: three new dependencies for a project whose rule is to add only what's necessary. Full-text search covers a large share of the same ground — verified that "audio" finds a memory about "VAD thresholds", and "text to speech engine" finds "piper over kokoro". **If recall proves too literal in daily use, embeddings become an evidence-backed decision rather than an assumed one.**
-- [ ] **Vector embeddings** — deliberately not added, see above.
+- [ ] **Vector embeddings** — deliberately not added, see above. *Reconsidered 2026-10-08 and kept out: only stated facts (importance 8+) reach the prompt, a small set FTS5 handles; embeddings would add a model download and a worker round trip to every utterance. Revisit when a real miss is seen ([§24](DECISIONS.md#24-everything-up-to-phase-8)).*
 - [ ] **FAISS / hnswlib** — deliberately not added, see above.
 - [x] **Memory graph** — entities derived from data the context layer already resolves with certainty: git repository names, compositor app IDs, filenames from IDE window titles. No spaCy: it's a heavy dependency plus a language model, and it's poor at exactly these entities — it won't tag `mavis_core` as a project or `stt.rs` as a file. These are observations rather than predictions, so nothing can be misidentified. **Known gap:** people mentioned in conversation ("meeting with Sarah") are not captured; that is what spaCy would have added.
 - [x] **Relationship graph** — co-occurrence weights between entities, so "what's usually open alongside the MAVIS project" has an answer. Recorded only when the app/project/file combination *changes* — context updates arrive every 2 s, and recording each one would measure idle time rather than work.
 
 ### 7.3 Learning Engine
 
-**Deferred, deliberately.** Routine detection needs months of accumulated behaviour to find anything real; MAVIS has days. Building a pattern detector with no patterns to detect would produce confident nonsense, and the entity graph from 7.2 is precisely the data that will eventually feed it. Revisit once `entities.db` has meaningful history.
+**Deferred, deliberately** *(reaffirmed 2026-10-08)*. Routine detection needs months of accumulated behaviour to find anything real; MAVIS has days. Building a pattern detector with no patterns to detect would produce confident nonsense, and the entity graph from 7.2 is precisely the data that will eventually feed it. Revisit once `entities.db` has meaningful history.
 
 - [ ] Routine detection
 - [ ] Preferred apps per context
@@ -599,7 +599,7 @@ Planner --PlanReady--> PermissionGate --PlanApproved--> Executor
 - [ ] **Per-plugin / per-skill permissions** — blocked on Phase 9. *(The original list had this item twice.)*
 - [x] **Dry-run mode** — the question reads out what would run: "Shall I run rm notes.txt? It modifies or deletes data." *(2026-10-07)*
 - [x] **Audit log** — `audit.db`, append-only by construction: `AuditLog` exposes no update or delete method. Columns are `(timestamp, action_type, detail, risk_score, outcome, reason)` rather than the planned `(skill, args, user_confirmed)`, since skills don't exist yet.
-- [x] **Confirmation prompts** — voice, plus an orange orb state held from the question until it is answered or lapses *(2026-10-07)*. Confirming by tapping the orb is not built.
+- [x] **Confirmation prompts** — voice, plus an orange orb state held from the question until it is answered or lapses *(2026-10-07)*. **Tapping the orb answers yes** for risk 3–7, never for administrator actions *(2026-10-08)*. A tap is a press under 400 ms that moves less than 4 px; anything else is a drag.
 
 ### 8.2 Safety Layer
 
@@ -607,7 +607,7 @@ Planner --PlanReady--> PermissionGate --PlanApproved--> Executor
 - [x] **Root deletion** — `is_root_delete` inspects what *follows* the slash, so `rm -rf /` is refused while `rm -rf /home/user/project` is merely confirmable.
 - [x] **Pipe-to-shell** — `is_pipe_to_shell` checks for a download command *and* a shell pipe anywhere, because the URL sits between them.
 - [x] **Risk scoring** — static: elevated + destructive 9, elevated 8, destructive 6, any other shell command 4, unrecognised action type 5. An `app` that is really a command (`sudo …`, `sh -c …`) is scored as that command *(2026-10-07)*. Network calls are not scored separately.
-- [ ] **LLM validation** — **replaced by static scoring, deliberately.** A missed judgement here runs a destructive command. An LLM pass may later *raise* a score as a second opinion; it must never lower one.
+- [ ] **LLM validation** — **replaced by static scoring, deliberately.** A missed judgement here runs a destructive command. An LLM pass may later *raise* a score as a second opinion; it must never lower one. *Reconsidered 2026-10-08 and kept out: the same command must always get the same answer, and nothing voice-reachable needs a second opinion until Phase 9's skills.*
 - [x] **Rollback** — before `rm`, `rmdir`, `mv`, `shred` or `truncate` runs, the files it names are copied to `.mavis-backup/` in the memory directory. "Undo that" restores them within five minutes; copies are deleted after that. No copy when the command uses globs, variables, pipes or `sudo`, or would exceed 200 MB — the command runs but can't be undone. *(2026-10-07)*
 - [x] **Confirmation for destructive actions** — from risk 3.
 
@@ -619,7 +619,7 @@ As built. The plan contradicted itself (§8.2 said confirm from 5, this section 
 PlanReady -> assess_plan() -> audit.db
     -> deny pattern:   "I won't do that. It's not reversible."      (never runs)
     -> score 0-2:      run silently
-    -> score 3-7:      "Shall I run <command>? It <reason>."  -> clear yes within 20 s
+    -> score 3-7:      "Shall I run <command>? It <reason>."  -> clear yes or an orb tap within 20 s
     -> score 8+:       "That needs administrator permission. I would run <command> ..." -> "yes, administrator"
     -> anything else:  "Cancelled."                   -> audit: declined / expired / superseded
 ```
@@ -924,4 +924,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-10-07*
+*Last updated: 2026-10-08*
