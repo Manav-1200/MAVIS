@@ -1,3 +1,4 @@
+<!-- CHANGELOG.md -->
 # Changelog
 
 What changed, by release. For **why**, see [`DECISIONS.md`](DECISIONS.md); for the full roadmap and verification status, [`PHASES.md`](PHASES.md).
@@ -13,6 +14,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 192 commits since `v0.3.0-ai-worker`, covering Phases 4 through 8.5.
 
 ### Added
+- **Push to talk** — `setup.sh` asks whether MAVIS should always listen or only after you ask. In push-to-talk mode, press your hotkey (`toggle_listen.sh`) or tap the orb, then speak; it hears one sentence and stops. Always listening stays the default. `MAVIS_LISTEN_MODE` overrides it.
+- **Tap the orb to confirm** — a quick tap answers "Shall I run …?" with yes. Administrator actions still need the words.
+- **Longer conversations hold together** — what you said before the last dozen turns reaches the model as one short line, instead of being forgotten.
 - **Barge-in** — talk over MAVIS and it stops speaking immediately; say "stop" and it goes quiet without answering. It listens while it talks, against a threshold set above its own voice. `MAVIS_BARGE_IN=0` turns it off.
 - **"Sorry, I didn't catch that"** when a transcript is too unreliable to act on, instead of answering a misheard question.
 - **System Sentinel** (Phase 8.5, opt-in via `MAVIS_SENTINEL=1`) — reads the pacman, dpkg or dnf transaction log and notices packages you didn't ask for, removals and downgrades. First run imports history silently; one sentence per update; routine upgrades never mentioned. Pending changes are said the next time you speak; "what changed recently?" and "what did that update do?" are answered from its record, without the model. Also watches who can do what: new accounts, group membership, SSH keys, sudoers, enabled services and setuid binaries — gaining root-level access raises a desktop notification immediately. Once a day it checks that packaged files still match their packages (`pacman -Qkk`, `rpm -Va`, `dpkg --verify`) and, with `MAVIS_SENTINEL_ADVISORIES=1`, relays new high-risk advisories from `arch-audit` or `debsecan`. Windows and macOS sources (installed apps, startup items, Defender detections, Homebrew, launchd) are written but unverified.
@@ -29,6 +33,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **The worker could unload a model in the middle of a reply** if the reply took longer than the idle timeout.
+- **Ctrl+C left the worker running** after removing its socket.
+- **`kill` lost the conversation** — only Ctrl+C saved working memory; SIGTERM now does too.
+- **Dropped utterances are logged** when transcription is still busy.
 - **A plan wrapped as `{"actions": [...]}` was asked about instead of refused** — `rm -rf /` in that shape needed only a "yes". The gate and executor now read plans the same way.
 - **Commands launched as an "app" skipped risk scoring** — `sudo …` and `sh -c …` ran silently at risk 2.
 - **"Okay, so what about…" counted as consent.** The whole answer now has to be a yes.
@@ -80,12 +88,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - Sentinel losing log entries written in the same second as its watermark.
 
 ### Removed
+- `episodic.db` — written on every turn, never read. An existing `memory/episodic.db` can be deleted.
+- Unused platform traits for audio and screen capture.
 - `PermanentStore` and `SessionStore` — Phase 1 stubs nothing read.
 - Duplicate Python VAD and microphone code; dead scaffold modules.
 - Browser-extension approach to tab awareness (the receiving socket is kept).
 
 ### Known issues
-See [`DECISIONS.md` §14](DECISIONS.md#14-open-issues). Most notably: `cargo clippy` fails on one error in the executor's espeak fallback, which can never run; the worker socket is world-writable; `app` actions bypass shell risk scoring; and `Cargo.lock` is not committed.
+See [`DECISIONS.md` §14](DECISIONS.md#14-open-issues). Most notably: nothing since Phase 6.5 has been tried on hardware — actions, confirmation, push to talk, the Sentinel — and `Cargo.lock` is not committed.
 
 ---
 
