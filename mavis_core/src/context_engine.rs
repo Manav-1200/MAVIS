@@ -36,8 +36,6 @@ impl ContextEngine {
     }
 
     pub async fn process_event(&mut self, event: Event) -> Result<()> {
-        self.maybe_persist(&event).await;
-
         {
             let mut wm = self.memory.working.write().await;
             // Only conversational events go in the ring. ContextUpdate fires
@@ -242,6 +240,9 @@ impl ContextEngine {
             // own store is the record, and a big update would otherwise
             // evict the actual conversation from the ring, which is the
             // exact failure the polling filter above exists to prevent.
+            // Listening controls, not conversation.
+            EventType::OrbTap | EventType::ListenToggle => {}
+
             EventType::SystemChange => {
                 let count = event
                     .payload
@@ -343,18 +344,6 @@ impl ContextEngine {
         }
         if let (Some(p), Some(f)) = (&project, &file) {
             let _ = store.link((p, EntityKind::Project), (f, EntityKind::File), when);
-        }
-    }
-
-    async fn maybe_persist(&self, event: &Event) {
-        match event.event_type {
-            EventType::UserIntent | EventType::ActionComplete | EventType::PlanReady => {
-                let store = self.memory.episodic.lock().await;
-                if let Err(e) = store.record(event) {
-                    warn!("Failed to persist event to episodic memory: {}", e);
-                }
-            }
-            _ => {}
         }
     }
 
