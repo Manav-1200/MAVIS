@@ -1,3 +1,4 @@
+# mavis_worker/src/mavis/worker.py
 import asyncio
 import base64
 import json
@@ -53,8 +54,12 @@ class WorkerServer:
 
         self.last_activity = time.time()
         self.idle_timeout = self.config.get("worker", {}).get("idle_timeout", 300)
-        self.lock = asyncio.Lock()
+        # Requests being worked on. The idle monitor never unloads a model
+        # while this is above zero, so an inference can't lose its model
+        # halfway through.
+        self.in_flight = 0
         self.running = True
+        self._stop = asyncio.Event()
 
     async def handle_client(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
         try:
@@ -111,6 +116,13 @@ class WorkerServer:
             return event_type, payload
 
     async def process_request(self, request: dict) -> dict:
+        self.in_flight += 1
+        try:
+            return await self._dispatch(request)
+        finally:
+            self.in_flight -= 1
+
+    async def _dispatch(self, request: dict) -> dict:
         req_type, payload = self._extract_request(request)
 
         if req_type == "health":
@@ -262,9 +274,9 @@ class WorkerServer:
             audio_bytes = base64.b64decode(audio_b64)
             print(f"[worker] STT request: {len(audio_bytes)} bytes", flush=True)
 
-            # One-shot active listen override: if MAVIS_ACTIVE_LISTEN=1, bypass
-            # the confidence gate for this utterance and clear the flag.
-            active_listen = os.environ.pop("MAVIS_ACTIVE_LISTEN", None) == "1"
+            # Push to talk: the user asked to be heard, so the confidence
+            # gate doesn't throw this utterance away. Sent per request.
+            active_listen = payload.get("active_listen") is True
             if active_listen:
                 print("[worker] Active listen override enabled for this utterance", flush=True)
 
@@ -370,29 +382,30 @@ class WorkerServer:
         print(f"[worker] Idle monitor started (timeout={self.idle_timeout}s)", flush=True)
         while self.running:
             await asyncio.sleep(30)
-            async with self.lock:
-                now = time.time()
-                # STT model stays permanently loaded (Phase 5 latency fix).
-                # Only LLM and TTS are eligible for idle unload.
-                llm_idle = now - self.last_activity > self.idle_timeout
-                tts_idle = now - self.tts_engine.last_activity > self.idle_timeout
+            if self.in_flight:
+                continue
+            now = time.time()
+            # STT model stays permanently loaded (Phase 5 latency fix).
+            # Only LLM and TTS are eligible for idle unload.
+            llm_idle = now - self.last_activity > self.idle_timeout
+            tts_idle = now - self.tts_engine.last_activity > self.idle_timeout
 
-                any_loaded = self.engine.is_loaded or self.tts_engine.is_loaded
-                all_idle = llm_idle and tts_idle
+            any_loaded = self.engine.is_loaded or self.tts_engine.is_loaded
+            all_idle = llm_idle and tts_idle
 
-                if any_loaded and all_idle:
-                    print(
-                        "[worker] Idle timeout reached. Unloading models (STT stays resident).",
-                        flush=True,
-                    )
-                    self.engine.unload()
-                    # Intentionally do NOT unload STT
-                    self.tts_engine.unload()
-                elif any_loaded:
-                    print(
-                        f"[worker] Idle check: loaded, llm_idle={llm_idle}, tts_idle={tts_idle}",
-                        flush=True,
-                    )
+            if any_loaded and all_idle:
+                print(
+                    "[worker] Idle timeout reached. Unloading models (STT stays resident).",
+                    flush=True,
+                )
+                self.engine.unload()
+                # Intentionally do NOT unload STT
+                self.tts_engine.unload()
+            elif any_loaded:
+                print(
+                    f"[worker] Idle check: loaded, llm_idle={llm_idle}, tts_idle={tts_idle}",
+                    flush=True,
+                )
 
     async def run(self):
         self._start_time = time.time()
@@ -421,8 +434,10 @@ class WorkerServer:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, lambda: asyncio.create_task(self.shutdown()))
 
+        # Serve until shutdown() is called. serve_forever() never returned
+        # on Ctrl+C: the socket was removed but the worker kept running.
         async with server:
-            await server.serve_forever()
+            await self._stop.wait()
 
         idle_task.cancel()
         try:
@@ -441,6 +456,7 @@ class WorkerServer:
         self.tts_executor.shutdown(wait=False)
         if os.path.exists(self.socket_path):
             os.remove(self.socket_path)
+        self._stop.set()
 
 
 def main():
