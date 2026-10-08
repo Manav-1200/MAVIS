@@ -90,11 +90,17 @@ async fn handle_connection(stream: tokio::net::UnixStream, bus: Arc<EventBus>) -
 
         info!("HotkeyManager: received intent '{}'", intent);
 
+        // `toggle_listen` controls listening; anything else is typed speech.
+        let event_type = if intent == "toggle_listen" {
+            EventType::ListenToggle
+        } else {
+            EventType::UserIntent
+        };
         let event = Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
             source: "hotkey_manager".to_string(),
-            event_type: EventType::UserIntent,
+            event_type,
             payload: serde_json::json!({
                 "intent": intent,
                 "trigger": "hotkey",
