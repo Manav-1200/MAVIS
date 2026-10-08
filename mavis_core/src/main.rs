@@ -30,6 +30,7 @@ mod system;
 mod ui;
 mod tts;
 mod util;
+mod listen;
 
 use context_snapshot::{ContextSnapshot, WindowInfo};
 use event_bus::EventBus;
@@ -50,7 +51,6 @@ async fn main() -> Result<()> {
     info!("MAVIS starting...");
 
     let bus = Arc::new(EventBus::new());
-    let (_shutdown_tx, mut shutdown_rx) = mpsc::channel::<()>(1);
 
     // Shared TTS state — true while MAVIS is speaking. Mic is muted when true.
     let tts_active = Arc::new(AtomicBool::new(false));
@@ -134,6 +134,7 @@ async fn main() -> Result<()> {
     // next utterance is the answer, not something to plan.
     let awaiting = safety::SharedAwaiting::default();
     let awaiting_for_planner = awaiting.clone();
+    let awaiting_for_router = awaiting.clone();
     let planner_handle = supervise("Planner", Arc::clone(&bus), move || {
         let mut planner = planner::Planner::new(
             Arc::clone(&bus_for_planner),
@@ -230,7 +231,50 @@ async fn main() -> Result<()> {
     });
 
     // Orb — created here so we can clone it for the energy task
-    let orb = ui::Orb::new();
+    // How MAVIS listens: always, or push to talk (setup.sh asks).
+    let listen = Arc::new(listen::ListenGate::new(listen::ListenMode::configured()));
+    info!("Listen mode: {:?}", listen.mode());
+
+    // A tap on the orb answers "Shall I?", or in push mode starts listening.
+    let bus_for_tap = Arc::clone(&bus);
+    let orb = ui::Orb::new(move || {
+        bus_for_tap.publish(Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "orb".to_string(),
+            event_type: EventType::OrbTap,
+            payload: serde_json::json!({}),
+        });
+    });
+
+    // Push to talk: the hotkey toggles listening; a tap does too, unless
+    // it answered a question.
+    let listen_for_router = Arc::clone(&listen);
+    let bus_for_listen = Arc::clone(&bus);
+    tokio::spawn(async move {
+        let mut rx = bus_for_listen.subscribe();
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    let toggle = match event.event_type {
+                        EventType::ListenToggle => true,
+                        EventType::OrbTap => !awaiting_for_router
+                            .lock()
+                            .unwrap_or_else(|p| p.into_inner())
+                            .claims(event.id),
+                        _ => false,
+                    };
+                    if toggle && listen_for_router.mode() == listen::ListenMode::Always {
+                        info!("Listen: already listening all the time (MAVIS_LISTEN_MODE=push for push to talk)");
+                    } else if toggle {
+                        listen_for_router.toggle();
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+            }
+        }
+    });
     let orb_for_energy = orb.clone();
 
     // STT Pipeline
@@ -245,6 +289,7 @@ async fn main() -> Result<()> {
             bus_for_stt_start,
             Some(speech_start_tx),
             tts_active.clone(),
+            Arc::clone(&listen),
         ) {
             Ok(parts) => {
                 let (h, u, e) = parts;
@@ -347,6 +392,7 @@ async fn main() -> Result<()> {
     });
 
     let tts_active_for_stt = tts_active.clone();
+    let listen_for_stt = Arc::clone(&listen);
     let stt_task = tokio::spawn(async move {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -369,11 +415,14 @@ async fn main() -> Result<()> {
             let bytes: Vec<u8> = audio.iter().flat_map(|s| s.to_le_bytes()).collect();
             let audio_b64 = B64.encode(&bytes);
 
+            // Asked for (push to talk): the worker shouldn't discard it as noise.
+            let active_listen = listen_for_stt.take_explicit();
             let request = serde_json::json!({
                 "type": "WorkerRequest",
                 "payload": {
                     "request_type": "stt",
                     "audio": audio_b64,
+                    "active_listen": active_listen,
                 }
             });
             let req_str = request.to_string();
@@ -810,14 +859,7 @@ async fn main() -> Result<()> {
 
     info!("MAVIS runtime ready. Press Ctrl+C to shutdown.");
 
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            info!("Shutdown signal received.");
-        }
-        _ = shutdown_rx.recv() => {
-            info!("Shutdown requested via event bus.");
-        }
-    }
+    wait_for_shutdown().await;
 
     // Final save
     if let Err(e) = memory_for_shutdown.save_working().await {
@@ -863,4 +905,22 @@ async fn main() -> Result<()> {
 fn is_own_window(w: &WindowInfo) -> bool {
     w.pid == Some(std::process::id())
         || (w.window_title == "MAVIS" && (w.app_name.is_empty() || w.app_name == "unknown"))
+}
+
+/// Ctrl+C, or SIGTERM from `kill` or a service manager — either way the
+/// working memory is saved on the way out.
+async fn wait_for_shutdown() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{signal, SignalKind};
+        if let Ok(mut term) = signal(SignalKind::terminate()) {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => info!("Shutdown signal received."),
+                _ = term.recv() => info!("Terminate signal received."),
+            }
+            return;
+        }
+    }
+    let _ = tokio::signal::ctrl_c().await;
+    info!("Shutdown signal received.");
 }
