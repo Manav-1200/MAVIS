@@ -1,3 +1,4 @@
+// mavis_core/src/lib.rs
 pub mod context_engine;
 pub mod event_bus;
 pub mod executor;
@@ -14,3 +15,4 @@ pub mod safety;
 pub mod sentinel;
 pub mod stt;
 pub mod util;
+pub mod listen;
