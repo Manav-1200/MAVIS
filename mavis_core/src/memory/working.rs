@@ -35,7 +35,15 @@ pub struct WorkingMemory {
     #[serde(default)]
     pub user_name_verified: bool,
     pub browser_tab: Option<BrowserTab>,
+    /// What the user said earlier this session, kept short once the event
+    /// ring has moved past it — compressed rather than forgotten.
+    #[serde(default)]
+    pub earlier: VecDeque<String>,
 }
+
+/// Earlier lines kept, and how long each may be.
+const EARLIER_KEPT: usize = 10;
+const EARLIER_BYTES: usize = 80;
 
 /// A name is one word of letters (apostrophes and hyphens allowed, as in
 /// O'Neil or Anne-Marie) under 30 bytes. What makes a word a *name* is how
@@ -56,7 +64,27 @@ impl WorkingMemory {
     pub fn push_event(&mut self, event: Event) {
         self.events.push_back(event);
         if self.events.len() > MAX_EVENTS {
-            self.events.pop_front();
+            if let Some(old) = self.events.pop_front() {
+                self.remember_earlier(&old);
+            }
+        }
+    }
+
+    /// Keep a short form of what the user said in an event leaving the ring.
+    /// Only the user's words: MAVIS's own replies, kept, are what it learns
+    /// to copy (§16).
+    fn remember_earlier(&mut self, event: &Event) {
+        if event.event_type != crate::models::event::EventType::UserIntent {
+            return;
+        }
+        let Some(text) = event.payload.get("text").and_then(|t| t.as_str()) else { return };
+        let short = crate::util::truncate_bytes(text.trim(), EARLIER_BYTES).to_string();
+        if short.is_empty() || self.earlier.back() == Some(&short) {
+            return;
+        }
+        self.earlier.push_back(short);
+        if self.earlier.len() > EARLIER_KEPT {
+            self.earlier.pop_front();
         }
     }
 
@@ -90,6 +118,7 @@ impl WorkingMemory {
     pub fn start_new_session(&mut self) -> usize {
         let dropped = self.events.len();
         self.events.clear();
+        self.earlier.clear();
         self.current_intent = None;
         self.active_plan = None;
         self.ui_state = None;
