@@ -1,20 +1,17 @@
+// mavis_core/src/platform/linux.rs
 //! Linux platform — Wayland / X11 auto-detect
 //!
 //! Window tracking: tries niri, sway, hyprland, then xdotool.
 //! Clipboard: wl-paste (Wayland) or xclip (X11).
-//! Screen: grim (Wayland) or import (X11).
 
 use super::*;
 use log::{info, warn};
 use serde_json::Value;
 use std::process::Command;
-use tokio::sync::mpsc;
-use tokio::time::{interval, Duration};
 
 pub struct LinuxProvider {
     windows: Option<LinuxWindowTracker>,
     clipboard: Option<LinuxClipboard>,
-    screen: Option<LinuxScreen>,
 }
 
 impl LinuxProvider {
@@ -35,11 +32,6 @@ impl LinuxProvider {
             } else {
                 None
             },
-            screen: if wayland || x11 {
-                Some(LinuxScreen::new(wayland))
-            } else {
-                None
-            },
         }
     }
 }
@@ -48,17 +40,11 @@ impl PlatformProvider for LinuxProvider {
     fn installed_apps(&self) -> Vec<AppEntry> {
         scan_linux_apps()
     }
-    fn audio(&self) -> Option<&dyn AudioCapture> {
-        None
-    }
     fn windows(&self) -> Option<&dyn WindowTracker> {
         self.windows.as_ref().map(|w| w as &dyn WindowTracker)
     }
     fn clipboard(&self) -> Option<&dyn ClipboardReader> {
         self.clipboard.as_ref().map(|c| c as &dyn ClipboardReader)
-    }
-    fn screen(&self) -> Option<&dyn ScreenGrabber> {
-        self.screen.as_ref().map(|s| s as &dyn ScreenGrabber)
     }
 }
 
@@ -352,30 +338,6 @@ impl WindowTracker for LinuxWindowTracker {
         None
     }
 
-    fn subscribe_changes(&self) -> Result<mpsc::Receiver<WindowEvent>, PlatformError> {
-        let (tx, rx) = mpsc::channel(32);
-        let tracker = LinuxWindowTracker { compositor: self.compositor };
-        let mut last = String::new();
-
-        tokio::spawn(async move {
-            let mut ticker = interval(Duration::from_millis(500));
-            loop {
-                ticker.tick().await;
-                match tracker.active_window() {
-                    Ok((app, title, pid)) => {
-                        let key = format!("{}:{}:{}", app, title, pid);
-                        if key != last {
-                            last = key;
-                            let _ = tx.send(WindowEvent { app_name: app, window_title: title, pid }).await;
-                        }
-                    }
-                    Err(_) => {}
-                }
-            }
-        });
-
-        Ok(rx)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -408,73 +370,8 @@ impl ClipboardReader for LinuxClipboard {
         }
     }
 
-    fn subscribe_changes(&self) -> Result<mpsc::Receiver<String>, PlatformError> {
-        let (tx, rx) = mpsc::channel(16);
-        let cb = LinuxClipboard::new(self.wayland);
-        let mut last = String::new();
-
-        tokio::spawn(async move {
-            let mut ticker = interval(Duration::from_millis(500));
-            loop {
-                ticker.tick().await;
-                if let Some(text) = cb.read_cmd() {
-                    if text != last && !text.is_empty() {
-                        last = text.clone();
-                        let _ = tx.send(text).await;
-                    }
-                }
-            }
-        });
-
-        Ok(rx)
-    }
 }
 
-// ---------------------------------------------------------------------------
-// Screen Grabber
-// ---------------------------------------------------------------------------
-
-struct LinuxScreen {
-    wayland: bool,
-}
-
-impl LinuxScreen {
-    fn new(wayland: bool) -> Self {
-        Self { wayland }
-    }
-}
-
-impl ScreenGrabber for LinuxScreen {
-    fn capture_focused(&self) -> Result<Screenshot, PlatformError> {
-        let tmp = crate::util::runtime_dir().join("mavis_screenshot.png");
-        let tmp = tmp.to_string_lossy();
-        let tmp = tmp.as_ref();
-        if self.wayland {
-            std::process::Command::new("grim")
-                .arg(tmp)
-                .status()
-                .map_err(|e| PlatformError(format!("grim failed: {}", e)))?;
-        } else {
-            std::process::Command::new("import")
-                .args(&["-window", "root", tmp])
-                .status()
-                .map_err(|e| PlatformError(format!("import (ImageMagick) failed: {}", e)))?;
-        }
-
-        let data = std::fs::read(tmp).map_err(|e| PlatformError(format!("failed to read screenshot: {}", e)))?;
-        let (width, height) = parse_png_dimensions(&data).unwrap_or((0, 0));
-        Ok(Screenshot { width, height, data })
-    }
-}
-
-fn parse_png_dimensions(data: &[u8]) -> Option<(u32, u32)> {
-    if data.len() < 24 || &data[0..8] != &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] {
-        return None;
-    }
-    let w = u32::from_be_bytes([data[16], data[17], data[18], data[19]]);
-    let h = u32::from_be_bytes([data[20], data[21], data[22], data[23]]);
-    Some((w, h))
-}
 // ---------------------------------------------------------------------------
 // Project detection helpers (Linux /proc)
 // ---------------------------------------------------------------------------
