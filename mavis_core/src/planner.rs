@@ -1,3 +1,4 @@
+// mavis_core/src/planner.rs
 use crate::context_snapshot::{AppEntry, WindowInfo};
 use crate::event_bus::EventBus;
 use crate::memory::entities::{EntityKind, EntityStore};
@@ -403,6 +404,32 @@ fn is_stop_request(text: &str) -> bool {
         || t == "never mind"
         || t == "shut up"
         || t == "be quiet"
+}
+
+/// Most earlier lines put in a prompt.
+const EARLIER_IN_PROMPT: usize = 5;
+
+/// Context compression (7.1): what the user said earlier this session,
+/// beyond the last few exchanges, as one short line. Only their words —
+/// MAVIS's own replies in a prompt are what a small model copies.
+fn earlier_in_conversation(older: &[String], current: &str) -> Option<String> {
+    let mut picked: Vec<&str> = Vec::new();
+    for line in older.iter().rev() {
+        let line = line.trim();
+        if line.is_empty() || line == current.trim() || picked.contains(&line) {
+            continue;
+        }
+        picked.push(line);
+        if picked.len() == EARLIER_IN_PROMPT {
+            break;
+        }
+    }
+    if picked.is_empty() {
+        return None;
+    }
+    picked.reverse();
+    let quoted: Vec<String> = picked.iter().map(|l| format!("\"{}\"", l)).collect();
+    Some(format!("Earlier in this conversation the user said: {}.", quoted.join("; ")))
 }
 
 /// "Undo that" — put back what the last destructive command changed.
@@ -1151,6 +1178,23 @@ impl Planner {
         // 12 events ≈ three exchanges: each turn puts a UserIntent, a
         // WorkerResponse, a PlanReady and an ActionComplete in the ring,
         // and only the first and third become prompt lines.
+        // Older than those exchanges: compressed, not dropped.
+        let recent_from = snapshot.events.len().saturating_sub(12);
+        let older: Vec<String> = snapshot
+            .earlier
+            .iter()
+            .cloned()
+            .chain(snapshot.events.iter().take(recent_from).filter_map(|e| {
+                (e.event_type == EventType::UserIntent)
+                    .then(|| e.payload.get("text").and_then(|t| t.as_str()))
+                    .flatten()
+                    .map(|t| crate::util::truncate_bytes(t, 80).to_string())
+            }))
+            .collect();
+        if let Some(line) = earlier_in_conversation(&older, current_intent) {
+            items.push(serde_json::json!({ "source": "earlier", "content": line }));
+        }
+
         for event in snapshot.recent_events(12) {
             if event.id == current_id {
                 continue;
@@ -1552,6 +1596,50 @@ mod tests {
         gate.answer_for_test(&utterance("no")).await;
         planner.handle_event(utterance("open firefox")).await.unwrap();
         assert!(!drain(&mut rx).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn earlier_turns_are_compressed_to_one_line() {
+        let older: Vec<String> = ["my sister is visiting", "what's the weather", "book a table", "what's the weather"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let line = earlier_in_conversation(&older, "and tomorrow?").unwrap();
+        assert_eq!(
+            line,
+            "Earlier in this conversation the user said: \"my sister is visiting\"; \"book a table\"; \"what's the weather\"."
+        );
+        assert_eq!(earlier_in_conversation(&[], "hi"), None);
+        assert_eq!(earlier_in_conversation(&["hi".to_string()], "hi"), None, "not the utterance being answered");
+    }
+
+    #[test]
+    fn only_the_latest_few_earlier_turns_are_kept() {
+        let older: Vec<String> = (0..20).map(|i| format!("turn {}", i)).collect();
+        let line = earlier_in_conversation(&older, "now").unwrap();
+        assert!(line.contains("\"turn 15\"") && line.contains("\"turn 19\""), "{}", line);
+        assert!(!line.contains("\"turn 14\""), "{}", line);
+    }
+
+    /// The ring holds 50 events; past that, the user's words are kept short
+    /// instead of vanishing.
+    #[tokio::test]
+    async fn turns_that_leave_the_ring_still_reach_the_prompt() {
+        let (planner, _rx, dir) = planner_with_pending_change("compression");
+        {
+            let mut wm = planner.working.write().await;
+            wm.push_event(utterance("remember the dentist on friday"));
+            for i in 0..55 {
+                wm.push_event(utterance(&format!("filler {}", i)));
+            }
+            assert_eq!(wm.events.len(), 50);
+        }
+        let items = planner.build_working_memory("what was I saying?", uuid::Uuid::new_v4()).await;
+        let earlier = items.iter().find(|i| i["source"] == "earlier").expect("an earlier line");
+        assert!(earlier["content"].as_str().unwrap().contains("filler"), "{}", earlier);
+        let wm = planner.working.read().await;
+        assert!(wm.earlier.iter().any(|l| l == "remember the dentist on friday"), "kept, compressed");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
