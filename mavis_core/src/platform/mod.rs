@@ -1,3 +1,4 @@
+// mavis_core/src/platform/mod.rs
 //! Platform abstraction layer — Linux / Windows / macOS
 //!
 //! All system I/O goes through these traits. Platform-specific impls live
@@ -14,16 +15,6 @@ pub use crate::context_snapshot::{AppEntry, ProjectInfo, WindowInfo};
 // Capabilities
 // ---------------------------------------------------------------------------
 
-pub trait AudioCapture {
-    /// Start microphone capture. Returns a stream handle.
-    fn start_input(&self, config: AudioConfig) -> Result<Box<dyn AudioStream>, PlatformError>;
-}
-
-pub trait AudioStream: Send {
-    fn play(&self) -> Result<(), PlatformError>;
-    fn pause(&self) -> Result<(), PlatformError>;
-}
-
 pub trait WindowTracker {
     /// Returns the currently focused window: (app_name, window_title, pid)
     fn active_window(&self) -> Result<(String, String, u32), PlatformError>;
@@ -37,50 +28,16 @@ pub trait WindowTracker {
     fn current_project(&self, _pid: u32) -> Option<ProjectInfo> {
         None
     }
-    /// Subscribe to window focus changes. Returns a channel receiver.
-    fn subscribe_changes(&self) -> Result<tokio::sync::mpsc::Receiver<WindowEvent>, PlatformError>;
 }
 
 pub trait ClipboardReader {
     /// Read current clipboard text. Returns None if not text or empty.
     fn read_text(&self) -> Result<Option<String>, PlatformError>;
-    /// Subscribe to clipboard changes.
-    fn subscribe_changes(&self) -> Result<tokio::sync::mpsc::Receiver<String>, PlatformError>;
-}
-
-pub trait ScreenGrabber {
-    /// Capture the focused monitor or window. Returns raw bytes + dimensions.
-    /// `data` is PNG on Linux, RGBA on other platforms (Phase 12).
-    fn capture_focused(&self) -> Result<Screenshot, PlatformError>;
 }
 
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
-
-pub struct AudioConfig {
-    pub sample_rate: u32,
-    pub channels: u16,
-    pub sample_format: SampleFormat,
-}
-
-pub enum SampleFormat {
-    F32,
-    I16,
-}
-
-pub struct Screenshot {
-    pub width: u32,
-    pub height: u32,
-    /// Platform-specific bytes: PNG on Linux, RGBA elsewhere (future).
-    pub data: Vec<u8>,
-}
-
-pub struct WindowEvent {
-    pub app_name: String,
-    pub window_title: String,
-    pub pid: u32,
-}
 
 #[derive(Debug)]
 pub struct PlatformError(pub String);
@@ -132,8 +89,6 @@ pub trait PlatformProvider: Send + Sync {
     fn installed_apps(&self) -> Vec<AppEntry> {
         Vec::new()
     }
-    fn audio(&self) -> Option<&dyn AudioCapture>;
     fn windows(&self) -> Option<&dyn WindowTracker>;
     fn clipboard(&self) -> Option<&dyn ClipboardReader>;
-    fn screen(&self) -> Option<&dyn ScreenGrabber>;
 }
