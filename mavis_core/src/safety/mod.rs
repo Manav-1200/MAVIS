@@ -89,6 +89,7 @@ impl PermissionGate {
                     EventType::PlanReady => self.review(event).await,
                     // The confirmation answer arrives as ordinary speech.
                     EventType::UserIntent => self.resolve_pending(&event).await,
+                    EventType::OrbTap => self.tapped(&event).await,
                     _ => {}
                 },
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -268,6 +269,33 @@ impl PermissionGate {
     #[cfg(test)]
     pub async fn answer_for_test(&mut self, utterance: &Event) {
         self.resolve_pending(utterance).await;
+    }
+
+    /// A tap on the orb is a yes — but not for administrator-level
+    /// actions, which still need the words, so a stray click can't run them.
+    async fn tapped(&mut self, tap: &Event) {
+        let Some(pending) = self.pending.take() else { return };
+        if pending.asked_at.elapsed() > CONFIRMATION_WINDOW {
+            self.pending = Some(pending);
+            self.expire().await;
+            return;
+        }
+        if pending.requires_explicit {
+            self.pending = Some(pending);
+            self.speak("That one needs you to say 'yes, administrator'.".to_string());
+            return;
+        }
+        info!("PermissionGate: confirmed by a tap on the orb, executing");
+        self.set_awaiting(None, Some(tap.id));
+        self.show("answered");
+        self.record(&pending, "confirmed", "user tapped the orb").await;
+        self.bus.publish(Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "permission_gate".to_string(),
+            event_type: EventType::PlanApproved,
+            payload: serde_json::json!({ "plan": pending.plan }),
+        });
     }
 
     async fn record(&self, pending: &Pending, outcome: &str, reason: &str) {
@@ -684,6 +712,42 @@ mod tests {
         gate_task.abort();
         executor_task.abort();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_tap_on_the_orb_answers_yes() {
+        let mut r = rig("tap");
+        r.gate.review(plan_ready("rm notes.txt")).await;
+        published(&mut r.rx);
+        let tap = event(EventType::OrbTap, serde_json::json!({}));
+        r.gate.tapped(&tap).await;
+        assert_eq!(published(&mut r.rx).1, ["rm notes.txt"]);
+        assert_eq!(outcomes(&r.audit).await, ["held_for_confirmation", "confirmed"]);
+        assert!(r.awaiting.lock().unwrap().claims(tap.id), "the tap was the answer");
+    }
+
+    /// A stray click must not run an administrator-level command.
+    #[tokio::test]
+    async fn a_tap_is_not_enough_for_administrator_actions() {
+        let mut r = rig("tap_admin");
+        r.gate.review(plan_ready("sudo pacman -Syu")).await;
+        published(&mut r.rx);
+        r.gate.tapped(&event(EventType::OrbTap, serde_json::json!({}))).await;
+        let (spoken, approved, _) = published(&mut r.rx);
+        assert!(approved.is_empty());
+        assert_eq!(spoken, ["That one needs you to say 'yes, administrator'."]);
+
+        // The question is still open for the spoken answer.
+        r.gate.resolve_pending(&said("yes, administrator")).await;
+        assert_eq!(published(&mut r.rx).1, ["sudo pacman -Syu"]);
+    }
+
+    #[tokio::test]
+    async fn a_tap_with_no_question_open_does_nothing() {
+        let mut r = rig("tap_idle");
+        r.gate.tapped(&event(EventType::OrbTap, serde_json::json!({}))).await;
+        let (spoken, approved, shown) = published(&mut r.rx);
+        assert!(spoken.is_empty() && approved.is_empty() && shown.is_empty());
     }
 
     /// A refused command stays refused however the plan is wrapped.
