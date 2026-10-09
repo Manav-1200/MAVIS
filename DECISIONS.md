@@ -44,6 +44,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 22. [Windows and macOS — Phase 8.5 step 5](#22-windows-and-macos--phase-85-step-5)
 23. [Finishing Phase 8](#23-finishing-phase-8)
 24. [Everything up to Phase 8](#24-everything-up-to-phase-8)
+25. [Testing Phases 6–8 without hardware](#25-testing-phases-68-without-hardware)
 
 ---
 
@@ -89,6 +90,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 10-09 | 6–8 | Phases 6–8 driven by typed commands in the sandbox: an installed app launched for the first time, confirmation ran end to end; quoted launchers, a request lost during a question, and a Sentinel sentence fixed (§25) |
 | 10-09 | — | `setup.sh` removed until MAVIS is ready for daily use; push to talk stays, set in `config/config.toml` (§24) |
 | 10-08 | 4–8 | Everything owed up to Phase 8: push to talk chosen at setup, tap the orb to confirm, older turns compressed into the prompt, two worker races fixed, dead code removed, SIGTERM saves memory. Embeddings, an LLM risk check and the learning engine stay out, by decision (§24) |
 | 10-07 | 8 | Phase 8 finished except per-skill permissions: four gate gaps closed (one of them new — a wrapped plan turned a refusal into a question), strict consent, the command read out before running, an orb state while asking, rollback and "undo", worker socket owner-only. None of it reachable by voice until Phase 9 gives the gate something to ask about (§23) |
@@ -682,7 +684,7 @@ Known, recorded, not yet fixed. Roughly in the order they'd be felt.
 **Verification still owed** *(as of 2026-09-30)*
 - **Barge-in on real speakers**: talking over a reply, and MAVIS not interrupting itself. It did, on every reply, until the §17 fix — which has not been run since
 - **"stop" / "quiet" / "cancel"** going silent without an answer
-- **Any action actually launching.** No `[app]` action has ever appeared in a log; every "Opening Firefox" so far was the model narrating. The matcher was rewritten on 09-26 and hasn't been exercised
+- **Any action launching on a real desktop.** Launches, searches and system control ran in the sandbox against stand-ins on 10-09 (§25); none has yet been seen on hardware
 - `MAVIS_BARGE_IN=0`, `MAVIS_SPEECH_GATE=0`, `MAVIS_AUDIO_OUTPUT` — all added, none ever set
 - GNOME crash fix on a real GNOME session
 - Calendar has-events path (the calendar is empty)
@@ -719,7 +721,7 @@ Known, recorded, not yet fixed. Roughly in the order they'd be felt.
 
 **Not built**
 - `wlr-layer-shell` for the orb on native Wayland
-- Per-skill permissions (needs Phase 9); confirming by tapping the orb
+- Per-skill permissions (needs Phase 9). *(Tapping the orb to confirm was built 2026-10-08, §24.)*
 - Sentinel: winget and XProtect (§22)
 
 ---
@@ -1313,6 +1315,47 @@ When transcription was still busy, a new utterance was thrown away silently. It 
 
 ### Not changed
 **The learning engine (7.3)** stays deferred. There is still not enough history for routine detection to find anything real.
+
+---
+
+## 25. Testing Phases 6–8 without hardware
+
+*2026-10-09.* The core was run here with no display, microphone or worker, and driven by typed commands through the hotkey socket. Volume, media, brightness, the browser and two fake installed apps were replaced by small scripts that record how they were called. This exercises everything between "the words arrived" and "the program ran". Hearing, speaking and the model are not part of it.
+
+### What ran as it should
+Volume up, "louder", pause, next track, brighter, a Google search, "google how to mute a tab" (searched, didn't mute), "play lofi hip hop" (YouTube), "undo that" with nothing to undo, "what changed recently?" (answered from the Sentinel's store), "stop", and SIGTERM. Every one produced the expected call. **Measured** here, from the recorded calls and the log.
+
+**An installed app launched for the first time in any log.** §14 has said since 09-26 that no `[app]` action had ever appeared. A fake app named "Quill Writer" was opened by name and ran with its flags. **Measured** in the sandbox, not yet on a real desktop.
+
+**The confirmation flow ran from a typed command.** An app whose launcher is `sh -c …` scored 4, as §23 intends, and MAVIS asked first. Then:
+- "yes" ran it.
+- "okay so what about the weather" cancelled it.
+
+The audit log recorded `held_for_confirmation`, `confirmed` and `declined` in order. Until now this had only been shown in tests (§23).
+
+### Problem · Launchers with quotes were split apart
+**Symptom:** `Exec=sh -c "echo launched >> file"` became the arguments `"echo`, `launched`, `>>`, `file"`, with the quote marks still attached.
+**Cause:** the planner split `Exec` on spaces. It ignored the quoting that `.desktop` files use for paths with spaces (JetBrains Toolbox, Wine) and for arguments. The Windows and macOS launch strings use quotes too (`open -a "Visual Studio Code"`), so those would have broken the same way.
+**Fix:** `util::split_command_line`. Double quotes group words, a backslash inside them escapes the next character, and `""` stays an empty argument, which `start ""` needs.
+**Evidence:** **Measured.** A launcher at `".../My Apps/quill" --new %U` ran as `quill --new`. Unit-tested on Linux, Windows and macOS shapes.
+
+### Problem · A request made while MAVIS was asking was lost
+**Symptom:** "play lofi hip hop", said while "Shall I run …?" was open, answered "Cancelled." and nothing played.
+**Cause:** while a question is open, the planner leaves the next utterance to the gate (§23). The gate treats anything but a clear yes as no, which is right. Nobody then carried out the request.
+**Fix:** the gate still cancels. If the utterance is a request MAVIS handles itself, like a launch, a search, system control or undo, the planner also carries it out. Anything else, such as "no, leave it", is only the answer.
+**Why not every utterance:** a question for the model can't be told apart from "no, because…" without asking the model, and §8 keeps the model out of consent.
+**Evidence:** **Proven** (the test fails on the old code) and **measured**: "Cancelled.", then YouTube opened.
+
+### Problem · Two "and"s in one sentence
+"…pulled in 74 packages …, including cron, cpio, libnsl2 and postfix and removed debsecan." A clause that is itself a list is now followed by a comma: "…libnsl2 and postfix, and removed debsecan." **Proven** by test.
+
+### Known, left as it is
+- **An app whose launcher is `sh -c …` asks first.** That's §23 working: the gate can't tell an installed launcher from a command in disguise, and few apps launch this way.
+- **A question asked while MAVIS is waiting for a yes is taken as no, and not answered.** See the reason above.
+- **A long command is cut at 100 bytes** in the question, sometimes mid-path.
+
+### Still needs your machine
+Hearing and speaking, barge-in, the orb, push to talk, window, clipboard and project context, the model's replies, recall across sessions, and consolidation across a day boundary.
 
 ---
 
