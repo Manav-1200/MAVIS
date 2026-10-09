@@ -33,6 +33,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **Apps whose launcher quotes a path or argument didn't start** — `Exec="/opt/My App/run"`, Wine and JetBrains launchers, and `open -a "Visual Studio Code"` were split at every space.
+- **A request made while MAVIS was asking "Shall I?" was lost** — it cancelled the question and then did nothing. It now cancels and still carries the request out.
+- **"…and postfix and removed debsecan"** — the Sentinel's sentences no longer run two "and"s together.
 - **The worker could unload a model in the middle of a reply** if the reply took longer than the idle timeout.
 - **Ctrl+C left the worker running** after removing its socket.
 - **`kill` lost the conversation** — only Ctrl+C saved working memory; SIGTERM now does too.
