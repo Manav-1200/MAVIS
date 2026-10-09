@@ -493,6 +493,8 @@ MAVIS could previously only ever `say` things — `executor.rs` had `shell`, `ap
 - [x] Actions emit `say` + action together, so there's spoken confirmation.
 - [x] Unrecognised commands fall through to the LLM rather than being guessed at.
 
+- [x] **Launch path run end to end** *(2026-10-09, sandbox)* — volume, media, brightness, search, YouTube and two installed apps, driven by typed commands with stand-in programs. Launchers with quoted paths or arguments are now split correctly, and a request made while MAVIS is asking "Shall I?" is carried out rather than lost. Not yet seen on a real desktop. See [`DECISIONS.md` §25](DECISIONS.md#25-testing-phases-68-without-hardware).
+
 **`shell` is deliberately unreachable from voice.** An unrestricted `sh -c` driven by speech transcription is the hole the initial audit flagged; it stays closed until Phase 8 builds real permissions.
 
 ### 6.5.1 — Installed application discovery
