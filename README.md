@@ -182,7 +182,7 @@ Every plan is scored for risk before anything runs:
 | 8+ | Requires you to say "yes, administrator" — a tap is not enough |
 | Irreversible | Refused, whatever you say |
 
-Anything that isn't a clear yes cancels. A "no" anywhere in the answer always wins. Before a destructive command runs, the files it names are copied — say "undo that" within five minutes to get them back. Every decision is written to `memory/audit.db`, which MAVIS can add to but never edit.
+Anything that isn't a clear yes cancels. A "no" anywhere in the answer always wins. If you answer with a request of your own ("play some lofi"), the question is cancelled and the request carried out. Before a destructive command runs, the files it names are copied — say "undo that" within five minutes to get them back. Every decision is written to `memory/audit.db`, which MAVIS can add to but never edit.
 
 ### Memory
 
