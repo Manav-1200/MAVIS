@@ -21,7 +21,7 @@ pub enum ListenMode {
 
 impl ListenMode {
     /// `MAVIS_LISTEN_MODE`, else `listen_mode` under `[voice]` in
-    /// `config/config.toml` (what `setup.sh` writes), else Always.
+    /// `config/config.toml`, else Always.
     pub fn configured() -> Self {
         let from_env = std::env::var("MAVIS_LISTEN_MODE").ok();
         let from_file = std::fs::read_to_string("../config/config.toml")
@@ -124,7 +124,7 @@ mod tests {
 
     #[test]
     fn the_setting_is_read_from_its_section_only() {
-        let text = "[ui]\nlisten_mode = \"push\"\n\n[voice]\nenabled = true\nlisten_mode = \"push\"  # chosen at setup\n";
+        let text = "[ui]\nlisten_mode = \"push\"\n\n[voice]\nenabled = true\nlisten_mode = \"push\"  # set by hand\n";
         assert_eq!(read_setting(text, "voice", "listen_mode").as_deref(), Some("push"));
         assert_eq!(read_setting("[voice]\nenabled = true\n", "voice", "listen_mode"), None);
         assert_eq!(read_setting("listen_mode = \"push\"\n", "voice", "listen_mode"), None, "outside any section");
