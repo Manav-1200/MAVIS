@@ -126,11 +126,19 @@ pub fn summarize(group: &[Change]) -> Option<String> {
         });
     }
 
-    Some(format!(
-        "Your system update {} {}.",
-        when,
-        join_naturally_owned(&parts)
-    ))
+    Some(format!("Your system update {} {}.", when, join_clauses(&parts)))
+}
+
+/// Like `join_naturally_owned`, but a clause that is itself a list gets a
+/// comma after it, so "…libnsl2 and postfix, and removed debsecan" doesn't
+/// run two "and"s together.
+fn join_clauses(parts: &[String]) -> String {
+    match parts.split_last() {
+        Some((last, rest)) if !rest.is_empty() && rest.iter().any(|p| p.contains(" and ")) => {
+            format!("{}, and {}", rest.join(", "), last)
+        }
+        _ => join_naturally_owned(parts),
+    }
 }
 
 /// True for step 3's privilege-surface changes.
@@ -541,6 +549,17 @@ mod tests {
         assert!(line.contains("hyprland"), "{}", line);
         assert!(line.contains("removed oldthing"), "{}", line);
         assert!(line.contains(" and "), "{}", line);
+    }
+
+    #[test]
+    fn a_listed_clause_is_set_off_by_a_comma() {
+        let changes = vec![
+            installed("cron", false, 10),
+            installed("cpio", false, 10),
+            removed("debsecan", 11),
+        ];
+        let line = summarize(&changes).unwrap();
+        assert!(line.contains("cron and cpio, and removed debsecan"), "{}", line);
     }
 
     #[test]
