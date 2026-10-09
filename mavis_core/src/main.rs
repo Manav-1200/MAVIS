@@ -231,7 +231,7 @@ async fn main() -> Result<()> {
     });
 
     // Orb — created here so we can clone it for the energy task
-    // How MAVIS listens: always, or push to talk (setup.sh asks).
+    // How MAVIS listens: always, or push to talk (listen_mode in config.toml).
     let listen = Arc::new(listen::ListenGate::new(listen::ListenMode::configured()));
     info!("Listen mode: {:?}", listen.mode());
 
