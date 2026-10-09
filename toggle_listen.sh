@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # toggle_listen.sh
 # Push to talk: start (or stop) MAVIS listening for one utterance.
-# Bind this to a key in your compositor; setup.sh shows how.
+# Bind this to a key in your compositor; the README shows how.
 set -euo pipefail
 exec python3 -c '
 import socket, sys
