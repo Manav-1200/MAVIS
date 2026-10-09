@@ -102,9 +102,6 @@ Full roadmap in [`PHASES.md`](PHASES.md). **Why** each thing is built the way it
 ## Development
 
 ```bash
-# First time: choose how MAVIS listens (always, or push to talk)
-setup.sh
-
 # Rust core — run from inside mavis_core/ (memory lives at ../memory, relative to here)
 cd mavis_core
 cargo run
@@ -121,12 +118,20 @@ python -m mavis
 
 ### Listening
 
-`setup.sh` asks how MAVIS should listen, and saves the answer as `listen_mode` in `config/config.toml`:
+Set `listen_mode` under `[voice]` in `config/config.toml`:
 
 - **Always** (the default) — MAVIS hears everything you say.
 - **Push to talk** — the microphone is ignored until you press your hotkey or tap the orb. MAVIS then hears one thing you say (you have 8 seconds to start), and stops listening again. Pressing again before you speak cancels.
 
-For the hotkey, bind a key to `toggle_listen.sh` in your compositor. Setup prints the line for niri, sway and Hyprland. `MAVIS_LISTEN_MODE=push` or `always` overrides the file for one run.
+`MAVIS_LISTEN_MODE=push` or `always` overrides the file for one run.
+
+For the hotkey, bind a key to `toggle_listen.sh` in your compositor:
+
+```
+niri      Mod+Space { spawn "bash" "/path/to/MAVIS/toggle_listen.sh"; }
+sway      bindsym $mod+space exec bash /path/to/MAVIS/toggle_listen.sh
+Hyprland  bind = SUPER, SPACE, exec, bash /path/to/MAVIS/toggle_listen.sh
+```
 
 ### Voice commands
 
