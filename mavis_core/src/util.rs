@@ -129,9 +129,68 @@ pub fn truncate_bytes(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// Split a launcher command line into program and arguments, the way
+/// `.desktop` Exec lines and our Windows/macOS launch strings are quoted:
+/// double quotes group words, and a backslash inside them escapes the next
+/// character. `""` is kept as an empty argument (`start ""` needs it).
+pub fn split_command_line(line: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut in_word = false;
+    let mut quoted = false;
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '"' => {
+                quoted = !quoted;
+                in_word = true;
+            }
+            '\\' if quoted => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+            }
+            c if c.is_whitespace() && !quoted => {
+                if in_word {
+                    words.push(std::mem::take(&mut word));
+                    in_word = false;
+                }
+            }
+            c => {
+                word.push(c);
+                in_word = true;
+            }
+        }
+    }
+    if in_word {
+        words.push(word);
+    }
+    words
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_lines_keep_quoted_words_together() {
+        assert_eq!(split_command_line("firefox --new-window"), ["firefox", "--new-window"]);
+        assert_eq!(
+            split_command_line(r#"sh -c "echo hi >> /tmp/x""#),
+            ["sh", "-c", "echo hi >> /tmp/x"]
+        );
+        assert_eq!(
+            split_command_line(r#""/opt/My App/run" --flag"#),
+            ["/opt/My App/run", "--flag"]
+        );
+        assert_eq!(split_command_line(r#"open -a "Visual Studio Code""#), ["open", "-a", "Visual Studio Code"]);
+        assert_eq!(
+            split_command_line(r#"cmd /c start "" "C:\\Apps\\x.lnk""#),
+            ["cmd", "/c", "start", "", r"C:\Apps\x.lnk"]
+        );
+        assert_eq!(split_command_line(r#"env WINEPREFIX="/home/u/.wine" wine"#), ["env", "WINEPREFIX=/home/u/.wine", "wine"]);
+        assert!(split_command_line("   ").is_empty());
+    }
 
     #[test]
     fn ascii_shorter_than_limit_is_unchanged() {
