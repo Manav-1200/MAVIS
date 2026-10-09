@@ -504,11 +504,11 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
                 return say_then_open(format!("Opening {}.", target), target.to_string());
             }
             if let Some(app) = find_app(target, apps) {
-                // Exec may carry flags ("code-oss --unity-launch"); the
-                // executor's app action takes a binary plus args.
-                let mut parts = app.exec.split_whitespace();
-                let bin = parts.next().unwrap_or_default().to_string();
-                let args: Vec<String> = parts.map(String::from).collect();
+                // Exec may carry flags and quoted paths; the executor's
+                // app action takes a binary plus args.
+                let mut parts = crate::util::split_command_line(&app.exec).into_iter();
+                let bin = parts.next().unwrap_or_default();
+                let args: Vec<String> = parts.collect();
                 return Some(serde_json::json!([
                     {"type": "say", "text": format!("Opening {}.", app.name)},
                     {"type": "app", "target": bin, "args": args},
@@ -705,7 +705,10 @@ impl Planner {
 
         // The answer to "Shall I?" belongs to the permission gate. Planning
         // it as well made MAVIS reply to "yes" as if it were a question.
-        if self.awaiting.lock().unwrap_or_else(|p| p.into_inner()).claims(event.id) {
+        // A request of its own ("play lofi hip hop") still cancels the
+        // question, but is carried out rather than lost.
+        let answering = self.awaiting.lock().unwrap_or_else(|p| p.into_inner()).claims(event.id);
+        if answering && !is_undo_request(intent) && match_action_intent(intent, &self.apps).is_none() {
             info!("Planner: that answers a confirmation — left to the permission gate");
             return Ok(());
         }
@@ -1596,6 +1599,27 @@ mod tests {
         gate.answer_for_test(&utterance("no")).await;
         planner.handle_event(utterance("open firefox")).await.unwrap();
         assert!(!drain(&mut rx).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn a_new_request_while_asking_cancels_the_question_and_still_runs() {
+        let (planner, mut rx, dir) = planner_with_pending_change("new_request");
+        let audit = crate::safety::audit::AuditLog::new(&dir.join("audit.db")).unwrap();
+        let mut gate = crate::safety::PermissionGate::new(
+            Arc::new(EventBus::new()),
+            Arc::new(Mutex::new(audit)),
+            planner.awaiting.clone(),
+        );
+        gate.ask_for_test(serde_json::json!([{ "type": "shell", "command": "rm notes.txt" }])).await;
+
+        planner.handle_event(utterance("volume up")).await.unwrap();
+        let planned = drain(&mut rx);
+        assert!(planned.iter().any(|e| e.payload.to_string().contains("volume_up")), "the request is carried out");
+
+        // A plain answer is still only the answer.
+        planner.handle_event(utterance("no, leave it")).await.unwrap();
+        assert!(drain(&mut rx).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
