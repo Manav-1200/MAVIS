@@ -89,6 +89,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 10-09 | — | `setup.sh` removed until MAVIS is ready for daily use; push to talk stays, set in `config/config.toml` (§24) |
 | 10-08 | 4–8 | Everything owed up to Phase 8: push to talk chosen at setup, tap the orb to confirm, older turns compressed into the prompt, two worker races fixed, dead code removed, SIGTERM saves memory. Embeddings, an LLM risk check and the learning engine stay out, by decision (§24) |
 | 10-07 | 8 | Phase 8 finished except per-skill permissions: four gate gaps closed (one of them new — a wrapped plan turned a refusal into a question), strict consent, the command read out before running, an orb state while asking, rollback and "undo", worker socket owner-only. None of it reachable by voice until Phase 9 gives the gate something to ask about (§23) |
 | 10-06 | 8.5 | Sentinel steps 4 and 5: file integrity and advisories, checked against real `pacman`, `rpm`, `dpkg`, `arch-audit` and `debsecan` output; Windows and macOS inventories written but unverified. Phase 8.5 is built; nothing since step 2a has had a hardware run (§21, §22) |
@@ -1264,6 +1265,7 @@ TTS wrote `mavis_tts_*.wav` under a fixed name in `/tmp`, where another local us
 **The hotkey** is `toggle_listen.sh`, which sends `toggle_listen` to the existing hotkey socket. Binding a key is the compositor's job. MAVIS has no global key grab on Wayland, and adding one would mean a different method on every compositor. Setup prints the line for niri, sway and Hyprland.
 **An asked-for utterance is trusted more.** The worker already had a looser confidence check for speech the user asked it to hear. It was switched by `MAVIS_ACTIVE_LISTEN`, an environment variable the core set in its own process, where the worker could never see it. It is now an `active_listen` field on the STT request.
 **Evidence:** **Proven** on the capture path. In a test, push mode stays deaf until a press, then ships exactly one utterance. That test fails with the gate taken out. **Not run on hardware:** the hotkey binding, and how it feels.
+**Superseded in part, 2026-10-09:** `setup.sh` is removed. An install step belongs to something people install, and MAVIS isn't ready for daily use yet. Push to talk is unchanged; it is set by editing `listen_mode`, and the README gives the key bindings. The question returns with a real installer.
 
 ### Decision · A tap on the orb is a yes
 **What a tap is:** a press released within 400 ms, having moved less than 4 px. Anything longer or further is a drag, so moving the orb never answers a question.
