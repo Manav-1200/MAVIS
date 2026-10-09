@@ -309,7 +309,7 @@ Everything above communicates over the in-process event bus (`tokio::sync::broad
 - [x] TTS naturalness (prosody settings)
 - [x] Idle unload verified with both models
 - [x] Fan noise robust filtering — the VAD follows the room's noise floor, and Silero decides what is speech before Whisper hears it *(2026-09-22, §6.4; DECISIONS §15)*
-- [x] Hotkey binding for push-to-talk — `toggle_listen.sh`; setup prints the binding for niri, sway and Hyprland *(2026-10-08)*
+- [x] Hotkey binding for push-to-talk — `toggle_listen.sh`; the README gives the binding for niri, sway and Hyprland *(2026-10-08)*
 
 ---
 
@@ -356,7 +356,7 @@ Everything above communicates over the in-process event bus (`tokio::sync::broad
 ### 5.7 — Conversation Style, TTS Abstraction, Push-to-Talk (2026-09-02)
 - [x] **Conversation style baseline** — added warmth/confidence/anti-leakage rules to `SYSTEM_PROMPT`; fixed `LlamaEngine.chat()` to apply style post-processing to every model path (previously only ran for Phi-3/TinyLlama's manually-templated branch — a native-chat-template model would have skipped it entirely).
 - [x] **TTS voice abstraction** — found already implemented (`MAVIS_TTS_ENGINE=piper|kokoro`, one dispatch point in `executor.rs`, rest of the executor untouched by engine choice). Removed a dead, fully disconnected duplicate Piper implementation (`LinuxTts`/`TtsPlayer` trait across `platform/mod.rs`, `linux.rs`, `windows.rs`, `macos.rs`) that nothing ever called.
-- [x] **Push-to-talk / active listening** *(2026-10-08)* — a choice, made at setup (`setup.sh`) and stored as `listen_mode` in `config/config.toml`. **Always** stays the default. **Push to talk** ignores the microphone until a hotkey press or an orb tap, then hears one utterance (8 s to start) and closes. The utterance is marked as asked-for, so the worker doesn't second-guess it as noise. Proven by the capture test; not yet heard on hardware. See [`DECISIONS.md` §24](DECISIONS.md#24-everything-up-to-phase-8).
+- [x] **Push-to-talk / active listening** *(2026-10-08)* — a choice, set as `listen_mode` in `config/config.toml` *(an install-time question was built and removed 2026-10-09; it returns when MAVIS is ready for daily use)*. **Always** stays the default. **Push to talk** ignores the microphone until a hotkey press or an orb tap, then hears one utterance (8 s to start) and closes. The utterance is marked as asked-for, so the worker doesn't second-guess it as noise. Proven by the capture test; not yet heard on hardware. See [`DECISIONS.md` §24](DECISIONS.md#24-everything-up-to-phase-8).
 
 ### 5.8 — Full E2E Verification (2026-09-02)
 Real bugs found through live voice testing on target hardware — not simulated, not assumed fixed from code review alone:
@@ -924,4 +924,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-10-08*
+*Last updated: 2026-10-09*
