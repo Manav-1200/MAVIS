@@ -133,6 +133,17 @@ sway      bindsym $mod+space exec bash /path/to/MAVIS/toggle_listen.sh
 Hyprland  bind = SUPER, SPACE, exec, bash /path/to/MAVIS/toggle_listen.sh
 ```
 
+**The Copilot key** works well for this, since Linux has no other use for it. It isn't a key of its own: the laptop sends Super+Shift+F23. Many keyboard layouts also rename F23 to `XF86TouchpadOff`. Press it in `wev` (or `xev` on X11) to see which name yours uses, then bind that:
+
+```
+niri      Mod+Shift+F23 { spawn "bash" "/path/to/MAVIS/toggle_listen.sh"; }
+          Mod+Shift+XF86TouchpadOff { spawn "bash" "/path/to/MAVIS/toggle_listen.sh"; }
+sway      bindsym Mod4+Shift+F23 exec bash /path/to/MAVIS/toggle_listen.sh
+Hyprland  bind = SUPER SHIFT, F23, exec, bash /path/to/MAVIS/toggle_listen.sh
+```
+
+Many laptops send the Copilot key's press and release together however long it's held, which is why push to talk is a press to start rather than a hold.
+
 ### Voice commands
 
 Some phrases are handled directly by the planner without an LLM round trip, so they respond near-instantly:
