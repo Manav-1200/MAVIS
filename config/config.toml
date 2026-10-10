@@ -22,7 +22,7 @@ theme = "dark"
 enabled = true
 # "always" listens all the time; "push" listens only after the hotkey or a
 # tap on the orb. MAVIS_LISTEN_MODE overrides it.
-listen_mode = "always"
+listen_mode = "push"
 
 [ai]
 provider = "local"
