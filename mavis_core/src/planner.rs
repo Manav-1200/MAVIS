@@ -71,11 +71,6 @@ fn find_filename_in_title(title: &str) -> Option<&str> {
 // meant MAVIS reported its own launch line (a wall of MAVIS_CONTEXT_*=1
 // assignments) as "what the user is doing". Strip leading VAR=value tokens
 // so the actual command survives — "cargo run" instead of the env prefix.
-const TERMINAL_APPS: &[&str] = &[
-    "kitty", "alacritty", "foot", "wezterm", "gnome-terminal",
-    "konsole", "xterm", "urxvt", "terminator",
-];
-
 fn strip_env_prefix(title: &str) -> &str {
     let mut rest = title.trim_start();
     loop {
@@ -101,55 +96,100 @@ fn strip_env_prefix(title: &str) -> &str {
     }
 }
 
-// IDE awareness: known editors get a specific "editing X" message instead
-// of the generic "in app Y" one. Both matches below are confirmed against
-// real niri output on this machine, not guessed:
-//   antigravity-ide: "{workspace} - Antigravity IDE - {filename}"
-//   code-oss:        "{filename} - {workspace} - Code - OSS"
-// Anything else falls through to a generic filename-in-title heuristic —
-// approximate (could false-positive on e.g. a file manager), but avoids
-// needing to verify every possible editor's exact title format up front.
-// Browsers are excluded since that's handled by the extension work instead.
+/// The focused window as plain facts. Nothing here knows an app by name:
+/// a terminal's title is its command and an editor's title names its file,
+/// so the model reads them the way a person glancing at the screen would.
 fn describe_active_window(window: &WindowInfo) -> String {
-    if window.app_name == "antigravity-ide" {
-        if let Some((workspace, filename)) = window.window_title.split_once(" - Antigravity IDE - ") {
-            return format!(
-                "The user is editing {} in the {} project using Antigravity IDE.",
-                filename, workspace
-            );
+    let title = strip_env_prefix(&window.window_title).trim();
+    let mut line = if title.is_empty() {
+        format!("The focused window is {}.", window.app_name)
+    } else {
+        format!("The focused window is {} — \"{}\".", window.app_name, title)
+    };
+    if let Some(file) = find_filename_in_title(title) {
+        line.push_str(&format!(" Its title names the file {}.", file));
+    }
+    line
+}
+
+/// Every open window, counted here rather than by the model: it said "four"
+/// with five apps listed. Workspaces are the numbers the user sees.
+fn describe_open_windows(windows: &[WindowInfo], current: Option<u64>) -> Option<String> {
+    let mut apps: Vec<(String, usize, Vec<u64>)> = Vec::new();
+    for w in windows {
+        if w.app_name.is_empty() || w.app_name == "unknown" {
+            continue;
+        }
+        let at = match apps.iter().position(|(name, _, _)| *name == w.app_name) {
+            Some(i) => i,
+            None => {
+                apps.push((w.app_name.clone(), 0, Vec::new()));
+                apps.len() - 1
+            }
+        };
+        apps[at].1 += 1;
+        if let Some(ws) = w.workspace_id {
+            if !apps[at].2.contains(&ws) {
+                apps[at].2.push(ws);
+            }
         }
     }
-
-    if window.app_name == "code-oss" {
-        if let Some(prefix) = window.window_title.strip_suffix(" - Code - OSS") {
-            return match prefix.split_once(" - ") {
-                Some((filename, workspace)) => format!(
-                    "The user is editing {} in the {} project using VS Code.",
-                    filename, workspace
-                ),
-                None => format!("The user is editing {} using VS Code.", prefix),
-            };
-        }
+    if apps.is_empty() {
+        return None;
     }
+    apps.sort_by(|a, b| a.0.cmp(&b.0));
 
-    if TERMINAL_APPS.contains(&window.app_name.as_str()) {
-        let cleaned = strip_env_prefix(&window.window_title);
-        if cleaned.is_empty() {
-            return format!("The user is in a terminal ({}).", window.app_name);
-        }
-        return format!(
-            "The user is in a terminal ({}), running: {}.",
-            window.app_name, cleaned
-        );
+    let listed: Vec<String> = apps
+        .iter()
+        .map(|(name, count, spaces)| {
+            let mut notes = Vec::new();
+            if *count > 1 {
+                notes.push(format!("{} windows", count));
+            }
+            match spaces.len() {
+                0 => {}
+                1 => notes.push(format!("workspace {}", spaces[0])),
+                _ => notes.push(format!("workspaces {}", join_numbers(spaces))),
+            }
+            if notes.is_empty() {
+                name.clone()
+            } else {
+                format!("{} ({})", name, notes.join(", "))
+            }
+        })
+        .collect();
+    let mut parts = vec![format!(
+        "{} {} open: {}.",
+        apps.len(),
+        if apps.len() == 1 { "application is" } else { "applications are" },
+        listed.join("; ")
+    )];
+
+    let mut used: Vec<u64> = apps.iter().flat_map(|(_, _, s)| s.iter().copied()).collect();
+    used.sort_unstable();
+    used.dedup();
+    if !used.is_empty() {
+        parts.push(format!(
+            "Windows are on {} {}: {}.",
+            used.len(),
+            if used.len() == 1 { "workspace" } else { "workspaces" },
+            join_numbers(&used)
+        ));
     }
-
-    if window.app_name != "brave-browser" && window.app_name != "firefox" {
-        if let Some(filename) = find_filename_in_title(&window.window_title) {
-            return format!("The user appears to be editing {} in {}.", filename, window.app_name);
-        }
+    if let Some(ws) = current {
+        parts.push(format!("The user is on workspace {}.", ws));
     }
+    Some(parts.join(" "))
+}
 
-    format!("The user is currently in {} — \"{}\".", window.app_name, window.window_title)
+fn join_numbers(numbers: &[u64]) -> String {
+    let mut sorted = numbers.to_vec();
+    sorted.sort_unstable();
+    let words: Vec<String> = sorted.iter().map(|n| n.to_string()).collect();
+    match words.split_last() {
+        Some((last, rest)) if !rest.is_empty() => format!("{} and {}", rest.join(", "), last),
+        _ => words.join(""),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -271,7 +311,36 @@ fn strip_address(text: &str) -> &str {
             return t[prefix.len()..].trim_start_matches([',', ' ', '.']);
         }
     }
+    // Whisper often mishears the name ("MOVIS, what changed?"). A first
+    // word one letter away from it counts, when punctuation sets it off the
+    // way Whisper writes someone being addressed.
+    if let Some(end) = t.find([',', '.', '!']) {
+        if is_misheard_name(&t[..end]) {
+            return t[end..].trim_start_matches([',', ' ', '.', '!']);
+        }
+    }
     t
+}
+
+fn is_misheard_name(word: &str) -> bool {
+    let w = word.trim().to_lowercase();
+    (4..=6).contains(&w.len()) && w.chars().all(|c| c.is_ascii_alphabetic()) && edit_distance(&w, "mavis") <= 1
+}
+
+/// Levenshtein distance; inputs here are a single short word.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for j in 0..b.len() {
+            let cur = row[j + 1];
+            row[j + 1] = if ca == b[j] { prev } else { 1 + prev.min(cur).min(row[j]) };
+            prev = cur;
+        }
+    }
+    row[b.len()]
 }
 
 // System control intents. The executor already forwards `system` actions to
@@ -299,10 +368,15 @@ const SYSTEM_INTENTS: &[(&[&str], &str, &str)] = &[
         "Muted.",
     ),
     (
-        &["pause the music", "resume the music", "play the music", "pause",
-          "resume", "pause music", "stop the music"],
-        "media_play_pause",
-        "Done.",
+        &["pause the music", "pause", "pause music", "stop the music", "stop the video",
+          "pause the video"],
+        "media_pause",
+        "Paused.",
+    ),
+    (
+        &["resume the music", "resume", "resume the video", "unpause"],
+        "media_play",
+        "Resuming.",
     ),
     (
         &["next track", "next song", "skip the song", "skip this song", "skip track"],
@@ -392,7 +466,7 @@ fn find_verb(text: &str, verb: &str) -> Option<usize> {
 /// already happened in `stt.rs` the moment the user started speaking.
 /// Deliberately narrow: it must be a short utterance whose whole point is
 /// stopping, not a sentence that happens to contain the word.
-fn is_stop_request(text: &str) -> bool {
+pub(crate) fn is_stop_request(text: &str) -> bool {
     let t = normalize(text);
     let words: Vec<&str> = t.split_whitespace().collect();
     if words.is_empty() || words.len() > 4 {
@@ -456,6 +530,22 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
         .trim_matches(|c: char| c.is_ascii_punctuation())
         .trim();
 
+    // Two requests in one breath: "open firefox and play daylight".
+    if let Some((first, second)) = t.split_once(" and ") {
+        if let Some(then) = match_action_intent(second, apps) {
+            // The video opens in the app just named, if it can show links.
+            if let (Some(app), Some((said, url))) =
+                (opened_app(first, apps).filter(|a| a.opens_links), link_in(&then))
+            {
+                return Some(open_link(said.trim_end_matches('.').to_string(), url, Some(app)));
+            }
+            if let Some(Some(mut plan)) = match_action_intent(first, apps).map(|p| p.as_array().cloned()) {
+                plan.extend(then.as_array().cloned().unwrap_or_default());
+                return Some(serde_json::Value::Array(plan));
+            }
+        }
+    }
+
     if let Some(plan) = match_system_intent(text) {
         return Some(plan);
     }
@@ -467,20 +557,15 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
         ]))
     };
 
-    // "play X on youtube" / "play X"
+    // "play X", "play X on youtube in <app>", "play X. Use <app>."
     for prefix in ["play ", "put on ", "search youtube for "] {
         if let Some(rest) = t.strip_prefix(prefix) {
-            let query = rest.trim_end_matches(" on youtube").trim();
+            let (query, app) = link_request(rest, apps);
             if query.is_empty() {
                 continue;
             }
-            return say_then_open(
-                format!("Searching YouTube for {}.", query),
-                format!(
-                    "https://www.youtube.com/results?search_query={}",
-                    urlencode(query)
-                ),
-            );
+            let url = format!("https://www.youtube.com/results?search_query={}", urlencode(&query));
+            return Some(open_link(format!("Searching YouTube for {}", query), url, app));
         }
     }
 
@@ -521,21 +606,100 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
         }
     }
 
-    // "google X" / "search for X" / "look up X"
+    // "google X" / "search for X" / "look up X", optionally "in <app>"
     for prefix in ["google ", "search for ", "look up "] {
         if let Some(rest) = t.strip_prefix(prefix) {
-            let query = rest.trim();
+            let (query, app) = link_request(rest, apps);
             if query.is_empty() {
                 continue;
             }
-            return say_then_open(
-                format!("Searching for {}.", query),
-                format!("https://www.google.com/search?q={}", urlencode(query)),
-            );
+            let url = format!("https://www.google.com/search?q={}", urlencode(&query));
+            return Some(open_link(format!("Searching for {}", query), url, app));
         }
     }
 
     None
+}
+
+/// The installed app an "open <app>" clause names.
+fn opened_app<'a>(clause: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
+    ["open ", "launch ", "start ", "run "].iter().find_map(|verb| {
+        let at = find_verb(clause, verb)?;
+        find_app(clause[at + verb.len()..].trim(), apps)
+    })
+}
+
+/// The link a plan opens, with what it says while doing so.
+fn link_in(plan: &serde_json::Value) -> Option<(String, String)> {
+    let actions = plan.as_array()?;
+    let url = actions.iter().find_map(|a| {
+        let target = a.get("target")?.as_str()?;
+        target.contains("://").then(|| target.to_string())
+    })?;
+    let said = actions.iter().find_map(|a| a.get("text")?.as_str().map(String::from))?;
+    Some((said, url))
+}
+
+/// Split "daylight by maroon 5 on youtube in firefox" into the search and
+/// the app asked to show it. Only an installed app registered for web
+/// links counts, so "play songs with friends" searches for all of it.
+fn link_request<'a>(rest: &str, apps: &'a [AppEntry]) -> (String, Option<&'a AppEntry>) {
+    // "use brave, thanks": try "brave thanks", then "brave".
+    let link_app = |said: &str| {
+        let words: Vec<&str> = said.split_whitespace().collect();
+        (1..=words.len().min(4))
+            .rev()
+            .find_map(|n| find_app(&words[..n].join(" "), apps).filter(|a| a.opens_links))
+    };
+    let mut sentences = rest.split(['.', '?', '!']).map(str::trim).filter(|s| !s.is_empty());
+    let mut query = sentences.next().unwrap_or("").to_string();
+
+    let mut app = None;
+    for joiner in [" in ", " on ", " using ", " with "] {
+        if let Some(at) = query.rfind(joiner) {
+            if let Some(a) = link_app(&query[at + joiner.len()..]) {
+                app = Some(a);
+                query.truncate(at);
+                break;
+            }
+        }
+    }
+    // A later sentence naming one: "Play X. Use Firefox."
+    if app.is_none() {
+        app = sentences.find_map(|s| {
+            let named = ["use ", "using ", "in ", "on ", "with "].iter().find_map(|p| s.strip_prefix(p))?;
+            link_app(named)
+        });
+    }
+    let query = query.trim();
+    let query = query
+        .strip_suffix(" on youtube")
+        .or_else(|| query.strip_suffix(" on you tube"))
+        .unwrap_or(query);
+    (query.trim().to_string(), app)
+}
+
+/// Open a link in the app asked for, or the default browser.
+fn open_link(said: String, url: String, app: Option<&AppEntry>) -> serde_json::Value {
+    match app {
+        Some(app) => {
+            // Flatpak's @@ markers bracket file arguments; a URL goes after.
+            let mut parts = crate::util::split_command_line(&app.exec)
+                .into_iter()
+                .filter(|p| !p.starts_with("@@"));
+            let bin = parts.next().unwrap_or_default();
+            let mut args: Vec<String> = parts.collect();
+            args.push(url);
+            serde_json::json!([
+                {"type": "say", "text": format!("{} in {}.", said, app.name)},
+                {"type": "app", "target": bin, "args": args},
+            ])
+        }
+        None => serde_json::json!([
+            {"type": "say", "text": format!("{}.", said)},
+            {"type": "app", "target": url},
+        ]),
+    }
 }
 
 /// Recognise "yesterday", "this morning", "last week" and friends, mapping
@@ -614,6 +778,8 @@ pub struct Planner {
     awaiting: SharedAwaiting,
     /// The update MAVIS last spoke about, for "what did that update do?".
     last_told: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
+    /// True while MAVIS is speaking, so "stop" knows what it means.
+    speaking: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Planner {
@@ -639,11 +805,18 @@ impl Planner {
             sentinel,
             awaiting: SharedAwaiting::default(),
             last_told: std::sync::Mutex::new(None),
+            speaking: None,
         }
     }
 
     /// Share the permission gate's "question open" state, so the answer
     /// to a confirmation isn't planned as well.
+    /// Share whether MAVIS is speaking.
+    pub fn with_speaking(mut self, speaking: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        self.speaking = Some(speaking);
+        self
+    }
+
     pub fn with_confirmations(mut self, awaiting: SharedAwaiting) -> Self {
         self.awaiting = awaiting;
         self
@@ -690,6 +863,11 @@ impl Planner {
             .and_then(|v| v.as_str())
             .or_else(|| event.payload.get("intent").and_then(|v| v.as_str()))
             .unwrap_or("unknown");
+        // "MAVIS, …" (or a mishearing of it) is who it's said to, not what.
+        let intent = match strip_address(intent) {
+            "" => intent,
+            rest => rest,
+        };
 
         let source = event
             .payload
@@ -718,6 +896,21 @@ impl Planner {
         // left is to drain anything queued behind it and say nothing.
         if is_stop_request(intent) {
             info!("Planner: stop request — going quiet");
+            // With MAVIS silent, "stop" means whatever is playing.
+            let speaking = self
+                .speaking
+                .as_ref()
+                .is_some_and(|s| s.load(std::sync::atomic::Ordering::SeqCst));
+            if !speaking {
+                info!("Planner: nothing of MAVIS's to stop — pausing media");
+                self.bus.publish(Event {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    source: "planner".to_string(),
+                    event_type: EventType::PlanReady,
+                    payload: serde_json::json!({ "plan": [{"type": "system", "op": "media_pause"}] }),
+                });
+            }
             self.bus.publish(Event {
                 id: uuid::Uuid::new_v4(),
                 timestamp: chrono::Utc::now(),
@@ -985,48 +1178,15 @@ impl Planner {
                 }));
             }
 
-            // Workspace-aware view: what's on the current workspace vs
-            // elsewhere. niri reports workspace_id per window, so this is
-            // read straight from the same data as the window list.
-            if !snapshot.open_windows.is_empty() {
-                let current_ws = snapshot.active_workspace;
-
-                let mut here: Vec<&str> = Vec::new();
-                let mut elsewhere: Vec<String> = Vec::new();
-                for w in &snapshot.open_windows {
-                    if w.app_name.is_empty() || w.app_name == "unknown" || w.is_focused {
-                        continue;
-                    }
-                    if w.workspace_id == current_ws {
-                        here.push(w.app_name.as_str());
-                    } else if let Some(ws) = w.workspace_id {
-                        elsewhere.push(format!("{} (workspace {})", w.app_name, ws));
-                    } else {
-                        elsewhere.push(w.app_name.clone());
-                    }
-                }
-                here.sort_unstable();
-                here.dedup();
-                elsewhere.sort();
-                elsewhere.dedup();
-
-                let mut parts = Vec::new();
-                if let Some(ws) = current_ws {
-                    parts.push(format!("The user is on workspace {}.", ws));
-                }
-                if !here.is_empty() {
-                    parts.push(format!(
-                        "Also open on this workspace: {}.",
-                        here.join(", ")
-                    ));
-                }
-                if !elsewhere.is_empty() {
-                    parts.push(format!("Open elsewhere: {}.", elsewhere.join(", ")));
-                }
-                if !parts.is_empty() {
+            if let Some(content) = describe_open_windows(&snapshot.open_windows, snapshot.active_workspace) {
+                items.push(serde_json::json!({ "source": "open_windows", "content": content }));
+            }
+            // The desktop names itself; nothing here assumes which one.
+            if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
+                if !desktop.trim().is_empty() {
                     items.push(serde_json::json!({
-                        "source": "open_windows",
-                        "content": parts.join(" "),
+                        "source": "desktop",
+                        "content": format!("The user's desktop (window manager) is {}.", desktop.trim()),
                     }));
                 }
             }
@@ -1497,7 +1657,7 @@ mod tests {
         let planner = Planner::new(
             bus,
             Arc::new(RwLock::new(WorkingMemory::new())),
-            vec![AppEntry { name: "Firefox".into(), exec: "firefox".into() }],
+            vec![AppEntry { name: "Firefox".into(), exec: "firefox".into(), opens_links: true }],
             Arc::new(Mutex::new(RecallStore::new(&dir.join("recall.db")).unwrap())),
             Arc::new(Mutex::new(LongTermMemory::new(&dir.join("long_term.db")).unwrap())),
             Arc::new(Mutex::new(EntityStore::new(&dir.join("entities.db")).unwrap())),
@@ -1623,6 +1783,124 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    fn window(app: &str, title: &str, ws: u64, focused: bool) -> WindowInfo {
+        WindowInfo {
+            app_name: app.into(),
+            window_title: title.into(),
+            pid: None,
+            workspace_id: Some(ws),
+            is_focused: focused,
+        }
+    }
+
+    fn test_apps() -> Vec<AppEntry> {
+        vec![
+            AppEntry { name: "Webby Browser".into(), exec: "webby --new".into(), opens_links: true },
+            AppEntry { name: "Notes".into(), exec: "notes".into(), opens_links: false },
+        ]
+    }
+
+    /// The model said "four" with five apps listed, and confused
+    /// workspaces. The counts are now worked out before it sees them.
+    #[test]
+    fn open_windows_are_counted_for_the_model() {
+        let windows = vec![
+            window("term", "cargo run", 1, true),
+            window("term", "htop", 1, false),
+            window("files", "Home", 1, false),
+            window("webby", "News", 2, false),
+            window("notes", "todo", 2, false),
+        ];
+        let line = describe_open_windows(&windows, Some(1)).unwrap();
+        assert!(line.starts_with("4 applications are open:"), "{}", line);
+        assert!(line.contains("term (2 windows, workspace 1)"), "{}", line);
+        assert!(line.contains("files (workspace 1)"), "{}", line);
+        assert!(line.contains("Windows are on 2 workspaces: 1 and 2."), "{}", line);
+        assert!(line.contains("The user is on workspace 1."), "{}", line);
+    }
+
+    #[test]
+    fn the_focused_window_is_described_without_knowing_the_app() {
+        let w = window("anything", "MAVIS_X=1 cargo run", 1, true);
+        assert_eq!(describe_active_window(&w), "The focused window is anything — \"cargo run\".");
+        let w = window("editor", "main.rs - mavis_core", 1, true);
+        assert!(describe_active_window(&w).ends_with("Its title names the file main.rs."));
+    }
+
+    #[test]
+    fn a_misheard_name_is_still_an_address() {
+        assert_eq!(strip_address("MOVIS, what changed recently?"), "what changed recently?");
+        assert_eq!(strip_address("Mavus. open notes"), "open notes");
+        // Not set off by punctuation, or not close enough: left alone.
+        assert_eq!(strip_address("movies tonight"), "movies tonight");
+        assert_eq!(strip_address("Magic, show me"), "Magic, show me");
+    }
+
+    #[test]
+    fn a_video_opens_in_the_app_asked_for() {
+        let apps = test_apps();
+        let plan = match_action_intent("Play Daylight by Maroon 5 on YouTube. Use Webby, thanks.", &apps).unwrap();
+        let launch = &plan[1];
+        assert_eq!(launch["target"], "webby");
+        assert_eq!(launch["args"][0], "--new");
+        assert_eq!(
+            launch["args"][1],
+            "https://www.youtube.com/results?search_query=daylight+by+maroon+5"
+        );
+
+        let plan = match_action_intent("play daylight in webby browser", &apps).unwrap();
+        assert_eq!(plan[1]["target"], "webby");
+
+        // Not an app that opens links, or not an app at all: part of the search.
+        let plan = match_action_intent("play songs with notes", &apps).unwrap();
+        assert!(plan[1]["target"].as_str().unwrap().ends_with("songs+with+notes"));
+        let plan = match_action_intent("play daylight", &apps).unwrap();
+        assert!(plan[1]["target"].as_str().unwrap().ends_with("=daylight"));
+    }
+
+    #[test]
+    fn two_requests_in_one_sentence_are_both_carried_out() {
+        let apps = test_apps();
+        let plan = match_action_intent("open webby and play daylight with maroon 5", &apps).unwrap();
+        assert_eq!(plan.as_array().unwrap().len(), 2, "one launch, with the video: {}", plan);
+        assert_eq!(plan[1]["target"], "webby");
+        assert!(plan[1]["args"][1].as_str().unwrap().contains("daylight+with+maroon+5"));
+
+        let plan = match_action_intent("volume up and next song", &apps).unwrap();
+        let ops: Vec<&str> = plan.as_array().unwrap().iter().filter_map(|a| a["op"].as_str()).collect();
+        assert_eq!(ops, ["volume_up", "media_next"]);
+
+        // "and" inside a title isn't two requests.
+        let plan = match_action_intent("play tom and jerry", &apps).unwrap();
+        assert!(plan[1]["target"].as_str().unwrap().ends_with("tom+and+jerry"));
+    }
+
+    #[test]
+    fn pause_and_resume_are_not_a_toggle() {
+        let op = |t: &str| match_system_intent(t).unwrap()[1]["op"].as_str().unwrap().to_string();
+        assert_eq!(op("pause"), "media_pause");
+        assert_eq!(op("stop the music"), "media_pause");
+        assert_eq!(op("resume"), "media_play");
+    }
+
+    #[tokio::test]
+    async fn stop_pauses_media_only_when_mavis_is_silent() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let (planner, mut rx, dir) = planner_with_pending_change("stop_media");
+        let speaking = Arc::new(AtomicBool::new(false));
+        let planner = planner.with_speaking(speaking.clone());
+
+        planner.handle_event(utterance("stop")).await.unwrap();
+        assert!(drain(&mut rx).iter().any(|e| e.payload.to_string().contains("media_pause")));
+
+        speaking.store(true, Ordering::SeqCst);
+        planner.handle_event(utterance("MAVIS, stop.")).await.unwrap();
+        let events = drain(&mut rx);
+        assert!(events.iter().any(|e| e.event_type == EventType::TtsInterrupt));
+        assert!(!events.iter().any(|e| e.payload.to_string().contains("media_pause")), "only MAVIS stops");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn earlier_turns_are_compressed_to_one_line() {
         let older: Vec<String> = ["my sister is visiting", "what's the weather", "book a table", "what's the weather"]
@@ -1691,7 +1969,11 @@ mod tests {
     async fn stop_is_never_answered_with_news() {
         let (planner, mut rx, dir) = planner_with_pending_change("stop");
         planner.handle_event(utterance("stop")).await.unwrap();
-        assert!(!drain(&mut rx).iter().any(|e| e.event_type == EventType::PlanReady));
+        // It may pause media, but it never says anything.
+        let said = drain(&mut rx)
+            .iter()
+            .any(|e| e.event_type == EventType::PlanReady && e.payload.to_string().contains("\"say\""));
+        assert!(!said);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
