@@ -45,6 +45,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 23. [Finishing Phase 8](#23-finishing-phase-8)
 24. [Everything up to Phase 8](#24-everything-up-to-phase-8)
 25. [Testing Phases 6–8 without hardware](#25-testing-phases-68-without-hardware)
+26. [The 2026-10-13 run](#26-the-2026-10-13-run)
 
 ---
 
@@ -90,6 +91,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 10-13 | 6–8 | First hardware run since Phase 6: apps launched by voice; stop, play-in-an-app, a misheard name and app counts fixed; app names removed from the code (§26) |
 | 10-09 | 6–8 | Phases 6–8 driven by typed commands in the sandbox: an installed app launched for the first time, confirmation ran end to end; quoted launchers, a request lost during a question, and a Sentinel sentence fixed (§25) |
 | 10-09 | — | `setup.sh` removed until MAVIS is ready for daily use; push to talk stays, set in `config/config.toml` (§24) |
 | 10-08 | 4–8 | Everything owed up to Phase 8: push to talk chosen at setup, tap the orb to confirm, older turns compressed into the prompt, two worker races fixed, dead code removed, SIGTERM saves memory. Embeddings, an LLM risk check and the learning engine stay out, by decision (§24) |
@@ -1356,6 +1358,85 @@ The audit log recorded `held_for_confirmation`, `confirmed` and `declined` in or
 
 ### Still needs your machine
 Hearing and speaking, barge-in, the orb, push to talk, window, clipboard and project context, the model's replies, recall across sessions, and consolidation across a day boundary.
+
+---
+
+## 26. The 2026-10-13 run
+
+*2026-10-13.* The first real session since Phase 6, about 25 minutes on niri. It's the first time any app launch has been seen on hardware: Firefox opened by voice, four times. Interrupting MAVIS mid-reply worked, and so did resuming after a false alarm. Replies took about 1 s. Four things you asked for did not work.
+
+### Problem · "Stop" didn't stop
+**Two causes.**
+- **The music wasn't MAVIS's.** "Stop" only ever silenced MAVIS's own voice, so with a YouTube video playing and MAVIS quiet, nothing happened. "Stop the music" was mapped to play/pause, a toggle, so said twice it started the music again.
+- **A short "stop" decodes with low confidence.** Below 0.55, MAVIS treated it as unclear, and during a reply it resumed the reply it was meant to end.
+
+**Fix:**
+- When MAVIS isn't speaking, "stop" pauses whatever is playing (`playerctl pause`). "Pause" pauses and "resume" plays; neither toggles.
+- A stop request is honoured at any confidence, since the most it can do is pause something.
+
+**Evidence:**
+- **Proven** by tests: media is paused when MAVIS is silent, and only MAVIS stops when it is speaking.
+- **Measured** in the sandbox: "stop", "pause" and "resume" produced `pause`, `pause` and `play`.
+- **Reasoned only:** that the low-confidence path is the one your run hit. That part of the log was lost.
+
+### Problem · "Play it on Firefox" played it in the default browser
+**Symptom:** "Play Daylight by Maroon 5 on YouTube. Use Firefox." opened Brave, searching for "daylight by maroon 5 on youtube. use firefox, hotrate". "Open Firefox and play Daylight" only opened Firefox.
+
+**Fix:**
+- A search now ends where its sentence ends.
+- "in / on / using / with <app>", or a following "Use <app>.", sends the link to that app.
+- "Open <app> and play X" opens X in that app.
+
+Which apps count is read from each app's own registration: a `.desktop` file that handles `http`/`https` links. No browser is named in the code, so an app that can't show a web page is never handed one ("play songs with notes" searches for all of it).
+
+**Evidence:** **Proven** by tests, and **measured** with a stand-in browser. All three phrasings launched it with the right URL.
+
+### Problem · Two requests in one sentence ran only the first
+**Fix:** an utterance with "and" is tried as two requests. It's only split if both halves are requests MAVIS handles itself, so "play tom and jerry" is still one search.
+**Evidence:** **Proven** by tests.
+
+### Problem · "What changed recently?" got an invented answer
+**Cause:** Whisper wrote the name as "MOVIS". The Sentinel's question matcher didn't recognise "movis" as the address, so the question went to the model, which made something up. The same happened to other commands.
+**Fix:**
+- A first word one letter away from "mavis", set off by a comma or full stop, counts as the address.
+- The address is now removed once, before any matching.
+- Whisper's vocabulary now includes the names of the apps installed on this machine, in place of a fixed list in the code.
+
+**Evidence:** **Proven** by tests, and **measured**: "MOVIS, what changed recently?" was answered from the Sentinel's store.
+**Underneath it:** the microphone. The worker warned 45 times that input was 2.3× full scale (§14), and confidence sat at 0.48–0.77. `wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35` is the suggested fix and should come first.
+
+### Problem · Wrong counts of apps and workspaces
+**Symptom:** with Thunar open alongside four other apps, "how many applications are open?" got "four". Workspace answers didn't match what niri showed.
+**Cause:**
+- The model was given a list and left to count it, and a small model miscounts.
+- The list also left out the focused app.
+- The workspace numbers were niri's internal `workspace_id`, not the numbers you see.
+
+**Fix:** the prompt now carries the counts, worked out in code: "5 applications are open: … Windows are on 2 workspaces: 1 and 2." Workspace ids are mapped to their displayed numbers through `niri msg --json workspaces`.
+**Evidence:** **Proven** by tests. Not yet checked against real niri output.
+
+### Decision · No app names in the code
+**Removed:**
+- Title rules for two particular editors.
+- A list of nine terminal apps.
+- A rule excluding two particular browsers.
+- Five app and desktop names in Whisper's prompt.
+
+**Now:**
+- Every window is described the same way: its app, its title with leading `VAR=value` assignments stripped, and the file the title names, if it names one.
+- What an app can do is read from how it registered itself.
+- The desktop's own name comes from `XDG_CURRENT_DESKTOP`.
+
+**Kept:** the compositor commands (`niri msg`, `swaymsg`, `hyprctl`). They're the interface to each desktop, not knowledge about apps.
+
+### Decision · The full prompt is logged only on request
+About 70 lines per turn made the log too long to paste. It's now logged only with `MAVIS_PROMPT_DEBUG=1`.
+
+### Still open from this run
+- "Can you repeat that?" is answered with a rephrasing, because a prompt rule forbids repeating.
+- There's no "close <app>".
+- Some replies are clipped to a word or two ("Terminal.").
+- "Open Mavis test" went to the model, which promised to do it. The same words work here, so the test app was probably not installed when MAVIS started. The start of the log would show it.
 
 ---
 

@@ -154,7 +154,8 @@ Some phrases are handled directly by the planner without an LLM round trip, so t
 | "play lofi hip hop" | Opens a YouTube search |
 | "google rust async traits" | Opens a web search |
 | "volume up", "louder", "mute" | Adjusts volume |
-| "pause", "next song" | Media control |
+| "pause", "resume", "next song" | Media control |
+| "play lofi in Firefox", "open Firefox and play lofi" | Opens the video in that app — any installed app that handles web links |
 | "brighter", "dim the screen" | Adjusts brightness |
 
 Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. Anything else goes to the local model with context attached.
@@ -165,7 +166,7 @@ An utterance that starts with an explicit action is never treated as system cont
 
 ### Interrupting
 
-MAVIS listens while it speaks. Start talking and it stops mid-sentence, then answers what you just said. Say "stop", "quiet" or "cancel" and it simply goes quiet.
+MAVIS listens while it speaks. Start talking and it stops mid-sentence, then answers what you just said. Say "stop", "quiet" or "cancel" and it simply goes quiet. When MAVIS isn't speaking, "stop" pauses whatever is playing instead.
 
 It measures how loud its own voice arrives at your microphone and only treats you as speaking when you're clearly louder, so it doesn't interrupt itself. The first three-quarters of a second of audible speech can't be interrupted — that's the part it spends measuring.
 
@@ -265,6 +266,7 @@ Current date and time is always injected — it isn't private, and without it th
 | `MAVIS_VAD_DEBUG` | off | Logs microphone level and the current start/end thresholds, every ~3 s |
 | `MAVIS_SPEECH_GATE` | on | `0` sends audio to Whisper even when no speech was detected in it — for diagnosing dropped speech only; it lets hallucinations back in |
 | `MAVIS_LISTEN_MODE` | from `config/config.toml`, else `always` | `push` listens only after a hotkey press or an orb tap |
+| `MAVIS_PROMPT_DEBUG` | off | `1` logs the whole prompt sent to the model on every turn |
 | `MAVIS_BARGE_IN` | on | `0` mutes the microphone while MAVIS speaks, so it can't be interrupted by voice |
 
 ## Troubleshooting

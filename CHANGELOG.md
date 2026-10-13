@@ -33,6 +33,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **"Stop" did nothing to music**, and a quiet "stop" was often discarded as unclear. It now pauses what's playing when MAVIS isn't speaking, and is always honoured.
+- **"Play X on YouTube in Firefox" ignored Firefox**, and the search swallowed the rest of the sentence. The video now opens in the app named, and the search ends with the sentence.
+- **"Open Firefox and play X" only opened Firefox.** Both requests run now.
+- **"MOVIS, what changed recently?"** — a misheard name made MAVIS miss the question.
+- **Wrong counts of open apps and workspaces.** MAVIS counts them itself now, and uses the workspace numbers the desktop shows.
 - **Apps whose launcher quotes a path or argument didn't start** — `Exec="/opt/My App/run"`, Wine and JetBrains launchers, and `open -a "Visual Studio Code"` were split at every space.
 - **A request made while MAVIS was asking "Shall I?" was lost** — it cancelled the question and then did nothing. It now cancels and still carries the request out.
 - **"…and postfix and removed debsecan"** — the Sentinel's sentences no longer run two "and"s together.
@@ -91,6 +96,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - Sentinel losing log entries written in the same second as its watermark.
 
 ### Removed
+- App names in the code: special handling for particular editors, terminals and browsers, and a fixed list of app names in the speech recogniser's vocabulary. Both now come from what's installed and what windows report.
 - `episodic.db` — written on every turn, never read. An existing `memory/episodic.db` can be deleted.
 - Unused platform traits for audio and screen capture.
 - `PermanentStore` and `SessionStore` — Phase 1 stubs nothing read.

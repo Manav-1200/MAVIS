@@ -386,8 +386,8 @@ Real bugs found through live voice testing on target hardware — not simulated,
 | Active window | :white_check_mark: | `niri msg --json windows`; falls back to sway/hyprland/xdotool |
 | Open windows + workspace | :white_check_mark: | Same niri call — the full list was already being fetched and discarded |
 | Clipboard | :white_check_mark: | `wl-paste` (Wayland) / `xclip` (X11), polled with the context snapshot |
-| IDE awareness | :white_check_mark: | Exact title match for Antigravity IDE and VS Code (code-oss), verified against real window titles; generic filename-in-title fallback for others |
-| Terminal awareness | :white_check_mark: | Terminal apps report the running command; leading `VAR=value` env assignments stripped so the command survives |
+| IDE awareness | :white_check_mark: | Any window whose title names a file is reported as naming it. *(The per-editor title rules were removed 2026-10-13: no app is known by name.)* |
+| Terminal awareness | :white_check_mark: | A terminal's title is its running command; leading `VAR=value` assignments are stripped from every title, so the command survives. *(No list of terminal apps since 2026-10-13.)* |
 | Workspace / Project | :white_check_mark: | Walks the focused window's `/proc` process tree for a cwd outside `$HOME`, then up to the nearest `.git`; reports repo name, path and branch |
 | Calendar / Time context | :warning: | Date/time always injected. Calendar reads Evolution's `~/.local/share/evolution/calendar/system/calendar.ics`. Parser verified against the real file format; the has-events path is **untested** — the local calendar is empty. Recurring events (`RRULE`) are skipped by design. |
 | Browser awareness | :x: | **Dropped.** Getting real tab URLs requires a browser extension + native messaging host. Decided against shipping a browser extension as part of MAVIS. The `mavis_core` receiving end (`BrowserUpdate` event, `/tmp/mavis_browser.sock` listener) is built and verified, so a future non-extension source could feed it. |
@@ -453,6 +453,18 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] Questions are no longer stored as memories
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
+
+### 6.7 — First hardware run since Phase 6 (2026-10-13)
+
+The first real session in two weeks. Launching apps worked on hardware for the first time; four things the user asked for did not. Details in [`DECISIONS.md` §26](DECISIONS.md#26-the-2026-10-13-run).
+
+- [x] **"Stop" pauses what's playing** when MAVIS isn't speaking, and is honoured even when Whisper is unsure of it. "Pause" and "resume" no longer toggle.
+- [x] **"Play X in <app>" / "Use <app>"** opens the video in that app, if it registers for web links. "Open <app> and play X" does the same. Searches stop at the end of the sentence.
+- [x] **Two requests in one sentence** both run ("volume up and next song").
+- [x] **A misheard name** ("MOVIS, what changed?") still counts as addressing MAVIS.
+- [x] **Open apps and workspaces are counted before the model sees them**, and workspaces are the numbers niri shows, not its internal ids.
+- [x] **No app names in the code.** Editors, terminals and browsers are no longer special-cased; Whisper's vocabulary is the apps installed on this machine.
+- [x] The worker's full prompt is logged only with `MAVIS_PROMPT_DEBUG=1`.
 
 ### 6.6 — Barge-in, second pass (2026-09-27)
 
@@ -926,4 +938,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-10-09*
+*Last updated: 2026-10-13*
