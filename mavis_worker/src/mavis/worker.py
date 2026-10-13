@@ -287,6 +287,7 @@ class WorkerServer:
                     audio_bytes,
                     sample_rate=16000,
                     bypass_confidence=active_listen,
+                    hints=str(payload.get("hints") or ""),
                 ),
             )
             shown = text if len(text) <= 80 else text[:80] + "..."
