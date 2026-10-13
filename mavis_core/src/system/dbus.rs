@@ -56,6 +56,8 @@ impl DbusIntegration {
                 self.send_notification(title, message).await
             }
             "media_play_pause" => self.media_control("play-pause").await,
+            "media_pause" => self.media_control("pause").await,
+            "media_play" => self.media_control("play").await,
             "media_next" => self.media_control("next").await,
             "media_previous" => self.media_control("previous").await,
             "brightness_up" => self.brightness_control("up").await,
