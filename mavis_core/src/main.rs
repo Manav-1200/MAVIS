@@ -118,6 +118,8 @@ async fn main() -> Result<()> {
     // Planner
     let bus_for_planner = Arc::clone(&bus);
     let installed_apps = platform.installed_apps();
+    // The names of this machine's apps, so Whisper expects them.
+    let stt_hints = speech_hints(&installed_apps);
     // The planner's own sentinel.db connection, only when the Sentinel is on.
     let sentinel_for_planner = if sentinel::enabled() {
         match sentinel::store::SentinelStore::new(&data_dir.join("sentinel.db")) {
@@ -135,6 +137,7 @@ async fn main() -> Result<()> {
     let awaiting = safety::SharedAwaiting::default();
     let awaiting_for_planner = awaiting.clone();
     let awaiting_for_router = awaiting.clone();
+    let tts_active_for_planner = tts_active.clone();
     let planner_handle = supervise("Planner", Arc::clone(&bus), move || {
         let mut planner = planner::Planner::new(
             Arc::clone(&bus_for_planner),
@@ -145,7 +148,8 @@ async fn main() -> Result<()> {
             entities_for_planner.clone(),
             sentinel_for_planner.clone(),
         )
-        .with_confirmations(awaiting_for_planner.clone());
+        .with_confirmations(awaiting_for_planner.clone())
+        .with_speaking(tts_active_for_planner.clone());
         async move {
             planner.run().await;
         }
@@ -423,6 +427,7 @@ async fn main() -> Result<()> {
                     "request_type": "stt",
                     "audio": audio_b64,
                     "active_listen": active_listen,
+                    "hints": stt_hints,
                 }
             });
             let req_str = request.to_string();
@@ -507,6 +512,10 @@ async fn main() -> Result<()> {
             };
 
             if let Some((text, confidence)) = response_text {
+                // A short "stop" decodes with low confidence, and lost the
+                // reply it was meant to end. It's honoured anyway: the worst
+                // it can do is pause something.
+                let unclear = confidence < UNCLEAR_CONFIDENCE && !planner::is_stop_request(&text);
                 if text.is_empty() && paused_playback {
                     resume("nothing but noise");
                 } else if text.is_empty() {
@@ -518,12 +527,12 @@ async fn main() -> Result<()> {
                         event_type: EventType::UiStateChange,
                         payload: serde_json::json!({ "state": "idle" }),
                     });
-                } else if confidence < UNCLEAR_CONFIDENCE && paused_playback {
+                } else if unclear && paused_playback {
                     // Don't talk over a paused reply to say you didn't hear
                     // something — just carry on with it.
                     info!("STT: unclear during playback ({:.2}): {}", confidence, text);
                     resume("unclear");
-                } else if confidence < UNCLEAR_CONFIDENCE {
+                } else if unclear {
                     // Heard something, but not well enough to act on it.
                     // Answering a mangled transcript is worse than saying
                     // so: in the 2026-09-26 run "I'm working on it right
@@ -923,4 +932,23 @@ async fn wait_for_shutdown() {
     }
     let _ = tokio::signal::ctrl_c().await;
     info!("Shutdown signal received.");
+}
+
+/// Installed app names for the speech recogniser's vocabulary, kept short:
+/// Whisper only reads so much of its prompt.
+fn speech_hints(apps: &[context_snapshot::AppEntry]) -> String {
+    let mut names: Vec<&str> = apps.iter().map(|a| a.name.as_str()).collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut out = String::new();
+    for name in names {
+        if out.len() + name.len() + 2 > 300 {
+            break;
+        }
+        if !out.is_empty() {
+            out.push_str(", ");
+        }
+        out.push_str(name);
+    }
+    out
 }
