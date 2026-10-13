@@ -1,3 +1,4 @@
+# mavis_worker/src/mavis/stt/engine.py
 """
 MAVIS STT Engine — wraps faster-whisper for local speech-to-text.
 Lazy-loads the model and supports idle unload to reclaim VRAM.
@@ -132,6 +133,7 @@ class STTEngine:
         audio_bytes: bytes,
         sample_rate: int = 16000,
         bypass_confidence: bool = False,
+        hints: str = "",
     ) -> tuple[str, float]:
         """
         Transcribe raw PCM audio (float32, mono, 16 kHz).
@@ -140,6 +142,7 @@ class STTEngine:
             audio_bytes: Raw float32 little-endian PCM.
             sample_rate: Expected sample rate (must match audio data).
             bypass_confidence: If True, skip the confidence gate (active listen).
+            hints: Names on this machine (its apps), so Whisper expects them.
 
         Returns:
             (text, confidence). Text is empty when there was no speech, or
@@ -230,11 +233,11 @@ class STTEngine:
             # talking to a desktop assistant. This is not a filter: it tells
             # Whisper which rare words exist, so a weak signal resolves to
             # "clipboard" rather than "clayboard", and "MAVIS" rather than
-            # "Ladies" or "Clayport".
+            # "Ladies". App names come from this machine, not from here.
             initial_prompt=(
-                "MAVIS. clipboard, workspace, terminal, window, desktop "
-                "environment, application, browser, Firefox, Brave, GNOME, "
-                "niri, project, repository, volume, brightness."
+                "MAVIS. clipboard, workspace, terminal, window, desktop, "
+                "application, browser, project, repository, volume, brightness."
+                + (f" {hints}." if hints else "")
             ),
         )
 
