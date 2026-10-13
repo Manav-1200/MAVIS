@@ -1,4 +1,6 @@
+# mavis_worker/src/mavis/inference/engine.py
 import gc
+import os
 import re
 import subprocess
 import time
@@ -301,7 +303,9 @@ class LlamaEngine:
 
         manual_prompt = self._format_chat_prompt(messages)
         if manual_prompt is not None:
-            print(f"[engine] Prompt ({self._model_name_hint}):\n{manual_prompt}\n")
+            # The whole prompt is ~70 lines a turn; only when asked for.
+            if os.environ.get("MAVIS_PROMPT_DEBUG") == "1":
+                print(f"[engine] Prompt ({self._model_name_hint}):\n{manual_prompt}\n")
             chunks = self._llm(
                 prompt=manual_prompt,
                 max_tokens=max_tokens,
