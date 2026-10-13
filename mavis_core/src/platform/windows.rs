@@ -103,6 +103,7 @@ fn collect_shortcuts(dir: &std::path::Path, out: &mut Vec<AppEntry>, depth: u8) 
         out.push(AppEntry {
             name,
             exec: format!("cmd /c start \"\" \"{}\"", path.to_string_lossy()),
+            opens_links: false,
         });
     }
 }
