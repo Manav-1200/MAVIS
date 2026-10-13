@@ -31,6 +31,10 @@ pub struct AppEntry {
     pub name: String,
     /// Command line to launch it, binary first then any fixed args.
     pub exec: String,
+    /// It registers itself for web links, so "play X in <it>" can hand it
+    /// the URL. Read from the app's own registration, never from its name.
+    #[serde(default)]
+    pub opens_links: bool,
 }
 
 /// Next upcoming calendar event, read from Evolution's local .ics.
