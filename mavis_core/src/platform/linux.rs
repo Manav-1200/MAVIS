@@ -176,11 +176,15 @@ impl LinuxWindowTracker {
     /// Same niri call as above, but keeps every window instead of only the
     /// focused one — niri already returns the full list (with workspace and
     /// focus flags), we were discarding it.
-    fn parse_niri_all_windows(json: &str) -> Option<Vec<WindowInfo>> {
+    fn parse_niri_all_windows(json: &str, workspaces: Option<&str>) -> Option<Vec<WindowInfo>> {
         let v: Value = serde_json::from_str(json).ok()?;
         let wins = v.as_array()?;
+        // niri's workspace_id is an internal id; the number the user sees
+        // is the workspace's idx.
+        let shown = Self::niri_workspace_numbers(workspaces.unwrap_or("[]"));
         let mut out = Vec::new();
         for w in wins {
+            let id = w.get("workspace_id").and_then(|x| x.as_u64());
             out.push(WindowInfo {
                 app_name: w
                     .get("app_id")
@@ -189,11 +193,23 @@ impl LinuxWindowTracker {
                     .to_string(),
                 window_title: w.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string(),
                 pid: w.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32),
-                workspace_id: w.get("workspace_id").and_then(|x| x.as_u64()),
+                workspace_id: id.map(|id| shown.get(&id).copied().unwrap_or(id)),
                 is_focused: w.get("is_focused").and_then(|x| x.as_bool()).unwrap_or(false),
             });
         }
         Some(out)
+    }
+
+    /// `niri msg --json workspaces` → internal id to the number shown.
+    fn niri_workspace_numbers(json: &str) -> std::collections::HashMap<u64, u64> {
+        let v: Value = serde_json::from_str(json).unwrap_or(Value::Null);
+        v.as_array()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|w| Some((w.get("id")?.as_u64()?, w.get("idx")?.as_u64()?)))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn parse_sway_tree(json: &str) -> Option<(String, String, u32)> {
@@ -256,7 +272,8 @@ impl WindowTracker for LinuxWindowTracker {
     fn open_windows(&self) -> Result<Vec<WindowInfo>, PlatformError> {
         if self.compositor == Compositor::Niri {
             if let Some(json) = Self::run_cmd(&["niri", "msg", "--json", "windows"]) {
-                if let Some(list) = Self::parse_niri_all_windows(&json) {
+                let workspaces = Self::run_cmd(&["niri", "msg", "--json", "workspaces"]);
+                if let Some(list) = Self::parse_niri_all_windows(&json, workspaces.as_deref()) {
                     if !list.is_empty() {
                         return Ok(list);
                     }
@@ -491,6 +508,7 @@ fn strip_field_codes(exec: &str) -> String {
 fn parse_desktop_file(content: &str) -> Option<AppEntry> {
     let mut name: Option<String> = None;
     let mut exec: Option<String> = None;
+    let mut opens_links = false;
     let mut in_entry = false;
 
     for line in content.lines() {
@@ -510,6 +528,8 @@ fn parse_desktop_file(content: &str) -> Option<AppEntry> {
             if exec.is_none() {
                 exec = Some(v.to_string());
             }
+        } else if let Some(v) = line.strip_prefix("MimeType=") {
+            opens_links = v.split(';').any(|m| m == "x-scheme-handler/http" || m == "x-scheme-handler/https");
         } else if let Some(v) = line.strip_prefix("NoDisplay=") {
             if v.eq_ignore_ascii_case("true") {
                 return None;
@@ -529,6 +549,7 @@ fn parse_desktop_file(content: &str) -> Option<AppEntry> {
         (Some(n), Some(e)) if !n.is_empty() && !e.is_empty() => Some(AppEntry {
             name: n,
             exec: strip_field_codes(&e),
+            opens_links,
         }),
         _ => None,
     }
@@ -603,4 +624,30 @@ fn scan_linux_apps() -> Vec<AppEntry> {
         dirs.len()
     );
     apps
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspaces_are_numbered_as_the_user_sees_them() {
+        let windows = r#"[{"app_id":"a","title":"x","pid":1,"workspace_id":7,"is_focused":true},
+                          {"app_id":"b","title":"y","pid":2,"workspace_id":9,"is_focused":false}]"#;
+        let workspaces = r#"[{"id":7,"idx":1},{"id":9,"idx":2}]"#;
+        let list = LinuxWindowTracker::parse_niri_all_windows(windows, Some(workspaces)).unwrap();
+        assert_eq!(list[0].workspace_id, Some(1));
+        assert_eq!(list[1].workspace_id, Some(2));
+        // Without the workspace list, the id is still better than nothing.
+        let list = LinuxWindowTracker::parse_niri_all_windows(windows, None).unwrap();
+        assert_eq!(list[1].workspace_id, Some(9));
+    }
+
+    #[test]
+    fn apps_that_handle_web_links_are_marked() {
+        let browser = "[Desktop Entry]\nType=Application\nName=Some Browser\nExec=sb %u\nMimeType=text/html;x-scheme-handler/https;\n";
+        let viewer = "[Desktop Entry]\nType=Application\nName=Viewer\nExec=viewer %f\nMimeType=image/png;\n";
+        assert!(parse_desktop_file(browser).unwrap().opens_links);
+        assert!(!parse_desktop_file(viewer).unwrap().opens_links);
+    }
 }
