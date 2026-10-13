@@ -75,6 +75,7 @@ fn scan_macos_apps() -> Vec<AppEntry> {
                 apps.push(AppEntry {
                     name: name.to_string(),
                     exec: format!("open -a \"{}\"", name),
+                    opens_links: false,
                 });
             }
         }
