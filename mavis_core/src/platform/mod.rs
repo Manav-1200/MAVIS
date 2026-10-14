@@ -28,6 +28,11 @@ pub trait WindowTracker {
     fn current_project(&self, _pid: u32) -> Option<ProjectInfo> {
         None
     }
+    /// Close one window, the way its close button would: the app can still
+    /// ask about unsaved work. Default: not supported.
+    fn close_window(&self, _id: u64) -> Result<(), PlatformError> {
+        Err(PlatformError("closing windows isn't supported on this desktop yet".into()))
+    }
 }
 
 pub trait ClipboardReader {
