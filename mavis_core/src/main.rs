@@ -170,13 +170,15 @@ async fn main() -> Result<()> {
     // Executor
     let bus_for_exec = Arc::clone(&bus);
     let tts_active_for_exec = tts_active.clone();
+    let platform_for_exec = Arc::clone(&platform);
     let backup_root = data_dir.join(".mavis-backup");
     let exec_handle = supervise("Executor", Arc::clone(&bus), move || {
         let mut executor = executor::Executor::new(
             Arc::clone(&bus_for_exec),
             tts_active_for_exec.clone(),
             backup_root.clone(),
-        );
+        )
+        .with_platform(Arc::clone(&platform_for_exec));
         async move {
             executor.run().await;
         }
@@ -679,6 +681,7 @@ async fn main() -> Result<()> {
                                 pid: Some(pid),
                                 workspace_id: None,
                                 is_focused: true,
+                                id: None,
                             };
                             if is_own_window(&w) {
                                 own_focused = true;
