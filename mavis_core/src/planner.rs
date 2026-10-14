@@ -621,6 +621,77 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
     None
 }
 
+/// What "close <app>" turned out to mean.
+#[derive(Debug, PartialEq)]
+enum Close {
+    /// Open windows of the app, by the compositor's ids.
+    Windows { app: String, ids: Vec<u64> },
+    /// Installed, but nothing of it is open.
+    NotOpen(String),
+    /// It's open, but this desktop gives no way to close it.
+    Unsupported,
+}
+
+/// "close firefox", "quit the file manager": matched against the windows
+/// actually open, so "how do I close a tab" names nothing and goes to the
+/// model. Apps are matched by what their windows report, never by name lists.
+fn close_request(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Option<Close> {
+    let t = normalize(text);
+    let target = ["close ", "quit ", "exit "].iter().find_map(|verb| {
+        let at = find_verb(&t, verb)?;
+        Some(t[at + verb.len()..].to_string())
+    })?;
+    let mut target = target.trim();
+    for lead in ["the ", "all ", "my "] {
+        target = target.strip_prefix(lead).unwrap_or(target);
+    }
+    for tail in [" for me", " please", " windows", " window", " app"] {
+        target = target.strip_suffix(tail).unwrap_or(target);
+    }
+    if target.is_empty() {
+        return None;
+    }
+
+    // The installed app the words name, if any, also tells us its binary.
+    let app = find_app(target, apps);
+    let binary = app.and_then(|a| {
+        let bin = crate::util::split_command_line(&a.exec).into_iter().next()?;
+        Some(bin.rsplit('/').next().unwrap_or(&bin).to_lowercase())
+    });
+
+    let matching: Vec<&WindowInfo> = windows
+        .iter()
+        .filter(|w| {
+            let words = window_app_words(&w.app_name);
+            words == target
+                || words.starts_with(&format!("{} ", target))
+                || binary.as_deref().is_some_and(|b| normalize(b) == words || b == w.app_name.to_lowercase())
+                || app.is_some_and(|a| normalize(&a.name) == words)
+        })
+        .collect();
+
+    let name = app.map(|a| a.name.clone()).unwrap_or_else(|| target.to_string());
+    if matching.is_empty() {
+        return app.map(|a| Close::NotOpen(a.name.clone()));
+    }
+    let ids: Vec<u64> = matching.iter().filter_map(|w| w.id).collect();
+    if ids.len() < matching.len() {
+        return Some(Close::Unsupported);
+    }
+    Some(Close::Windows { app: name, ids })
+}
+
+/// "org.gnome.Nautilus" → "nautilus", "brave-browser" → "brave browser".
+fn window_app_words(app_id: &str) -> String {
+    let last = app_id.rsplit('.').next().unwrap_or(app_id);
+    let spaced: String = last
+        .to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect();
+    spaced.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// The installed app an "open <app>" clause names.
 fn opened_app<'a>(clause: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
     ["open ", "launch ", "start ", "run "].iter().find_map(|verb| {
@@ -885,8 +956,16 @@ impl Planner {
         // it as well made MAVIS reply to "yes" as if it were a question.
         // A request of its own ("play lofi hip hop") still cancels the
         // question, but is carried out rather than lost.
+        let close = {
+            let wm = self.working.read().await;
+            close_request(intent, &wm.open_windows, &self.apps)
+        };
         let answering = self.awaiting.lock().unwrap_or_else(|p| p.into_inner()).claims(event.id);
-        if answering && !is_undo_request(intent) && match_action_intent(intent, &self.apps).is_none() {
+        if answering
+            && !is_undo_request(intent)
+            && close.is_none()
+            && match_action_intent(intent, &self.apps).is_none()
+        {
             info!("Planner: that answers a confirmation — left to the permission gate");
             return Ok(());
         }
@@ -956,6 +1035,31 @@ impl Planner {
                 }),
             };
             self.bus.publish(plan_event);
+            return Ok(());
+        }
+
+        if let Some(close) = close {
+            let plan = match close {
+                Close::Windows { app, ids } => {
+                    info!("Planner: close request — {} ({} window(s))", app, ids.len());
+                    serde_json::json!([
+                        {"type": "close", "app": app, "windows": ids},
+                        {"type": "say", "text": format!("Closed {}.", app)},
+                    ])
+                }
+                Close::NotOpen(app) => serde_json::json!({"type": "say", "text": format!("{} isn't open.", app)}),
+                Close::Unsupported => serde_json::json!({
+                    "type": "say",
+                    "text": "I can't close windows on this desktop yet."
+                }),
+            };
+            self.bus.publish(Event {
+                id: uuid::Uuid::new_v4(),
+                timestamp: chrono::Utc::now(),
+                source: "planner".to_string(),
+                event_type: EventType::PlanReady,
+                payload: serde_json::json!({ "plan": plan }),
+            });
             return Ok(());
         }
 
@@ -1790,6 +1894,7 @@ mod tests {
             pid: None,
             workspace_id: Some(ws),
             is_focused: focused,
+            id: Some(ws * 100 + app.len() as u64),
         }
     }
 
@@ -1899,6 +2004,45 @@ mod tests {
         assert!(events.iter().any(|e| e.event_type == EventType::TtsInterrupt));
         assert!(!events.iter().any(|e| e.payload.to_string().contains("media_pause")), "only MAVIS stops");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn close_names_the_windows_actually_open() {
+        let apps = vec![
+            AppEntry { name: "Files".into(), exec: "nautilus --new-window".into(), opens_links: false },
+            AppEntry { name: "Brave Web Browser".into(), exec: "/usr/bin/brave".into(), opens_links: true },
+            AppEntry { name: "Notes".into(), exec: "notes".into(), opens_links: false },
+        ];
+        let mut a = window("brave-browser", "News", 1, false);
+        a.id = Some(11);
+        let mut b = window("brave-browser", "Mail", 2, false);
+        b.id = Some(12);
+        let mut c = window("org.gnome.Nautilus", "Home", 1, true);
+        c.id = Some(13);
+        let open = vec![a, b, c];
+
+        let close = |t: &str| close_request(t, &open, &apps);
+        assert_eq!(close("close brave"), Some(Close::Windows { app: "Brave Web Browser".into(), ids: vec![11, 12] }));
+        assert_eq!(close("can you quit the files app"), Some(Close::Windows { app: "Files".into(), ids: vec![13] }));
+        assert_eq!(close("close notes"), Some(Close::NotOpen("Notes".into())));
+        assert_eq!(close("how do I close a tab"), None);
+        assert_eq!(close("open brave"), None);
+
+        // A desktop that gives no window ids can't close anything.
+        let mut no_id = open.clone();
+        no_id[2].id = None;
+        assert_eq!(close_request("close files", &no_id, &apps), Some(Close::Unsupported));
+    }
+
+    #[tokio::test]
+    async fn closing_an_app_is_asked_about_first() {
+        let plan = serde_json::json!([
+            {"type": "close", "app": "Brave Web Browser", "windows": [11, 12]},
+            {"type": "say", "text": "Closed Brave Web Browser."},
+        ]);
+        let a = crate::safety::risk::assess_plan(&plan);
+        assert_eq!(a.verdict, crate::safety::risk::Verdict::Confirm);
+        assert_eq!(a.what, "close Brave Web Browser");
     }
 
     #[test]
