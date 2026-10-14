@@ -465,6 +465,7 @@ The first real session in two weeks. Launching apps worked on hardware for the f
 - [x] **Open apps and workspaces are counted before the model sees them**, and workspaces are the numbers niri shows, not its internal ids.
 - [x] **No app names in the code.** Editors, terminals and browsers are no longer special-cased; Whisper's vocabulary is the apps installed on this machine.
 - [x] The worker's full prompt is logged only with `MAVIS_PROMPT_DEBUG=1`.
+- [x] **"Close <app>"** *(2026-10-14)* — closes that app's open windows, as their close button would, after "Shall I close …? It may lose anything unsaved." Matched against the windows actually open. niri only for now: it's the one desktop that reports window ids.
 
 ### 6.6 — Barge-in, second pass (2026-09-27)
 
@@ -587,7 +588,7 @@ Everything above compiles and its logic is unit-verified, but none of it has run
 
 ## Phase 8 — Safety & Permission System
 
-**Status:** :white_check_mark: Built (2026-09-17 — 2026-10-07), except per-skill permissions, which wait on Phase 9. **The confirmation flow cannot be reached by voice yet** — the planner only produces actions that score 0–2 — so it is proven on the event bus, not heard. Rationale in [`DECISIONS.md` §8](DECISIONS.md#8-safety--permissions--phase-8) and [§23](DECISIONS.md#23-finishing-phase-8).
+**Status:** :white_check_mark: Built (2026-09-17 — 2026-10-07), except per-skill permissions, which wait on Phase 9. **The confirmation flow is reachable by voice since 2026-10-14**, through "close <app>" (risk 3); until then the planner only produced actions scoring 0–2, so it was proven on the event bus but never heard. Rationale in [`DECISIONS.md` §8](DECISIONS.md#8-safety--permissions--phase-8) and [§23](DECISIONS.md#23-finishing-phase-8).
 
 **Goal:** Local-first does not mean reckless. Every capability is gated.
 
@@ -655,7 +656,7 @@ All three recorded here on 2026-09-18 were closed on 2026-10-07, with a fourth f
 - ~~A second held plan silently replaces the first~~ — audited as `superseded`.
 - ~~A plan wrapped as `{"actions": [...]}` turned a refusal into a question~~ — found and fixed 2026-10-07.
 
-**What remains:** the flow has never run from a real voice command, because nothing reachable by voice needs confirming. Phase 9's skills will be the first.
+**What remains:** hearing it on hardware. "Close <app>" (2026-10-14) is the first voice command that asks; Phase 9's skills will add more.
 
 ---
 
@@ -938,4 +939,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-10-13*
+*Last updated: 2026-10-14*

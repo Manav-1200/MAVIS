@@ -155,6 +155,7 @@ Some phrases are handled directly by the planner without an LLM round trip, so t
 | "google rust async traits" | Opens a web search |
 | "volume up", "louder", "mute" | Adjusts volume |
 | "pause", "resume", "next song" | Media control |
+| "close Firefox", "quit the file manager" | Asks first, then closes that app's windows (niri for now) |
 | "play lofi in Firefox", "open Firefox and play lofi" | Opens the video in that app — any installed app that handles web links |
 | "brighter", "dim the screen" | Adjusts brightness |
 
@@ -190,7 +191,7 @@ Every plan is scored for risk before anything runs:
 | Risk | What happens |
 |------|--------------|
 | 0–2 | Runs silently — speaking, notifications, volume, launching an app |
-| 3–7 | "Shall I run …?" — reads out the command and waits up to 20 seconds for a clear yes, or a tap on the orb |
+| 3–7 | "Shall I run …?" or "Shall I close …?" — reads out what it would do and waits up to 20 seconds for a clear yes, or a tap on the orb |
 | 8+ | Requires you to say "yes, administrator" — a tap is not enough |
 | Irreversible | Refused, whatever you say |
 

@@ -14,6 +14,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 192 commits since `v0.3.0-ai-worker`, covering Phases 4 through 8.5.
 
 ### Added
+- **"Close <app>"** — closes that app's open windows after asking first, since unsaved work could go with them. The first voice command that reaches "Shall I…?". niri only for now.
 - **Push to talk** — set `listen_mode = "push"` in `config/config.toml` to have MAVIS listen only after you ask. In push-to-talk mode, press your hotkey (`toggle_listen.sh`) or tap the orb, then speak; it hears one sentence and stops. Always listening stays the default. `MAVIS_LISTEN_MODE` overrides it.
 - **Tap the orb to confirm** — a quick tap answers "Shall I run …?" with yes. Administrator actions still need the words.
 - **Longer conversations hold together** — what you said before the last dozen turns reaches the model as one short line, instead of being forgotten.

@@ -91,6 +91,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 10-14 | 8 | "Close <app>": the first voice command that asks "Shall I…?" (§26) |
 | 10-13 | 6–8 | First hardware run since Phase 6: apps launched by voice; stop, play-in-an-app, a misheard name and app counts fixed; app names removed from the code (§26) |
 | 10-09 | 6–8 | Phases 6–8 driven by typed commands in the sandbox: an installed app launched for the first time, confirmation ran end to end; quoted launchers, a request lost during a question, and a Sentinel sentence fixed (§25) |
 | 10-09 | — | `setup.sh` removed until MAVIS is ready for daily use; push to talk stays, set in `config/config.toml` (§24) |
@@ -1432,9 +1433,23 @@ Which apps count is read from each app's own registration: a `.desktop` file tha
 ### Decision · The full prompt is logged only on request
 About 70 lines per turn made the log too long to paste. It's now logged only with `MAVIS_PROMPT_DEBUG=1`.
 
+### Decision · "Close <app>" asks first
+**Why now:** last run's "close Firefox" got "Cannot close Firefox." It's also the first thing reachable by voice that should be confirmed, so the flow from §23 can finally be heard rather than only tested.
+**How:**
+- The words are matched against the windows actually open, using each window's own app id (`brave-browser`, `org.gnome.Nautilus`). The matching works through the binary of the installed app the words name, so "close files" finds Nautilus.
+- Nothing is matched by a list of names. "How do I close a tab" names no open window, so it goes to the model.
+- An installed app with no windows gets "Firefox isn't open."
+
+**Risk 3:** "Shall I close Firefox? It may lose anything unsaved." Closing works like the window's close button, so an app that asks about unsaved work still asks.
+**niri only:** it's the one desktop here that reports window ids. Elsewhere MAVIS says it can't close windows on this desktop yet, rather than guessing.
+**Evidence:** **Proven** by tests, and **measured** against a stand-in `niri`:
+- "close webby", "yes" → `niri msg action close-window --id 5`, then "Closed Webby."
+- "close webby", "no" → "Cancelled."
+
+Not yet heard on hardware.
+
 ### Still open from this run
 - "Can you repeat that?" is answered with a rephrasing, because a prompt rule forbids repeating.
-- There's no "close <app>".
 - Some replies are clipped to a word or two ("Terminal.").
 - "Open Mavis test" went to the model, which promised to do it. The same words work here, so the test app was probably not installed when MAVIS started. The start of the log would show it.
 
