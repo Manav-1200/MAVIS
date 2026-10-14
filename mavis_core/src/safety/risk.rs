@@ -148,6 +148,18 @@ pub fn assess(action: &serde_json::Value) -> Assessment {
 
         "app" => assess_app(action),
 
+        // Like pressing the close button, but by voice it's easy to name
+        // the wrong app, and unsaved work goes with it.
+        "close" => Assessment {
+            score: 3,
+            verdict: Verdict::Confirm,
+            reason: "may lose anything unsaved".into(),
+            what: format!(
+                "close {}",
+                action.get("app").and_then(|v| v.as_str()).unwrap_or("that app")
+            ),
+        },
+
         "shell" => assess_shell(
             action.get("command").and_then(|v| v.as_str()).unwrap_or(""),
         ),
