@@ -30,6 +30,8 @@ pub struct Executor {
     bus: Arc<EventBus>,
     tts_queue: TtsQueue,
     rollback: Rollback,
+    /// The desktop, for closing windows.
+    platform: Option<Arc<Box<dyn crate::platform::PlatformProvider>>>,
 }
 
 impl Executor {
@@ -40,7 +42,12 @@ impl Executor {
         let rollback = Rollback::new(backup_root);
         // Copies left by an earlier run are past their window by now.
         rollback.prune();
-        Self { bus, tts_queue, rollback }
+        Self { bus, tts_queue, rollback, platform: None }
+    }
+
+    pub fn with_platform(mut self, platform: Arc<Box<dyn crate::platform::PlatformProvider>>) -> Self {
+        self.platform = Some(platform);
+        self
     }
 
     pub async fn run(&mut self) {
@@ -197,6 +204,14 @@ impl Executor {
                     .unwrap_or_default();
                 self.run_app(target, args).await
             }
+            "close" => {
+                let ids: Vec<u64> = action
+                    .get("windows")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|v| v.as_u64()).collect())
+                    .unwrap_or_default();
+                self.close_windows(ids).await
+            }
             "notify" => {
                 let title = action.get("title").and_then(|v| v.as_str()).unwrap_or("MAVIS");
                 let message = action.get("message").and_then(|v| v.as_str()).unwrap_or("");
@@ -226,6 +241,19 @@ impl Executor {
                 Err(anyhow::anyhow!("unknown action type: {}", other))
             }
         }
+    }
+
+    async fn close_windows(&self, ids: Vec<u64>) -> Result<String> {
+        let platform = self.platform.clone().ok_or_else(|| anyhow::anyhow!("no desktop to close windows on"))?;
+        let count = ids.len();
+        tokio::task::spawn_blocking(move || {
+            let tracker = platform.windows().ok_or_else(|| anyhow::anyhow!("window tracking is off"))?;
+            for id in ids {
+                tracker.close_window(id).map_err(|e| anyhow::anyhow!("{}", e))?;
+            }
+            Ok(format!("closed {} window(s)", count))
+        })
+        .await?
     }
 
     async fn run_shell(&self, command: &str) -> Result<String> {
