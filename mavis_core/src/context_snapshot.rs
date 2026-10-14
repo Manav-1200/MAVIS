@@ -11,6 +11,10 @@ pub struct WindowInfo {
     pub workspace_id: Option<u64>,
     #[serde(default)]
     pub is_focused: bool,
+    /// The compositor's id for this window, where it reports one — what
+    /// "close <app>" acts on.
+    #[serde(default)]
+    pub id: Option<u64>,
 }
 
 /// Project the user appears to be working in, resolved from the focused
