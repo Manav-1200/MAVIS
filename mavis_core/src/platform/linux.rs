@@ -195,6 +195,7 @@ impl LinuxWindowTracker {
                 pid: w.get("pid").and_then(|p| p.as_u64()).map(|p| p as u32),
                 workspace_id: id.map(|id| shown.get(&id).copied().unwrap_or(id)),
                 is_focused: w.get("is_focused").and_then(|x| x.as_bool()).unwrap_or(false),
+                id: w.get("id").and_then(|x| x.as_u64()),
             });
         }
         Some(out)
@@ -293,8 +294,29 @@ impl WindowTracker for LinuxWindowTracker {
                 pid: Some(pid),
                 workspace_id: None,
                 is_focused: true,
+                id: None,
             }]
         })
+    }
+
+    fn close_window(&self, id: u64) -> Result<(), PlatformError> {
+        match self.compositor {
+            Compositor::Niri => {
+                let id = id.to_string();
+                let ok = Command::new("niri")
+                    .args(["msg", "action", "close-window", "--id", &id])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                if ok {
+                    Ok(())
+                } else {
+                    Err(PlatformError(format!("niri could not close window {}", id)))
+                }
+            }
+            // Only niri reports every window with an id so far.
+            _ => Err(PlatformError("closing windows isn't supported on this desktop yet".into())),
+        }
     }
 
     /// Resolve the project for a window by walking its process tree.
