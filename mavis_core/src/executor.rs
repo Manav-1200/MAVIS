@@ -202,6 +202,7 @@ impl Executor {
                     .and_then(|v| v.as_array())
                     .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
                     .unwrap_or_default();
+                self.tts_queue.release_media();
                 self.run_app(target, args).await
             }
             "close" => {
@@ -226,6 +227,9 @@ impl Executor {
             }
             "system" => {
                 let op = action.get("op").and_then(|v| v.as_str()).unwrap_or("unknown");
+                if op.starts_with("media_") {
+                    self.tts_queue.release_media();
+                }
                 let system_event = Event {
                     id: uuid::Uuid::new_v4(),
                     timestamp: chrono::Utc::now(),
@@ -413,6 +417,10 @@ struct TtsQueue {
     queue_depth: Arc<AtomicUsize>,
     /// Playback is suspended, waiting to be resumed or killed.
     paused: Arc<AtomicBool>,
+    /// Media players MAVIS paused to be heard, to resume when it's done.
+    held_media: Arc<std::sync::Mutex<Vec<String>>>,
+    /// The user is controlling playback in this reply; leave it alone.
+    hands_off: Arc<AtomicBool>,
 }
 
 impl TtsQueue {
@@ -427,10 +435,31 @@ impl TtsQueue {
         let queue_depth_for_task = queue_depth.clone();
         let paused = Arc::new(AtomicBool::new(false));
         let paused_for_task = paused.clone();
+        let held_media: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+        let held_for_task = held_media.clone();
+        let hands_off = Arc::new(AtomicBool::new(false));
+        let hands_off_for_task = hands_off.clone();
 
         tokio::spawn(async move {
             while let Some(text) = queue_rx.recv().await {
                 while kill_rx.try_recv().is_ok() {}
+
+                // Music or a video under MAVIS's voice drowned it out and
+                // read as someone interrupting. Pause it while MAVIS talks.
+                let none_held = held_for_task.lock().map(|h| h.is_empty()).unwrap_or(true);
+                if none_held && !hands_off_for_task.load(Ordering::SeqCst) {
+                    let players = pause_playing_media().await;
+                    if !players.is_empty() {
+                        info!("Executor: paused {} while speaking", players.join(", "));
+                        // Checked again: if the user's own "pause" or "resume"
+                        // landed meanwhile, their command decides, not this.
+                        if !hands_off_for_task.load(Ordering::SeqCst) {
+                            if let Ok(mut held) = held_for_task.lock() {
+                                *held = players;
+                            }
+                        }
+                    }
+                }
 
                 tts_active_clone.store(true, Ordering::SeqCst);
                 // A new item is never born paused, whatever happened to
@@ -442,6 +471,8 @@ impl TtsQueue {
                 let was_last = queue_depth_for_task.fetch_sub(1, Ordering::SeqCst) == 1;
 
                 if interrupted {
+                    // Media stays paused: the user is talking, and their
+                    // reply's end resumes it (or "stop" leaves it quiet).
                     let mut drained = 0;
                     while queue_rx.try_recv().is_ok() {
                         drained += 1;
@@ -449,12 +480,16 @@ impl TtsQueue {
                     if drained > 0 {
                         queue_depth_for_task.fetch_sub(drained, Ordering::SeqCst);
                     }
+                    hands_off_for_task.store(false, Ordering::SeqCst);
                     tts_active_clone.store(false, Ordering::SeqCst);
                     Self::emit_state(&bus_clone, "idle").await;
                     continue;
                 }
 
                 if was_last {
+                    let held = held_for_task.lock().map(|mut h| std::mem::take(&mut *h)).unwrap_or_default();
+                    resume_media(&held).await;
+                    hands_off_for_task.store(false, Ordering::SeqCst);
                     Self::emit_state(&bus_clone, "celebrating").await;
                     sleep(Duration::from_millis(1200)).await;
                 }
@@ -473,6 +508,17 @@ impl TtsQueue {
             current_pid,
             queue_depth,
             paused,
+            held_media,
+            hands_off,
+        }
+    }
+
+    /// The user took charge of playback (paused it, started something
+    /// new), so nothing MAVIS paused should come back on its own.
+    fn release_media(&self) {
+        self.hands_off.store(true, Ordering::SeqCst);
+        if let Ok(mut held) = self.held_media.lock() {
+            held.clear();
         }
     }
 
@@ -639,6 +685,30 @@ impl TtsQueue {
 
 /// Spawn the first available audio player backend. Returns the Child handle.
 /// Respects MAVIS_AUDIO_DEVICE env var for pw-play and paplay.
+/// Pause every media player that's playing; returns their names.
+/// Any player that speaks MPRIS counts, so no app is named here.
+async fn pause_playing_media() -> Vec<String> {
+    let Ok(list) = Command::new("playerctl").arg("-l").output().await else {
+        return Vec::new(); // playerctl not installed
+    };
+    let mut paused = Vec::new();
+    for player in String::from_utf8_lossy(&list.stdout).lines().map(str::trim).filter(|p| !p.is_empty()) {
+        let status = Command::new("playerctl").args(["-p", player, "status"]).output().await;
+        let playing = status.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "Playing");
+        if playing {
+            let _ = Command::new("playerctl").args(["-p", player, "pause"]).output().await;
+            paused.push(player.to_string());
+        }
+    }
+    paused
+}
+
+async fn resume_media(players: &[String]) {
+    for player in players {
+        let _ = Command::new("playerctl").args(["-p", player, "play"]).output().await;
+    }
+}
+
 async fn spawn_audio_player(path: &Path) -> Result<tokio::process::Child> {
     if !path.exists() {
         return Err(anyhow::anyhow!("WAV file does not exist: {:?}", path));

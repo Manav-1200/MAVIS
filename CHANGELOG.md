@@ -34,6 +34,8 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **"What's focused?" answered with an earlier answer** — the model copied its previous reply ("Brave") with kitty focused. What's on screen now sits apart from the conversation, last in the prompt.
+- **MAVIS's voice cut out and stuttered.** Music under its voice, and brief sounds, read as you interrupting: 9 of 10 interruptions were noise. Media now pauses while MAVIS speaks, and an interruption takes 360 ms of speech.
 - **"Stop" did nothing to music**, and a quiet "stop" was often discarded as unclear. It now pauses what's playing when MAVIS isn't speaking, and is always honoured.
 - **"Play X on YouTube in Firefox" ignored Firefox**, and the search swallowed the rest of the sentence. The video now opens in the app named, and the search ends with the sentence.
 - **"Open Firefox and play X" only opened Firefox.** Both requests run now.

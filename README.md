@@ -169,6 +169,8 @@ An utterance that starts with an explicit action is never treated as system cont
 
 MAVIS listens while it speaks. Start talking and it stops mid-sentence, then answers what you just said. Say "stop", "quiet" or "cancel" and it simply goes quiet. When MAVIS isn't speaking, "stop" pauses whatever is playing instead.
 
+Music or a video playing while MAVIS answers is paused for the answer and picks up afterwards. If you pause, resume or open something yourself in between, it's left as you set it.
+
 It measures how loud its own voice arrives at your microphone and only treats you as speaking when you're clearly louder, so it doesn't interrupt itself. The first three-quarters of a second of audible speech can't be interrupted — that's the part it spends measuring.
 
 An interruption **pauses** the reply rather than ending it. If what it heard turns out to be its own voice or background noise, it carries on from the same word; only real speech ends the reply for good. So a false alarm costs a short pause, not the answer.
@@ -280,6 +282,8 @@ MAVIS_VAD_DEBUG=1 cargo run               # logs levels every ~3 s
 ```
 
 `VAD: calibrated — noise_floor=…` shows what MAVIS measured. While you talk, `peak=` should clearly exceed `start=`; while you're silent, `level=` should sit below `end=`. If speech barely clears `start=`, raise the mic (`wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.5`, say). If the room alone is near `start=`, lower it or reduce the noise — MAVIS can follow a noisy room, but it can't hear speech that isn't much louder than it. `room got louder mid-utterance` in the log means it caught itself listening to the room and recovered. `No speech in N s of audio` means the worker's speech detector heard only noise, so nothing was transcribed — which is how MAVIS avoids inventing words.
+
+**The log says `Input at 2.2× full scale`.** The microphone is too hot before PipeWire sees it, so `wpctl set-volume` alone won't fix it. Open `alsamixer`, press F6 to pick your sound card and F4 for capture controls, and lower **Capture** and any **Mic Boost** until the warning stops. Too loud a microphone clips your voice (worse transcription), and makes MAVIS's own voice through the speakers sound like you interrupting.
 
 **Replies are slow.** Each reply logs `Reply: N tokens in Xs (first token Ys)`. A long first-token time is prompt processing; the rest is generation. If both are slow, the model may be running mostly on CPU — see `n_gpu_layers` in the worker config.
 

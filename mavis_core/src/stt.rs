@@ -137,6 +137,10 @@ const TAIL_PADDING_MS: usize = 300;
 // breaks through at 1.5x and never triggered on MAVIS's own speech.
 // `MAVIS_BARGE_IN=0` restores the old mute-while-speaking behaviour.
 const BARGE_IN_RATIO: f32 = 1.3;
+/// Frames of the user clearly over MAVIS before it stops: 360 ms. At 150
+/// ms, 9 of 10 interruptions in the 2026-10-15 run were noise, each one a
+/// stutter in MAVIS's voice.
+const BARGE_IN_CONFIRM_FRAMES: usize = 12;
 /// The echo estimate is the loudest MAVIS has been heard recently, not an
 /// average: an average sits below the syllable peaks, and every peak then
 /// looks like someone talking. Decays by this much per 30 ms frame — about
@@ -384,12 +388,10 @@ impl EnergyVad {
         } else {
             self.start_threshold()
         };
-        // Interrupting takes less confirmation than starting from silence:
-        // the bar it has to clear (above MAVIS's own voice) is already
-        // high, and an interruption that needs a quarter-second of shouting
-        // isn't one.
+        // Interrupting takes longer confirmation than starting from
+        // silence: a cough or a beat of music over MAVIS isn't the user.
         let confirm = if self.playback {
-            self.min_speech_threshold_frames.min(5)
+            BARGE_IN_CONFIRM_FRAMES
         } else {
             self.min_speech_threshold_frames
         };
@@ -1263,6 +1265,28 @@ mod vad_tests {
         rest.extend(noise(0.03, 40, &mut sd));
         let got2 = feed(&mut v, &rest);
         assert!(!got.is_empty() || !got2.is_empty(), "utterance never shipped");
+    }
+
+    /// 2026-10-15: 9 of 10 interruptions were noise, each a stutter in
+    /// MAVIS's voice. A brief loud sound no longer counts as the user.
+    #[test]
+    fn a_brief_sound_does_not_cut_mavis_off() {
+        const KNOCK: usize = 9; // 270 ms
+        let mut sd = 9;
+        let mut v = vad();
+        feed(&mut v, &noise(0.03, 60, &mut sd));
+        v.set_playback(true);
+        feed(&mut v, &speech(0.25, 0.03, 4000, &mut sd));
+        assert!(!v.is_speaking);
+
+        let mut knock = noise(0.6, KNOCK, &mut sd); // twice MAVIS's level
+        knock.extend(noise(0.03, 3, &mut sd));
+        let mut started = false;
+        for chunk in knock.chunks(FRAME) {
+            v.process(chunk);
+            started |= v.is_speaking;
+        }
+        assert!(!started, "a short sound interrupted MAVIS");
     }
 
     /// The 2026-09-27 failure: playback is announced about a second before

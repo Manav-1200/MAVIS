@@ -454,6 +454,14 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.8 — Second hardware run (2026-10-15)
+
+Details in [`DECISIONS.md` §27](DECISIONS.md#27-the-2026-10-15-run).
+
+- [x] **What's on screen goes last in the prompt, apart from the conversation** — the model answered "Brave" with kitty focused, copying its own previous answer.
+- [x] **Media pauses while MAVIS speaks** and resumes afterwards, unless the user paused, resumed or opened something in between.
+- [x] **Interrupting MAVIS takes 360 ms of speech over it**, not 150 — 9 of 10 interruptions were noise, each a stutter.
+
 ### 6.7 — First hardware run since Phase 6 (2026-10-13)
 
 The first real session in two weeks. Launching apps worked on hardware for the first time; four things the user asked for did not. Details in [`DECISIONS.md` §26](DECISIONS.md#26-the-2026-10-13-run).
@@ -939,4 +947,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-10-14*
+*Last updated: 2026-10-15*

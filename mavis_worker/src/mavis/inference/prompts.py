@@ -1,3 +1,4 @@
+# mavis_worker/src/mavis/inference/prompts.py
 from dataclasses import dataclass
 from typing import Any
 
@@ -29,6 +30,19 @@ CRITICAL RULES — violations break the user experience:
 16. The facts listed at the end of this message are current and outrank anything in the conversation. If an earlier answer of yours contradicts them, it was wrong — use the facts."""
 
 
+# Context that describes this moment rather than the conversation.
+LIVE_SOURCES = {
+    "datetime",
+    "active_window",
+    "open_windows",
+    "desktop",
+    "project",
+    "clipboard",
+    "calendar",
+    "browser",
+}
+
+
 def build_chat_messages(
     user_messages: list[dict[str, str]],
     working_memory: list[dict[str, Any]] | None = None,
@@ -43,6 +57,9 @@ def build_chat_messages(
     # Separate user_profile items from general working memory
     profile_lines: list[str] = []
     context_lines: list[str] = []
+    # What the screen shows now. Kept apart from the conversation: mixed in,
+    # the model repeated "Brave" from its last reply with kitty focused.
+    live_lines: list[str] = []
 
     if working_memory:
         for item in working_memory:
@@ -53,6 +70,8 @@ def build_chat_messages(
             if source == "user_profile":
                 # Inject profile facts directly into the system prompt body
                 profile_lines.append(content)
+            elif source in LIVE_SOURCES:
+                live_lines.append(f"- {content}")
             else:
                 context_lines.append(f"- [{source}] {content}")
 
@@ -87,6 +106,11 @@ def build_chat_messages(
     if profile_lines:
         system += "\n\nFacts (these are current and correct):\n" + "\n".join(
             f"- {line}" for line in profile_lines
+        )
+    if live_lines:
+        system += (
+            "\n\nRight now (checked a moment ago; where an earlier reply "
+            "disagrees, this is correct):\n" + "\n".join(live_lines)
         )
 
     messages: list[dict[str, str]] = [{"role": "system", "content": system}]

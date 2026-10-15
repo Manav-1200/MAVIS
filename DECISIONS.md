@@ -46,6 +46,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 24. [Everything up to Phase 8](#24-everything-up-to-phase-8)
 25. [Testing Phases 6–8 without hardware](#25-testing-phases-68-without-hardware)
 26. [The 2026-10-13 run](#26-the-2026-10-13-run)
+27. [The 2026-10-15 run](#27-the-2026-10-15-run)
 
 ---
 
@@ -91,6 +92,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 10-15 | 6–8 | Second hardware run: stale focus answer and stuttering voice fixed — live facts last in the prompt, media paused while MAVIS speaks, 360 ms to interrupt (§27) |
 | 10-14 | 8 | "Close <app>": the first voice command that asks "Shall I…?" (§26) |
 | 10-13 | 6–8 | First hardware run since Phase 6: apps launched by voice; stop, play-in-an-app, a misheard name and app counts fixed; app names removed from the code (§26) |
 | 10-09 | 6–8 | Phases 6–8 driven by typed commands in the sandbox: an installed app launched for the first time, confirmation ran end to end; quoted launchers, a request lost during a question, and a Sentinel sentence fixed (§25) |
@@ -1452,6 +1454,44 @@ Not yet heard on hardware.
 - "Can you repeat that?" is answered with a rephrasing, because a prompt rule forbids repeating.
 - Some replies are clipped to a word or two ("Terminal.").
 - "Open Mavis test" went to the model, which promised to do it. The same words work here, so the test app was probably not installed when MAVIS started. The start of the log would show it.
+
+---
+
+## 27. The 2026-10-15 run
+
+*2026-10-15.* About 8 minutes on niri, with a YouTube video playing for most of it.
+
+**Worked on hardware:**
+- "Open Firefox and play Daylight by Maroon 5 on YouTube" opened the video in Firefox.
+- "What changed recently?" was answered from the Sentinel's store, once the name was heard right.
+- "Close Firefox" asked first, then lapsed after 20 s when no answer came. It's the first time the confirmation flow has been heard.
+- The window manager (niri), the project (MAVIS), and five open apps were all reported correctly.
+
+### Problem · "What's focused?" got the previous answer
+**Symptom:** with kitty focused, "what application is focused?" got "Brave-Browser".
+**Cause:** MAVIS had registered kitty 7 s earlier. The model repeated its own answer from 13 s before, which sat in the same block as the current facts. One prompt block held both what was said and what's on screen, and the conversation won.
+**Fix:** the facts about this moment go in their own block, last in the prompt, headed "Right now (checked a moment ago; where an earlier reply disagrees, this is correct)". That covers the time, the focused window, open apps, desktop, project, clipboard, calendar and browser.
+**Evidence:** **Reasoned.** The layout is checked; whether a 3.8B model now prefers the fresh block can only be seen on hardware. For the minute before that answer, the window list itself reported Brave as focused. That may be what niri really reported; there's no title in the log to tell.
+
+### Problem · MAVIS's voice cut out and stuttered
+**Symptom:** replies paused mid-word and came back broken.
+**Cause:** 10 interruptions while MAVIS spoke, and 9 transcribed to nothing. Each one froze playback for the 2–3 s the transcript took, then resumed it.
+- Most came after a video started playing. Music under MAVIS's voice is louder than MAVIS's own echo, so it read as someone talking.
+- The microphone was still at 1.3–2.2× full scale, so every sound arrived loud.
+- 150 ms over the threshold was enough to count as an interruption.
+
+**Fix:**
+- **Media pauses while MAVIS speaks** and resumes when it's done, as smart speakers do. Any player that speaks MPRIS counts, so no app is named in the code. If the user pauses, resumes or opens something during the reply, MAVIS leaves playback as they set it. After "stop" it stays quiet.
+- **An interruption takes 360 ms** of sound clearly over MAVIS's voice, up from 150 ms.
+
+**Evidence:**
+- **Proven:** a 270 ms burst at twice MAVIS's level interrupts with the old value and not the new one, and the existing test of a real interruption still passes.
+- **Measured** with a stand-in player: paused for the reply and resumed after it; "pause", "resume" and "volume up" all leave it as expected.
+- **Not yet heard.**
+
+### Still open
+- **Microphone gain.** `wpctl set-volume` didn't change it, which fits §14's finding that the gain is upstream, in ALSA. The README now points to `alsamixer`.
+- **Brave reported as focused for a minute** when the user says kitty was. Kept in mind for the next run.
 
 ---
 
