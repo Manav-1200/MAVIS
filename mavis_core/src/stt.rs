@@ -137,9 +137,10 @@ const TAIL_PADDING_MS: usize = 300;
 // breaks through at 1.5x and never triggered on MAVIS's own speech.
 // `MAVIS_BARGE_IN=0` restores the old mute-while-speaking behaviour.
 const BARGE_IN_RATIO: f32 = 1.3;
-/// Frames of the user clearly over MAVIS before it stops: 360 ms. At 150
-/// ms, 9 of 10 interruptions in the 2026-10-15 run were noise, each one a
-/// stutter in MAVIS's voice.
+/// Loud frames over MAVIS's voice before its playback is paused: 360 ms.
+/// At 150 ms, 9 of 10 pauses in the 2026-10-15 run were noise, each a
+/// stutter. Shorter speech is still heard: a lone "stop" is transcribed
+/// and acted on, it just doesn't pause playback on its own.
 const BARGE_IN_CONFIRM_FRAMES: usize = 12;
 /// The echo estimate is the loudest MAVIS has been heard recently, not an
 /// average: an average sits below the syllable peaks, and every peak then
@@ -172,6 +173,9 @@ const STREAM_SETTLE_TIME: Duration = Duration::from_millis(1500);
 /// longer has to be high. It was 1.5 s, which threw away four real
 /// utterances in the 2026-09-26 run, including "stop" and "Mavis".
 const MIN_UTTERANCE_SAMPLES: usize = 12800; // 0.8s at 16kHz
+/// Over MAVIS's voice the pre-roll is shorter, so a lone "stop" comes out
+/// shorter too; it still has to reach the transcriber.
+const MIN_UTTERANCE_DURING_PLAYBACK: usize = 8000; // 0.5 s
 
 // ---------------------------------------------------------------------------
 // VAD — smoothed energy with a noise floor that follows the room
@@ -305,6 +309,15 @@ impl EnergyVad {
         }
     }
 
+    /// Loud frames in the utterance being heard.
+    fn loud_frames(&self) -> usize {
+        if self.is_speaking {
+            self.speech_frames
+        } else {
+            0
+        }
+    }
+
     fn process(&mut self, samples: &[f32]) -> Option<Vec<f32>> {
         self.pending.extend_from_slice(samples);
         let mut offset = 0;
@@ -388,10 +401,10 @@ impl EnergyVad {
         } else {
             self.start_threshold()
         };
-        // Interrupting takes longer confirmation than starting from
-        // silence: a cough or a beat of music over MAVIS isn't the user.
+        // Over MAVIS's voice, start listening quickly: the bar (above its
+        // own echo) is already high. Pausing it waits longer, in Capture.
         let confirm = if self.playback {
-            BARGE_IN_CONFIRM_FRAMES
+            self.min_speech_threshold_frames.min(5)
         } else {
             self.min_speech_threshold_frames
         };
@@ -745,6 +758,7 @@ impl SttManager {
             speech_start: speech_start_tx,
             listen,
             was_hearing: true,
+            cut_off: false,
         };
 
         // Most devices offer f32, but some USB microphones and plain ALSA
@@ -831,6 +845,8 @@ struct Capture {
     /// Push to talk: whether the microphone is being heard at all.
     listen: Arc<crate::listen::ListenGate>,
     was_hearing: bool,
+    /// This utterance has already paused MAVIS's playback.
+    cut_off: bool,
 }
 
 impl Capture {
@@ -970,32 +986,45 @@ impl Capture {
             let _ = self.energy_tx.try_send(frame_energy);
         }
 
-        let (was_speaking, result, max_energy, now_speaking) = {
+        let (was_speaking, result, max_energy, now_speaking, loud) = {
             let mut g = match self.vad.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
             let was = g.is_speaking;
             let r = g.process(&resampled);
-            (was, r, g.last_max_energy, g.is_speaking)
+            (was, r, g.last_max_energy, g.is_speaking, g.loud_frames())
         };
+
+        // Someone has talked over MAVIS long enough to be the user, not a
+        // cough or a beat of music: pause it now rather than waiting for
+        // the transcript. Shorter speech still goes to the transcriber.
+        if playing && now_speaking && !self.cut_off && loud >= BARGE_IN_CONFIRM_FRAMES {
+            info!("VAD: user spoke during playback — interrupting MAVIS");
+            self.publish_interrupt();
+            self.cut_off = true;
+        }
 
         // Anything that ends without reaching the worker has to undo the
         // pause itself, or a reply stays suspended forever.
-        let abandon = |c: &Self| {
+        let abandon = |c: &mut Self| {
             if playing {
-                c.publish_resume();
+                if c.cut_off {
+                    c.publish_resume();
+                }
             } else {
                 c.publish_state("idle");
             }
+            c.cut_off = false;
         };
 
         if let Some(utterance) = result {
-            if utterance.len() < MIN_UTTERANCE_SAMPLES {
+            let shortest = if playing { MIN_UTTERANCE_DURING_PLAYBACK } else { MIN_UTTERANCE_SAMPLES };
+            if utterance.len() < shortest {
                 info!(
                     "STT: dropping short utterance ({} samples < {})",
                     utterance.len(),
-                    MIN_UTTERANCE_SAMPLES
+                    shortest
                 );
                 abandon(self);
                 return;
@@ -1017,18 +1046,14 @@ impl Capture {
             }
             self.listen.shipped();
             self.was_hearing = false;
-            self.publish_state("thinking");
+            self.cut_off = false;
+            if !playing {
+                self.publish_state("thinking");
+            }
         } else if was_speaking && !now_speaking {
             // The VAD ended an utterance and dropped it as room noise.
             abandon(self);
         } else if !was_speaking && now_speaking {
-            if playing {
-                // Someone is talking over MAVIS. Stop it now, rather than
-                // waiting for the transcript — an interruption that takes
-                // two seconds to land isn't an interruption.
-                info!("VAD: user spoke during playback — interrupting MAVIS");
-                self.publish_interrupt();
-            }
             if let Some(ref sstx) = self.speech_start {
                 let _ = sstx.try_send(());
             }
@@ -1141,6 +1166,7 @@ mod vad_tests {
             speech_start: None,
             listen: Arc::clone(&listen),
             was_hearing: true,
+            cut_off: false,
         };
         (c, rx, listen)
     }
@@ -1267,26 +1293,37 @@ mod vad_tests {
         assert!(!got.is_empty() || !got2.is_empty(), "utterance never shipped");
     }
 
-    /// 2026-10-15: 9 of 10 interruptions were noise, each a stutter in
-    /// MAVIS's voice. A brief loud sound no longer counts as the user.
+    /// Over MAVIS's voice: a cough doesn't pause it (2026-10-15: 9 of 10
+    /// pauses were noise), a lone "stop" still reaches the transcriber
+    /// (2026-11-01: it never did), and talking at length pauses it.
     #[test]
-    fn a_brief_sound_does_not_cut_mavis_off() {
-        const KNOCK: usize = 9; // 270 ms
+    fn talking_over_mavis() {
+        use std::sync::atomic::Ordering;
+        let (mut c, mut rx, _) = capture(crate::listen::ListenMode::Always);
+        let mut events = c.bus.subscribe();
+        let mut pauses = move || {
+            std::iter::from_fn(|| events.try_recv().ok())
+                .filter(|e| e.event_type == EventType::TtsInterrupt)
+                .count()
+        };
         let mut sd = 9;
-        let mut v = vad();
-        feed(&mut v, &noise(0.03, 60, &mut sd));
-        v.set_playback(true);
-        feed(&mut v, &speech(0.25, 0.03, 4000, &mut sd));
-        assert!(!v.is_speaking);
+        shipped(&mut c, &mut rx, &noise(0.03, 60, &mut sd));
+        c.tts_active.store(true, Ordering::SeqCst);
+        shipped(&mut c, &mut rx, &speech(0.25, 0.03, 4000, &mut sd)); // MAVIS's own voice
+        assert_eq!(pauses(), 0, "MAVIS paused itself");
 
-        let mut knock = noise(0.6, KNOCK, &mut sd); // twice MAVIS's level
-        knock.extend(noise(0.03, 3, &mut sd));
-        let mut started = false;
-        for chunk in knock.chunks(FRAME) {
-            v.process(chunk);
-            started |= v.is_speaking;
-        }
-        assert!(!started, "a short sound interrupted MAVIS");
+        let mut cough = noise(0.6, 9, &mut sd); // 270 ms, twice MAVIS's level
+        cough.extend(noise(0.03, 40, &mut sd));
+        shipped(&mut c, &mut rx, &cough);
+        assert_eq!(pauses(), 0, "a cough paused MAVIS");
+
+        let mut stop = speech(0.6, 0.25, 300, &mut sd);
+        stop.extend(noise(0.03, 40, &mut sd));
+        assert_eq!(shipped(&mut c, &mut rx, &stop), 1, "a lone \"stop\" never reached the transcriber");
+        assert_eq!(pauses(), 0);
+
+        shipped(&mut c, &mut rx, &speech(0.6, 0.25, 1500, &mut sd));
+        assert_eq!(pauses(), 1, "talking over MAVIS didn't pause it");
     }
 
     /// The 2026-09-27 failure: playback is announced about a second before
