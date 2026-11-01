@@ -241,6 +241,14 @@ async fn main() -> Result<()> {
     let listen = Arc::new(listen::ListenGate::new(listen::ListenMode::configured()));
     info!("Listen mode: {:?}", listen.mode());
 
+    // The window MAVIS was started from. Opening the orb takes keyboard
+    // focus away from it, and until the user clicked elsewhere MAVIS knew
+    // of no focused window at all (2026-11-01).
+    let started_from: Option<WindowInfo> = platform
+        .windows()
+        .and_then(|t| t.open_windows().ok())
+        .and_then(|list| list.into_iter().find(|w| w.is_focused && !is_own_window(w)));
+
     // A tap on the orb answers "Shall I?", or in push mode starts listening.
     let bus_for_tap = Arc::clone(&bus);
     let orb = ui::Orb::new(move || {
@@ -620,13 +628,17 @@ async fn main() -> Result<()> {
     // awareness out silently for the rest of the session.
     let platform_for_poll = Arc::clone(&platform);
     let bus_for_poll = Arc::clone(&bus);
+    let started_from_for_poll = started_from.clone();
     let ctx_poll_handle = supervise("ContextPoller", Arc::clone(&bus), move || {
         let platform_ctx = Arc::clone(&platform_for_poll);
         let bus_ctx = Arc::clone(&bus_for_poll);
+        let started_from = started_from_for_poll.clone();
         async move {
         let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(2));
         // The user's last real window, used while the orb has focus.
-        let mut last_user_window: Option<WindowInfo> = None;
+        let mut last_user_window: Option<WindowInfo> = started_from;
+        // Focus was handed back for this spell of the orb having it.
+        let mut handed_back = false;
         loop {
             ticker.tick().await;
 
@@ -697,6 +709,19 @@ async fn main() -> Result<()> {
 
                 if snapshot.active_window.is_none() && own_focused {
                     snapshot.active_window = last_user_window.clone();
+                    // The orb never needs the keyboard: give it back to
+                    // the window the user was in.
+                    if !handed_back {
+                        handed_back = true;
+                        if let Some(id) = last_user_window.as_ref().and_then(|w| w.id) {
+                            if tracker.focus_window(id).is_ok() {
+                                info!("Orb: gave keyboard focus back to the user's window");
+                            }
+                        }
+                    }
+                }
+                if !own_focused {
+                    handed_back = false;
                 }
                 if let Some(w) = &snapshot.active_window {
                     last_user_window = Some(w.clone());
