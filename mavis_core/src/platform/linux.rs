@@ -319,6 +319,17 @@ impl WindowTracker for LinuxWindowTracker {
         }
     }
 
+    fn focus_window(&self, id: u64) -> Result<(), PlatformError> {
+        if self.compositor != Compositor::Niri {
+            return Err(PlatformError("focusing windows isn't supported on this desktop yet".into()));
+        }
+        let id = id.to_string();
+        match Command::new("niri").args(["msg", "action", "focus-window", "--id", &id]).status() {
+            Ok(s) if s.success() => Ok(()),
+            _ => Err(PlatformError(format!("niri could not focus window {}", id))),
+        }
+    }
+
     /// Resolve the project for a window by walking its process tree.
     /// Verified against real /proc output: a GUI editor's own cwd is
     /// usually just $HOME, but its shell children sit in the real project
