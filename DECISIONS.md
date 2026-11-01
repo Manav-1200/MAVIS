@@ -93,6 +93,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-01 | 6–8 | Same day, second run: MAVIS knew no focused window because the orb took focus at startup — now it reads the window first and hands focus back. Mic noise floor up 3× since 10-15 (§28) |
 | 11-01 | 6–8 | Third hardware run: "stop" over MAVIS's voice was never heard — the 10-15 fix had made it too short to count. Listening and pausing separated; Whisper model made a setting (§28) |
 | 10-15 | 6–8 | Second hardware run: stale focus answer and stuttering voice fixed — live facts last in the prompt, media paused while MAVIS speaks, 360 ms to interrupt (§27) |
 | 10-14 | 8 | "Close <app>": the first voice command that asks "Shall I…?" (§26) |
@@ -1531,8 +1532,32 @@ Not yet heard on hardware.
 **Fix:** the model, device and compute type are now set in `config/config.toml` under `[stt]`. `small.en` is English-only, and more accurate for English than `small` at the same speed. The default stays `small` so nothing downloads unasked.
 **Evidence:** **Reasoned.** The setting is read by the worker. Whether `small.en` lifts confidence here can only be measured on hardware.
 
+### Problem · MAVIS didn't know which window was focused (second run, same day)
+**Symptom:** with kitty focused on workspace 1, "what am I looking at?" got "Firefox is active on workspace 2", three times.
+**Cause:** in the whole run, the log has a single context line, at startup: `app=none`. The orb opens as a window and takes keyboard focus. MAVIS rightly ignores its own window, and used the user's last window instead. That window had never been seen, because the orb took focus before the first poll. So MAVIS knew of no focused window at all, until the user clicked something, and in this run they never did. The model was handed the list of open windows with none marked as focused, and picked one.
+**Fix:**
+- The focused window is read once at startup, before the orb opens. That window, the one MAVIS was started from, counts as the user's window.
+- Whenever the orb has keyboard focus, it's given back to the user's last window: on niri, with `niri msg action focus-window`. The orb never needs the keyboard, and typing into a terminal that has silently lost focus is its own bug.
+- If the focused window still isn't known, the prompt says so, instead of leaving the model to guess.
+
+**Evidence:** **Measured** against a stand-in `niri` that hands focus to the orb a second after start. MAVIS reported kitty, and focus went back to kitty's id. **Not yet seen on hardware.**
+
+### Problem · Heard wrong, worse than before
+**Symptom:**
+- 7 of 22 utterances were dropped or met with "didn't catch that".
+- Several came out wrong: "Mavis" became "Service", "babies" and "Maybe it's".
+- "It was fine before."
+
+**Cause:** the microphone, not the code. Recognition hasn't changed since 10-15, apart from listening sooner over MAVIS's voice, which is before transcription. But the noise floor the VAD measures has changed:
+- 10-15: 0.04–0.07.
+- Both runs today: 0.13–0.20, three times higher.
+- The input still arrives at 1.1–1.25× full scale, so it still clips.
+
+Louder background against the same voice leaves Whisper less to work with. Most likely a mixer change raised the noise, such as more Mic Boost or a noisy input. A fan under load, during the build and with Whisper on the CPU, would also do it. Whisper was still the multilingual `small` model.
+**Fix:** none in the code. Get the noise floor (`VAD: calibrated — noise_floor=…`) back under about 0.07 with no `Input at` warnings, then switch to `small.en`.
+
 ### Still open
-- Lower the capture level further, until `Input at …× full scale` stops.
+- The microphone, above.
 - "Can you repeat that?" (§26).
 
 ---

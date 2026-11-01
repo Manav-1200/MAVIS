@@ -460,6 +460,7 @@ Details in [`DECISIONS.md` §28](DECISIONS.md#28-the-2026-11-01-run).
 
 - [x] **"Stop" over MAVIS's voice works again.** Since 6.8 a short word couldn't be heard at all while MAVIS spoke. MAVIS now listens at once, and only pauses its voice once the user has spoken for 360 ms; a lone "stop" is transcribed and acted on.
 - [x] **The Whisper model is a setting** (`[stt]` in `config/config.toml`), so `small.en` can replace the multilingual `small`.
+- [x] **The orb no longer hides the focused window.** It took keyboard focus when it opened, and MAVIS then knew of no focused window until the user clicked something. The window MAVIS was started from is read first, and on niri focus is handed back to it.
 
 ### 6.8 — Second hardware run (2026-10-15)
 

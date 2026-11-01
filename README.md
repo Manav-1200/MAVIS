@@ -285,6 +285,8 @@ MAVIS_VAD_DEBUG=1 cargo run               # logs levels every ~3 s
 
 **MAVIS often says "Sorry, I didn't catch that."** Try the English-only speech model: set `model = "small.en"` under `[stt]` in `config/config.toml` (a one-time download of about 460 MB). Also check the microphone level, below.
 
+**MAVIS hears you wrong more than it used to.** Check `VAD: calibrated — noise_floor=…` near the start of the log. In a quiet room it should be below about 0.07; at 0.15 or more the background is drowning your voice. Turn Mic Boost down rather than up, and keep fans and music down while testing.
+
 **The log says `Input at 2.2× full scale`.** The microphone is too hot before PipeWire sees it, so `wpctl set-volume` alone won't fix it. Open `alsamixer`, press F6 to pick your sound card and F4 for capture controls, and lower **Capture** and any **Mic Boost** until the warning stops. Too loud a microphone clips your voice (worse transcription), and makes MAVIS's own voice through the speakers sound like you interrupting.
 
 **Replies are slow.** Each reply logs `Reply: N tokens in Xs (first token Ys)`. A long first-token time is prompt processing; the rest is generation. If both are slow, the model may be running mostly on CPU — see `n_gpu_layers` in the worker config.
