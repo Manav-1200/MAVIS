@@ -1275,11 +1275,17 @@ impl Planner {
 
         // Phase 6 — active window and clipboard, both off by default.
         if context_source_enabled("MAVIS_CONTEXT_ACTIVE_WINDOW") {
-            if let Some(window) = &snapshot.active_window {
-                items.push(serde_json::json!({
+            match &snapshot.active_window {
+                Some(window) => items.push(serde_json::json!({
                     "source": "active_window",
                     "content": describe_active_window(window),
-                }));
+                })),
+                // Better to say so than let the model pick one from the list.
+                None if !snapshot.open_windows.is_empty() => items.push(serde_json::json!({
+                    "source": "active_window",
+                    "content": "Which window is focused isn't known right now.",
+                })),
+                None => {}
             }
 
             if let Some(content) = describe_open_windows(&snapshot.open_windows, snapshot.active_workspace) {
