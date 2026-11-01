@@ -33,6 +33,10 @@ pub trait WindowTracker {
     fn close_window(&self, _id: u64) -> Result<(), PlatformError> {
         Err(PlatformError("closing windows isn't supported on this desktop yet".into()))
     }
+    /// Give keyboard focus to a window. Default: not supported.
+    fn focus_window(&self, _id: u64) -> Result<(), PlatformError> {
+        Err(PlatformError("focusing windows isn't supported on this desktop yet".into()))
+    }
 }
 
 pub trait ClipboardReader {
