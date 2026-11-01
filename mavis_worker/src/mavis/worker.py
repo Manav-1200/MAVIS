@@ -39,10 +39,12 @@ class WorkerServer:
             model_path=self.config.get("model.path"),
             n_gpu_layers=self.config.get("model.n_gpu_layers", 20),
         )
+        # [stt] in config.toml. "small.en" hears English better than
+        # "small" at the same speed.
         self.stt_engine = STTEngine(
-            model_size="small",
-            device="cpu",
-            compute_type="int8",
+            model_size=self.config.get("stt.model", "small"),
+            device=self.config.get("stt.device", "cpu"),
+            compute_type=self.config.get("stt.compute_type", "int8"),
             confidence_threshold=0.45,
         )
         self.tts_engine = TTSEngine()
