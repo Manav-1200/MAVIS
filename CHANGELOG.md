@@ -14,6 +14,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 192 commits since `v0.3.0-ai-worker`, covering Phases 4 through 8.5.
 
 ### Added
+- **`[stt]` in `config/config.toml`** — choose the Whisper model (e.g. the English-only `small.en`), device and compute type.
 - **"Close <app>"** — closes that app's open windows after asking first, since unsaved work could go with them. The first voice command that reaches "Shall I…?". niri only for now.
 - **Push to talk** — set `listen_mode = "push"` in `config/config.toml` to have MAVIS listen only after you ask. In push-to-talk mode, press your hotkey (`toggle_listen.sh`) or tap the orb, then speak; it hears one sentence and stops. Always listening stays the default. `MAVIS_LISTEN_MODE` overrides it.
 - **Tap the orb to confirm** — a quick tap answers "Shall I run …?" with yes. Administrator actions still need the words.
@@ -34,6 +35,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **"Stop" while MAVIS was speaking was never heard** — a side effect of the stutter fix, which made a single word too short to count. MAVIS now listens at once and only pauses its voice for longer speech; a lone "stop" is transcribed and acted on.
 - **"What's focused?" answered with an earlier answer** — the model copied its previous reply ("Brave") with kitty focused. What's on screen now sits apart from the conversation, last in the prompt.
 - **MAVIS's voice cut out and stuttered.** Music under its voice, and brief sounds, read as you interrupting: 9 of 10 interruptions were noise. Media now pauses while MAVIS speaks, and an interruption takes 360 ms of speech.
 - **"Stop" did nothing to music**, and a quiet "stop" was often discarded as unclear. It now pauses what's playing when MAVIS isn't speaking, and is always honoured.

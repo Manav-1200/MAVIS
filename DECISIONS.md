@@ -47,6 +47,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 25. [Testing Phases 6–8 without hardware](#25-testing-phases-68-without-hardware)
 26. [The 2026-10-13 run](#26-the-2026-10-13-run)
 27. [The 2026-10-15 run](#27-the-2026-10-15-run)
+28. [The 2026-11-01 run](#28-the-2026-11-01-run)
 
 ---
 
@@ -92,6 +93,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-01 | 6–8 | Third hardware run: "stop" over MAVIS's voice was never heard — the 10-15 fix had made it too short to count. Listening and pausing separated; Whisper model made a setting (§28) |
 | 10-15 | 6–8 | Second hardware run: stale focus answer and stuttering voice fixed — live facts last in the prompt, media paused while MAVIS speaks, 360 ms to interrupt (§27) |
 | 10-14 | 8 | "Close <app>": the first voice command that asks "Shall I…?" (§26) |
 | 10-13 | 6–8 | First hardware run since Phase 6: apps launched by voice; stop, play-in-an-app, a misheard name and app counts fixed; app names removed from the code (§26) |
@@ -1482,7 +1484,7 @@ Not yet heard on hardware.
 
 **Fix:**
 - **Media pauses while MAVIS speaks** and resumes when it's done, as smart speakers do. Any player that speaks MPRIS counts, so no app is named in the code. If the user pauses, resumes or opens something during the reply, MAVIS leaves playback as they set it. After "stop" it stays quiet.
-- **An interruption takes 360 ms** of sound clearly over MAVIS's voice, up from 150 ms.
+- **An interruption takes 360 ms** of sound clearly over MAVIS's voice, up from 150 ms. *Superseded in part, 2026-11-01 (§28): this also made a short "stop" impossible to hear.*
 
 **Evidence:**
 - **Proven:** a 270 ms burst at twice MAVIS's level interrupts with the old value and not the new one, and the existing test of a real interruption still passes.
@@ -1492,6 +1494,46 @@ Not yet heard on hardware.
 ### Still open
 - **Microphone gain.** `wpctl set-volume` didn't change it, which fits §14's finding that the gain is upstream, in ALSA. The README now points to `alsamixer`.
 - **Brave reported as focused for a minute** when the user says kitty was. Kept in mind for the next run.
+
+---
+
+## 28. The 2026-11-01 run
+
+*2026-11-01.* About 4 minutes on niri.
+
+**Worked on hardware:**
+- The focused window was reported correctly every time it was asked.
+- Asking a new question while MAVIS was speaking cut the old answer and answered the new one.
+- Pending Sentinel changes were said first, as designed.
+
+### Problem · "Stop" over MAVIS's voice was never heard
+**Symptom:** saying "stop" while MAVIS spoke did nothing. The log ends during a reply, with no `SPEECH START` after it at all.
+**Cause:** the 2026-10-15 fix (§27). To stop coughs and music pausing MAVIS, the VAD began requiring 360 ms of loud speech over MAVIS's voice before it treated anything as speech. A single word is shorter than that, so "stop" was never heard. That fix solved one problem by creating a worse one: the stutters were gone, and so was the one word that matters most during a reply.
+**Fix:** hearing and pausing are separate now.
+- Over MAVIS's voice, the VAD starts listening after 150 ms again.
+- MAVIS's playback is paused only once the user has spoken for 360 ms.
+- Anything shorter still goes to the transcriber. A lone "stop" is transcribed and stops MAVIS. A cough is transcribed as nothing, and playback was never touched.
+- Utterances heard over MAVIS's voice may be as short as 0.5 s, since their pre-roll is shorter.
+
+**The trade-off:** a lone "stop" now ends MAVIS about a second after it's said: once the word is over, and once it's transcribed. A pause on the first syllable would bring back the stutters.
+**Evidence:** **Proven.** One test covers MAVIS's own voice, a cough, a lone "stop", and talking at length. On the code from §27 it fails exactly as on hardware: "a lone 'stop' never reached the transcriber". Now it passes, and all other tests still pass. **Not yet heard.**
+
+### Problem · Correct sentences rejected as unclear
+**Symptom:** 4 of 14 utterances got "Sorry, I didn't catch that."
+- Two were transcribed right: "Mavis, how many workspaces do I have working?" at 0.45 confidence, and one at 0.55.
+- Elsewhere "workspaces" came out as "spaces" and "wood spaces", and the counts in the answers wandered with it.
+
+**Cause:**
+- Whisper runs as the multilingual `small` model on the CPU. The model was fixed in the code.
+- The microphone is still at 1.2× full scale. It was 2.2× before `alsamixer`, but it still clips.
+- The room's noise floor measured 0.15–0.23, four times the 2026-09-22 level, so three bursts of noise also reached the transcriber.
+
+**Fix:** the model, device and compute type are now set in `config/config.toml` under `[stt]`. `small.en` is English-only, and more accurate for English than `small` at the same speed. The default stays `small` so nothing downloads unasked.
+**Evidence:** **Reasoned.** The setting is read by the worker. Whether `small.en` lifts confidence here can only be measured on hardware.
+
+### Still open
+- Lower the capture level further, until `Input at …× full scale` stops.
+- "Can you repeat that?" (§26).
 
 ---
 

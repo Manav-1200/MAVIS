@@ -454,6 +454,13 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.9 — Third hardware run (2026-11-01)
+
+Details in [`DECISIONS.md` §28](DECISIONS.md#28-the-2026-11-01-run).
+
+- [x] **"Stop" over MAVIS's voice works again.** Since 6.8 a short word couldn't be heard at all while MAVIS spoke. MAVIS now listens at once, and only pauses its voice once the user has spoken for 360 ms; a lone "stop" is transcribed and acted on.
+- [x] **The Whisper model is a setting** (`[stt]` in `config/config.toml`), so `small.en` can replace the multilingual `small`.
+
 ### 6.8 — Second hardware run (2026-10-15)
 
 Details in [`DECISIONS.md` §27](DECISIONS.md#27-the-2026-10-15-run).
@@ -947,4 +954,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-10-16*
+*Last updated: 2026-11-01*

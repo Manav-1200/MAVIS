@@ -283,6 +283,8 @@ MAVIS_VAD_DEBUG=1 cargo run               # logs levels every ~3 s
 
 `VAD: calibrated — noise_floor=…` shows what MAVIS measured. While you talk, `peak=` should clearly exceed `start=`; while you're silent, `level=` should sit below `end=`. If speech barely clears `start=`, raise the mic (`wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.5`, say). If the room alone is near `start=`, lower it or reduce the noise — MAVIS can follow a noisy room, but it can't hear speech that isn't much louder than it. `room got louder mid-utterance` in the log means it caught itself listening to the room and recovered. `No speech in N s of audio` means the worker's speech detector heard only noise, so nothing was transcribed — which is how MAVIS avoids inventing words.
 
+**MAVIS often says "Sorry, I didn't catch that."** Try the English-only speech model: set `model = "small.en"` under `[stt]` in `config/config.toml` (a one-time download of about 460 MB). Also check the microphone level, below.
+
 **The log says `Input at 2.2× full scale`.** The microphone is too hot before PipeWire sees it, so `wpctl set-volume` alone won't fix it. Open `alsamixer`, press F6 to pick your sound card and F4 for capture controls, and lower **Capture** and any **Mic Boost** until the warning stops. Too loud a microphone clips your voice (worse transcription), and makes MAVIS's own voice through the speakers sound like you interrupting.
 
 **Replies are slow.** Each reply logs `Reply: N tokens in Xs (first token Ys)`. A long first-token time is prompt processing; the rest is generation. If both are slow, the model may be running mostly on CPU — see `n_gpu_layers` in the worker config.
