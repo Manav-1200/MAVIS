@@ -101,3 +101,4 @@ pub trait PlatformProvider: Send + Sync {
     fn windows(&self) -> Option<&dyn WindowTracker>;
     fn clipboard(&self) -> Option<&dyn ClipboardReader>;
 }
+
