@@ -454,6 +454,16 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.11 — What MAVIS says about itself (2026-11-05)
+
+Details in [`DECISIONS.md` §30](DECISIONS.md#30-what-mavis-says-about-itself).
+
+- [x] **MAVIS knows it speaks.** It had said "I don't have a voice", in its voice.
+- [x] **No third-person narration** ("Mavis responds…: '…'"); only what MAVIS says is spoken.
+- [x] **Fuller replies**: up to three sentences when asked to explain, instead of a hard two-sentence, 180-character cut.
+- [x] **"Say that again" repeats the last reply.**
+- [ ] Hear these on hardware
+
 ### 6.10 — A natural voice (2026-11-05)
 
 - [x] **Kokoro is the default voice.** Piper was, because the executor used Kokoro only when `MAVIS_TTS_ENGINE=kokoro` was set — so the worker loaded and warmed Kokoro on every start and no reply ever used it. Piper stays as the fallback. See [`DECISIONS.md` §29](DECISIONS.md#29-a-natural-voice).

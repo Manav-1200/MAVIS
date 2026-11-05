@@ -49,6 +49,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 27. [The 2026-10-15 run](#27-the-2026-10-15-run)
 28. [The 2026-11-01 run](#28-the-2026-11-01-run)
 29. [A natural voice](#29-a-natural-voice)
+30. [What MAVIS says about itself](#30-what-mavis-says-about-itself)
 
 ---
 
@@ -94,6 +95,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-05 | 6 | Voice run: the model said it had no voice, narrated itself in the third person, was clipped to two sentences and ignored "how was that?" — instructions and reply clean-up fixed (§30) |
 | 11-05 | 6 | Kokoro made the default voice — Piper had been playing every reply while Kokoro sat loaded and unused; replies spoken a sentence at a time (§29) |
 | 11-01 | 6–8 | Same day, second run: MAVIS knew no focused window because the orb took focus at startup — now it reads the window first and hands focus back. Mic noise floor up 3× since 10-15 (§28) |
 | 11-01 | 6–8 | Third hardware run: "stop" over MAVIS's voice was never heard — the 10-15 fix had made it too short to count. Listening and pausing separated; Whisper model made a setting (§28) |
@@ -1580,6 +1582,39 @@ Kokoro returns a whole reply at once, so a long answer would wait for all of it 
 
 The gap between sentences is one player starting, which falls inside a natural pause.
 **Evidence:** **Proven** for the splitting (test), **reasoned** for the hand-over between sentences.
+
+---
+
+## 30. What MAVIS says about itself
+
+*2026-11-05.* The first run with Kokoro. The voice was "way better"; the words were not.
+
+### Problem · "I'm here, but I don't have a voice"
+Said, out loud, in the new voice. A later reply "reaffirms her non-verbal nature".
+**Cause:** nothing in the instructions said replies are spoken. Rule 14 ("you cannot … control the computer yourself") was the only thing about what MAVIS can do, and the model stretched it to speaking.
+**Fix:** the opening line now says MAVIS talks out loud and everything it writes is spoken in its own voice.
+**Evidence:** **Reasoned** from the log and the prompt; not yet heard on hardware.
+
+### Problem · Third-person narration
+`Mavis acknowledges the update… "I appreciate…"` and `Mavis responds without violating the rules: "…"` — both spoken whole, rules mention included.
+**Fix:** rule 3 asks for the first person. The reply clean-up also keeps only the quote when a reply narrates MAVIS and then quotes it.
+**Evidence:** **Measured**: both lines from the log come out as just the quoted sentence; ordinary replies and replies that quote something else are unchanged.
+
+### Problem · Clipped replies
+"4 workspaces open." and "Could be improved, Manav." Rule 1 asked for one sentence, and the clean-up cut every reply to two sentences and 180 characters.
+**Fix:** usually one or two full sentences, up to three when asked to explain. The clean-up keeps three sentences and 320 characters, and generation stops at the same point. Since 6.10 speech starts with the first sentence, so the third adds no wait.
+**Evidence:** **Measured** on sample replies; **reasoned** that it adds no delay.
+
+### Problem · "Sorry, how was that?" got a different answer
+Rule 15 forbade repeating a reply, to stop MAVIS answering a misheard message with the previous answer. It also forbade repeating when asked to.
+**Fix:** asked to repeat, or told the user didn't hear, MAVIS says its last reply again. The rest of rule 15 stands. Rule 10 now only forbids saying one thing twice within a reply.
+**Evidence:** **Reasoned**; not yet tried on hardware.
+
+### Also seen in the log, no change
+- Mic: noise floor 0.013–0.046, peaks 0.36–0.59, no low-input warnings. The 11-01 problem is gone.
+- Focus: kitty read at startup and handed back.
+- "Thank you for watching." on background noise, a known Whisper hallucination, was dropped as it should be.
+- Whisper still ran `small`, not `small.en`. "Mavis, can you hear me" became "What if it's going to hear me?". `[stt] model = "small.en"` is the setting to try.
 
 ---
 
