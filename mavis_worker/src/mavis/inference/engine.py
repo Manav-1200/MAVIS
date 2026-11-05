@@ -16,6 +16,13 @@ except ImportError as e:
     ) from e
 
 
+# How much of a reply is kept. Two sentences / 180 characters made replies
+# clipped ("4 workspaces open."); speech now starts with the first sentence,
+# so a third costs no waiting.
+MAX_SENTENCES = 3
+MAX_CHARS = 320
+
+
 class LlamaEngine:
     def __init__(self, model_path: str | None = None, n_gpu_layers: int = 20):
         self._model_path = model_path
@@ -219,15 +226,21 @@ class LlamaEngine:
         # 4. Clean whitespace
         text = re.sub(r"\s+", " ", text).strip()
 
-        # 5. Truncate to first 1-2 sentences
-        sentences = re.split(r"(?<=[.!?])\s+", text)
-        if len(sentences) > 2:
-            text = " ".join(sentences[:2])
+        # 5. Narration about MAVIS keeps only what she says:
+        # 'Mavis responds without violating the rules: "..."' → '...'
+        narrated = re.match(r"[^\"“]*\bmavis\b[^\"“]*[\"“](.+?)[\"”]", text, flags=re.IGNORECASE)
+        if narrated:
+            text = narrated.group(1).strip()
 
-        # 6. Hard cap at 180 chars, ending at a sentence boundary if possible
-        if len(text) > 180:
-            match = re.search(r".{1,180}[.!?]", text)
-            text = match.group(0) if match else text[:180]
+        # 6. Truncate to the first few sentences
+        sentences = re.split(r"(?<=[.!?])\s+", text)
+        if len(sentences) > MAX_SENTENCES:
+            text = " ".join(sentences[:MAX_SENTENCES])
+
+        # 7. Hard cap, ending at a sentence boundary if possible
+        if len(text) > MAX_CHARS:
+            match = re.search(rf".{{1,{MAX_CHARS}}}[.!?]", text)
+            text = match.group(0) if match else text[:MAX_CHARS]
 
         return text.strip() or "I'm here."
 
@@ -251,8 +264,8 @@ class LlamaEngine:
         """
         True once generation has produced everything _post_process keeps.
 
-        _post_process keeps the first line, at most two sentences and at
-        most 180 characters. Everything generated past that point was
+        _post_process keeps the first line, at most MAX_SENTENCES sentences
+        and at most MAX_CHARS characters. Everything generated past that point was
         thrown away — with max_tokens=256 that was most of an 11-second
         wait in the 2026-09-22 log. Stopping here gives the same reply,
         sooner. Mirrors _post_process's own rules, so it never stops before
@@ -265,12 +278,12 @@ class LlamaEngine:
             return True
         if any(sep in t for sep in ("===", "---", "***", "___")):
             return True
-        if len(t) > 200:
+        if len(t) > MAX_CHARS + 20:
             return True
         # A sentence boundary is punctuation followed by whitespace — the
         # same rule _post_process splits on, so "3.5" or a trailing "." at
         # the very end (not yet followed by anything) don't count.
-        return len(re.findall(r"[.!?]+[\"')\]]*\s", t)) >= 2
+        return len(re.findall(r"[.!?]+[\"')\]]*\s", t)) >= MAX_SENTENCES
 
     def _stream(self, chunks, get_text) -> tuple[str, str, int, float | None]:
         """Consume a streaming completion, stopping as soon as the reply is complete."""
