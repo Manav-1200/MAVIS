@@ -35,6 +35,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **MAVIS spoke with the flat Piper voice** even though the natural Kokoro voice was loaded on every start: the executor only used Kokoro when told to. Kokoro is now the default, spoken a sentence at a time; Piper remains the fallback.
 - **"What am I looking at?" named the wrong window** — the orb took keyboard focus when it opened, so MAVIS knew of no focused window and the model guessed. MAVIS now reads the window it was started from, and on niri hands focus back to it.
 - **"Stop" while MAVIS was speaking was never heard** — a side effect of the stutter fix, which made a single word too short to count. MAVIS now listens at once and only pauses its voice for longer speech; a lone "stop" is transcribed and acted on.
 - **"What's focused?" answered with an earlier answer** — the model copied its previous reply ("Brave") with kitty focused. What's on screen now sits apart from the conversation, last in the prompt.

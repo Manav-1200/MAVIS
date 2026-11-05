@@ -454,6 +454,11 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.10 — A natural voice (2026-11-05)
+
+- [x] **Kokoro is the default voice.** Piper was, because the executor used Kokoro only when `MAVIS_TTS_ENGINE=kokoro` was set — so the worker loaded and warmed Kokoro on every start and no reply ever used it. Piper stays as the fallback. See [`DECISIONS.md` §29](DECISIONS.md#29-a-natural-voice).
+- [x] **Replies are spoken a sentence at a time**, the next one synthesized while the current one plays, so a long reply starts as soon as its first sentence is ready.
+
 ### 6.9 — Third hardware run (2026-11-01)
 
 Details in [`DECISIONS.md` §28](DECISIONS.md#28-the-2026-11-01-run).
@@ -955,4 +960,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-01*
+*Last updated: 2026-11-05*

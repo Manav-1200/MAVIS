@@ -258,9 +258,9 @@ Current date and time is always injected — it isn't private, and without it th
 | `MAVIS_SENTINEL` | off | The System Sentinel: packages, privileges, file integrity |
 | `MAVIS_SENTINEL_ADVISORIES` | off | Also ask `arch-audit` / `debsecan` for security advisories — they download the advisory list |
 | `MAVIS_SENTINEL_CHECK_NOW` | off | Run the Sentinel's daily checks at startup even if they ran recently — for testing |
-| `MAVIS_TTS_ENGINE` | `piper` | `piper` or `kokoro` |
+| `MAVIS_TTS_ENGINE` | `kokoro` | `kokoro` (natural voice, via the worker) or `piper` (lighter, flatter); Kokoro falls back to Piper if the worker can't speak |
 | `MAVIS_VOICE_MODEL` | `~/.local/share/piper-voices/en_US-lessac-medium.onnx` | Piper voice model |
-| `MAVIS_KOKORO_VOICE` | `af_heart` | Kokoro voice |
+| `MAVIS_KOKORO_VOICE` | `af_heart` | Kokoro voice, e.g. `af_bella`, `af_nicole`, `am_michael`, `am_fenrir` (American English) |
 | `MAVIS_AUDIO_DEVICE` | auto | Exact microphone name as cpal reports it |
 | `MAVIS_AUDIO_OUTPUT` | system default | Playback device for speech, passed to `pw-play`/`paplay`/`aplay` |
 | `MAVIS_PYTHON_PATH` | `python3` | Interpreter for the worker, e.g. your venv's |

@@ -48,6 +48,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 26. [The 2026-10-13 run](#26-the-2026-10-13-run)
 27. [The 2026-10-15 run](#27-the-2026-10-15-run)
 28. [The 2026-11-01 run](#28-the-2026-11-01-run)
+29. [A natural voice](#29-a-natural-voice)
 
 ---
 
@@ -93,6 +94,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-05 | 6 | Kokoro made the default voice — Piper had been playing every reply while Kokoro sat loaded and unused; replies spoken a sentence at a time (§29) |
 | 11-01 | 6–8 | Same day, second run: MAVIS knew no focused window because the orb took focus at startup — now it reads the window first and hands focus back. Mic noise floor up 3× since 10-15 (§28) |
 | 11-01 | 6–8 | Third hardware run: "stop" over MAVIS's voice was never heard — the 10-15 fix had made it too short to count. Listening and pausing separated; Whisper model made a setting (§28) |
 | 10-15 | 6–8 | Second hardware run: stale focus answer and stuttering voice fixed — live facts last in the prompt, media paused while MAVIS speaks, 360 ms to interrupt (§27) |
@@ -1559,6 +1561,25 @@ Louder background against the same voice leaves Whisper less to work with. Most 
 ### Still open
 - The microphone, above.
 - "Can you repeat that?" (§26).
+
+---
+
+## 29. A natural voice
+
+*2026-11-05.* "It doesn't feel human-like."
+
+### Problem · Every reply used the flatter voice
+**Cause:** the worker defaults to Kokoro and loads and warms it on every start. The executor, which decides which engine speaks, used Kokoro only when `MAVIS_TTS_ENGINE=kokoro` was set; without it, it ran Piper (`en_US-lessac-medium`) itself. The two defaults disagreed, and the executor's won. In the 2026-11-01 log, six replies were played and not one speech request reached the worker. Kokoro finished warming up 2 s after the first reply had already played on Piper.
+**Fix:** Kokoro is the default, and `MAVIS_TTS_ENGINE=piper` picks Piper. If the worker can't produce the first sentence, the whole reply falls back to Piper, as before.
+**Evidence:** **Measured** with a stand-in worker and player: "There's nothing I can undo." went to the worker as a speech request, and its audio was played. **Not yet heard:** how much more natural Kokoro sounds is for the user's ears.
+
+### Decision · Sentence by sentence
+Kokoro returns a whole reply at once, so a long answer would wait for all of it before saying anything. The executor now splits a reply into sentences, and asks the worker for the next one while the current one plays.
+- A fragment under 25 characters rides along with the next sentence ("Okay. The history…"), so speech isn't chopped up.
+- A pause or a kill between sentences holds back or drops the rest.
+
+The gap between sentences is one player starting, which falls inside a natural pause.
+**Evidence:** **Proven** for the splitting (test), **reasoned** for the hand-over between sentences.
 
 ---
 
