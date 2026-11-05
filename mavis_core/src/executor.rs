@@ -467,7 +467,7 @@ impl TtsQueue {
                 paused_for_task.store(false, Ordering::SeqCst);
                 Self::emit_state(&bus_clone, "speaking").await;
 
-                let interrupted = Self::play_text(&text, &pid_for_task, &mut kill_rx).await;
+                let interrupted = Self::play_text(&text, &pid_for_task, &mut kill_rx, &paused_for_task).await;
                 let was_last = queue_depth_for_task.fetch_sub(1, Ordering::SeqCst) == 1;
 
                 if interrupted {
@@ -565,13 +565,16 @@ impl TtsQueue {
         text: &str,
         current_pid: &Arc<AtomicU32>,
         kill_rx: &mut mpsc::Receiver<()>,
+        paused: &Arc<AtomicBool>,
     ) -> bool {
+        // Kokoro unless asked otherwise. Piper was the default, so the
+        // worker loaded Kokoro on every start and nothing ever used it.
         let use_kokoro = std::env::var("MAVIS_TTS_ENGINE")
-            .map(|v| v.eq_ignore_ascii_case("kokoro"))
-            .unwrap_or(false);
+            .map(|v| !v.eq_ignore_ascii_case("piper"))
+            .unwrap_or(true);
 
         let result = if use_kokoro {
-            Self::play_kokoro(text, current_pid, kill_rx).await
+            Self::play_kokoro(text, current_pid, kill_rx, paused).await
         } else {
             Self::play_piper(text, current_pid, kill_rx).await
         };
@@ -585,44 +588,80 @@ impl TtsQueue {
         }
     }
 
+    /// Speak with Kokoro one sentence at a time, preparing the next while
+    /// the current one plays, so a long reply starts as soon as its first
+    /// sentence is ready.
     async fn play_kokoro(
         text: &str,
         current_pid: &Arc<AtomicU32>,
         kill_rx: &mut mpsc::Receiver<()>,
+        paused: &Arc<AtomicBool>,
     ) -> Result<bool> {
-        let wav_path = match synthesize_via_worker(text).await {
-            Ok(bytes) => {
-                let path = crate::util::runtime_dir().join("mavis_tts_kokoro.wav");
-                tokio::fs::write(&path, &bytes).await?;
-                path
-            }
-            Err(e) => {
-                warn!("Kokoro synthesis failed ({}), falling back to Piper", e);
-                return Self::play_piper(text, current_pid, kill_rx).await;
-            }
-        };
-
-        let mut child = spawn_audio_player(&wav_path).await?;
-        if let Some(pid) = child.id() {
-            current_pid.store(pid, Ordering::SeqCst);
-        }
-
-        let interrupted = tokio::select! {
-            result = child.wait() => {
-                if let Err(e) = result {
-                    warn!("Audio playback error: {}", e);
+        let sentences = speakable_sentences(text);
+        let (tx, mut rx) = mpsc::channel::<Result<Vec<u8>>>(2);
+        let synth = tokio::spawn(async move {
+            for sentence in sentences {
+                let audio = synthesize_via_worker(&sentence).await;
+                let failed = audio.is_err();
+                if tx.send(audio).await.is_err() || failed {
+                    break;
                 }
-                false
             }
-            _ = kill_rx.recv() => {
-                let _ = child.kill().await;
-                true
-            }
-        };
+        });
 
-        current_pid.store(0, Ordering::SeqCst);
-        let _ = tokio::fs::remove_file(&wav_path).await;
-        Ok(interrupted)
+        let mut spoken = 0usize;
+        while let Some(audio) = rx.recv().await {
+            let bytes = match audio {
+                Ok(bytes) => bytes,
+                Err(e) if spoken == 0 => {
+                    synth.abort();
+                    warn!("Kokoro synthesis failed ({}), falling back to Piper", e);
+                    return Self::play_piper(text, current_pid, kill_rx).await;
+                }
+                Err(e) => {
+                    warn!("Kokoro synthesis failed mid-reply ({})", e);
+                    break;
+                }
+            };
+
+            // A pause between sentences holds the next one back too.
+            while paused.load(Ordering::SeqCst) {
+                tokio::select! {
+                    _ = sleep(Duration::from_millis(50)) => {}
+                    _ = kill_rx.recv() => {
+                        synth.abort();
+                        return Ok(true);
+                    }
+                }
+            }
+
+            let wav_path = crate::util::runtime_dir().join(format!("mavis_tts_kokoro_{}.wav", spoken % 2));
+            tokio::fs::write(&wav_path, &bytes).await?;
+            let mut child = spawn_audio_player(&wav_path).await?;
+            if let Some(pid) = child.id() {
+                current_pid.store(pid, Ordering::SeqCst);
+            }
+            let killed = tokio::select! {
+                result = child.wait() => {
+                    if let Err(e) = result {
+                        warn!("Audio playback error: {}", e);
+                    }
+                    false
+                }
+                _ = kill_rx.recv() => {
+                    let _ = child.kill().await;
+                    true
+                }
+            };
+            current_pid.store(0, Ordering::SeqCst);
+            let _ = tokio::fs::remove_file(&wav_path).await;
+            if killed {
+                synth.abort();
+                return Ok(true);
+            }
+            spoken += 1;
+        }
+        Ok(false)
     }
 
     async fn play_piper(
@@ -847,6 +886,35 @@ async fn fallback_say_blocking(text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Split a reply into sentences to speak one by one. Fragments under 25
+/// characters ride along with the next ("Okay." "Dr. Smith") so speech
+/// isn't chopped into pieces.
+fn speakable_sentences(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let chars: Vec<char> = text.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        current.push(c);
+        let ends = matches!(c, '.' | '!' | '?') && chars.get(i + 1).is_none_or(|n| n.is_whitespace());
+        if ends && current.trim().chars().count() >= 25 {
+            out.push(current.trim().to_string());
+            current.clear();
+        }
+    }
+    let rest = current.trim();
+    if !rest.is_empty() {
+        match out.last_mut() {
+            // A short tail joins the sentence before it.
+            Some(last) if rest.chars().count() < 25 => {
+                last.push(' ');
+                last.push_str(rest);
+            }
+            _ => out.push(rest.to_string()),
+        }
+    }
+    out
+}
+
 /// Synthesize text via the Python worker (Kokoro). Returns raw WAV bytes.
 async fn synthesize_via_worker(text: &str) -> Result<Vec<u8>> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
@@ -906,6 +974,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn replies_are_spoken_a_sentence_at_a_time() {
+        let parts = speakable_sentences(
+            "Okay. The history of Linux starts in 1991. Linus Torvalds posted it to a newsgroup! Want more?",
+        );
+        assert_eq!(
+            parts,
+            [
+                "Okay. The history of Linux starts in 1991.",
+                "Linus Torvalds posted it to a newsgroup! Want more?",
+            ]
+        );
+        // Decimals and short replies stay whole.
+        assert_eq!(speakable_sentences("Volume is at 0.5 now."), ["Volume is at 0.5 now."]);
+        assert_eq!(speakable_sentences("Paused."), ["Paused."]);
+        assert!(speakable_sentences("   ").is_empty());
+    }
+
+    #[test]
     fn test_extract_actions_array() {
         let plan = serde_json::json!([{"type": "shell", "command": "echo hi"}]);
         let actions = Executor::extract_actions(&plan);
@@ -961,4 +1047,3 @@ mod tests {
         assert!(actions.is_empty());
     }
 }
-
