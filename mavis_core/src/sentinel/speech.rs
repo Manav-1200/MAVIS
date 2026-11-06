@@ -334,6 +334,9 @@ pub fn is_change_question(text: &str) -> bool {
     ];
 
     let w = words(text);
+    if asks_for_recent_changes(&w) {
+        return true;
+    }
     let Some(first) = w.first() else { return false };
     if !OPENERS.contains(&first.as_str()) {
         return false;
@@ -343,6 +346,24 @@ pub fn is_change_question(text: &str) -> bool {
     }
     let has = |set: &[&str]| w.iter().any(|x| set.contains(&x.as_str()));
     has(CHANGED) || (has(&["change"]) && has(&["did"])) || (has(STATE) && has(EVENT))
+}
+
+/// "Tell me the recent changes on my system", "any recent updates?". The
+/// noun form, which the grammar above didn't have; the model answered it
+/// with "I'll provide a summary" and nothing followed.
+#[rustfmt::skip]
+fn asks_for_recent_changes(w: &[String]) -> bool {
+    const GRAMMAR: &[&str] = &[
+        "tell", "me", "about", "all", "list", "show", "give", "read", "can", "could", "you",
+        "please", "what", "whats", "are", "were", "any", "the", "of", "on", "to", "my", "system",
+        "computer", "machine", "laptop", "pc", "recent", "latest", "new", "changes", "updates",
+        "today", "lately", "recently", "this", "last", "past", "week",
+    ];
+    let has = |set: &[&str]| w.iter().any(|x| set.contains(&x.as_str()));
+    !w.is_empty()
+        && w.iter().all(|x| GRAMMAR.contains(&x.as_str()))
+        && has(&["changes", "updates"])
+        && has(&["recent", "latest", "new", "today", "lately", "recently", "week"])
 }
 
 /// "What did that update do?" Every word must be in the grammar, so
@@ -426,6 +447,9 @@ mod tests {
             "What's been updated since this morning?",
             "Did anything change on my computer?",
             "what packages were removed today",
+            "Tell me all the recent changes on my system.",
+            "Can you list the latest updates?",
+            "any recent changes",
         ] {
             assert!(is_change_question(q), "should match: {q}");
         }
@@ -443,6 +467,8 @@ mod tests {
             "what change",
             "any change in the weather",
             "what time is it",
+            "what are the latest updates for firefox",
+            "tell me about changes",
             "",
         ] {
             assert!(!is_change_question(q), "should not match: {q}");

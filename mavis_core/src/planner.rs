@@ -100,7 +100,7 @@ fn strip_env_prefix(title: &str) -> &str {
 /// a terminal's title is its command and an editor's title names its file,
 /// so the model reads them the way a person glancing at the screen would.
 fn describe_active_window(window: &WindowInfo) -> String {
-    let title = strip_env_prefix(&window.window_title).trim();
+    let title = without_redirection(strip_env_prefix(&window.window_title)).trim();
     let mut line = if title.is_empty() {
         format!("The focused window is {}.", window.app_name)
     } else {
@@ -110,6 +110,26 @@ fn describe_active_window(window: &WindowInfo) -> String {
         line.push_str(&format!(" Its title names the file {}.", file));
     }
     line
+}
+
+/// A command title up to its first redirection: "cargo run 2>&1 | tee
+/// log" is "cargo run". Read aloud, the rest was symbols.
+fn without_redirection(title: &str) -> &str {
+    let is_redirect = |t: &str| {
+        matches!(t, "&&" | "||" | ";" | "&>" | ">" | ">>")
+            || t.trim_start_matches(|c: char| c.is_ascii_digit()).starts_with('>')
+    };
+    let mut end = title.len();
+    let mut at = 0;
+    for token in title.split_whitespace() {
+        let start = at + title[at..].find(token).unwrap_or(0);
+        if is_redirect(token) {
+            end = start;
+            break;
+        }
+        at = start + token.len();
+    }
+    &title[..end]
 }
 
 /// Every open window, counted here rather than by the model: it said "four"
@@ -158,10 +178,14 @@ fn describe_open_windows(windows: &[WindowInfo], current: Option<u64>) -> Option
             }
         })
         .collect();
+    // "How many windows?" was answered with the number of applications.
+    let total: usize = apps.iter().map(|(_, count, _)| count).sum();
     let mut parts = vec![format!(
-        "{} {} open: {}.",
+        "{} {} open, from {} {}: {}.",
+        total,
+        if total == 1 { "window is" } else { "windows are" },
         apps.len(),
-        if apps.len() == 1 { "application is" } else { "applications are" },
+        if apps.len() == 1 { "application" } else { "applications" },
         listed.join("; ")
     )];
 
@@ -261,12 +285,69 @@ fn find_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
     // all required the opposite: that every spoken word be in the name.
     // The longest match wins, so "visual studio code" beats "code".
     let padded = format!(" {} ", s);
-    apps.iter()
+    if let Some(a) = apps
+        .iter()
         .filter(|a| {
             let n = normalize(&a.name);
             !n.is_empty() && n.len() >= 3 && padded.contains(&format!(" {} ", n))
         })
         .max_by_key(|a| normalize(&a.name).len())
+    {
+        return Some(a);
+    }
+    None
+}
+
+/// `find_app`, then a near miss — for "open" and "close" only, where the
+/// whole target is meant to be an app name.
+fn find_named_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
+    find_app(spoken, apps).or_else(|| misheard_app(&normalize(spoken), apps))
+}
+
+/// A one-word name Whisper got slightly wrong: "tuner" for Thunar. Matched
+/// against each word of the app's name and its binary; only a single
+/// closest app counts, so two near names give nothing rather than a guess.
+fn misheard_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
+    if spoken.contains(' ') || spoken.len() < 4 {
+        return None;
+    }
+    let mut best: Option<(usize, &AppEntry)> = None;
+    let mut tied = false;
+    for app in apps {
+        let binary = crate::util::split_command_line(&app.exec)
+            .into_iter()
+            .next()
+            .map(|b| normalize(b.rsplit('/').next().unwrap_or(&b)))
+            .unwrap_or_default();
+        let name = normalize(&app.name);
+        let distance = name
+            .split_whitespace()
+            .chain(std::iter::once(binary.as_str()))
+            .filter(|w| w.len() >= 4)
+            .map(|w| {
+                // One letter off for short names, two for longer ones.
+                let allowed = if w.len().max(spoken.len()) >= 6 { 2 } else { 1 };
+                let d = edit_distance(spoken, w);
+                if d <= allowed { d } else { usize::MAX }
+            })
+            .min()
+            .unwrap_or(usize::MAX);
+        if distance == usize::MAX {
+            continue;
+        }
+        match best {
+            Some((d, a)) if d == distance && a.name != app.name => tied = true,
+            Some((d, _)) if d <= distance => {}
+            _ => {
+                best = Some((distance, app));
+                tied = false;
+            }
+        }
+    }
+    if tied {
+        return None;
+    }
+    best.map(|(_, a)| a)
 }
 
 /// Percent-encode a search query. Hand-rolled to avoid pulling in a URL
@@ -525,10 +606,12 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
     // browser", and the leading comma stopped every prefix from matching,
     // so the request went to the model, which announced an action nothing
     // had performed.
-    let t = strip_address(&lower)
-        .trim()
-        .trim_matches(|c: char| c.is_ascii_punctuation())
-        .trim();
+    let t = request_body(
+        strip_address(&lower)
+            .trim()
+            .trim_matches(|c: char| c.is_ascii_punctuation())
+            .trim(),
+    );
 
     // Two requests in one breath: "open firefox and play daylight".
     if let Some((first, second)) = t.split_once(" and ") {
@@ -537,7 +620,11 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
             if let (Some(app), Some((said, url))) =
                 (opened_app(first, apps).filter(|a| a.opens_links), link_in(&then))
             {
-                return Some(open_link(said.trim_end_matches('.').to_string(), url, Some(app)));
+                let mut plan = open_link(said.trim_end_matches('.').to_string(), url, Some(app));
+                if wants_playing(&then) {
+                    mark_play(&mut plan);
+                }
+                return Some(plan);
             }
             if let Some(Some(mut plan)) = match_action_intent(first, apps).map(|p| p.as_array().cloned()) {
                 plan.extend(then.as_array().cloned().unwrap_or_default());
@@ -565,7 +652,12 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
                 continue;
             }
             let url = format!("https://www.youtube.com/results?search_query={}", urlencode(&query));
-            return Some(open_link(format!("Searching YouTube for {}", query), url, app));
+            let mut plan = open_link(format!("Searching YouTube for {}", query), url, app);
+            // "play" means the video itself; the planner picks it before launch.
+            if prefix != "search youtube for " {
+                mark_play(&mut plan);
+            }
+            return Some(plan);
         }
     }
 
@@ -588,7 +680,7 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
             if target.contains("://") {
                 return say_then_open(format!("Opening {}.", target), target.to_string());
             }
-            if let Some(app) = find_app(target, apps) {
+            if let Some(app) = find_named_app(target, apps) {
                 // Exec may carry flags and quoted paths; the executor's
                 // app action takes a binary plus args.
                 let mut parts = crate::util::split_command_line(&app.exec).into_iter();
@@ -599,9 +691,17 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
                     {"type": "app", "target": bin, "args": args},
                 ]));
             }
-            // Nothing installed by that name — don't guess at a binary
-            // that probably doesn't exist. Try the next verb, then let the
-            // model answer.
+            // Asked outright ("open tuner") and nothing is installed by
+            // that name: say so. The model used to answer "I can't open
+            // applications", which is wrong.
+            if at == 0 && matches!(verb, "open " | "launch ") {
+                let name = target.strip_prefix("the ").unwrap_or(target);
+                return Some(serde_json::json!({
+                    "type": "say",
+                    "text": format!("I couldn't find an app called {}.", name)
+                }));
+            }
+            // Mid-sentence ("how do I open a file"): the model answers.
             continue;
         }
     }
@@ -619,6 +719,118 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
     }
 
     None
+}
+
+/// The request inside polite wrapping: "can you open thunar for me" is
+/// "open thunar". Only the edges change, so a question stays a question.
+fn request_body(t: &str) -> &str {
+    const LEADS: &[&str] = &[
+        "can you ", "could you ", "would you ", "will you ", "please ", "just ",
+        "i want you to ", "i'd like you to ", "id like you to ", "i need you to ",
+    ];
+    const TAILS: &[&str] = &[" for me", " please", " now", " thanks", " thank you"];
+    let mut t = t.trim();
+    loop {
+        let before = t;
+        for lead in LEADS {
+            t = t.strip_prefix(lead).unwrap_or(t);
+        }
+        for tail in TAILS {
+            t = t.strip_suffix(tail).unwrap_or(t);
+        }
+        t = t.trim().trim_end_matches(|c: char| c.is_ascii_punctuation()).trim();
+        if t == before {
+            return t;
+        }
+    }
+}
+
+/// Whether a plan asks for a video to be played rather than searched.
+fn wants_playing(plan: &serde_json::Value) -> bool {
+    plan.as_array()
+        .is_some_and(|a| a.iter().any(|x| x.get("play").and_then(|v| v.as_bool()) == Some(true)))
+}
+
+fn mark_play(plan: &mut serde_json::Value) {
+    if let Some(actions) = plan.as_array_mut() {
+        for action in actions.iter_mut().filter(|a| a.get("type").and_then(|t| t.as_str()) == Some("app")) {
+            action["play"] = serde_json::json!(true);
+        }
+    }
+}
+
+/// The first video on a YouTube results page. Ads use a different
+/// renderer, so this is the top real result.
+fn first_video_id(html: &str) -> Option<String> {
+    const MARK: &str = "\"videoRenderer\":{\"videoId\":\"";
+    let at = html.find(MARK)? + MARK.len();
+    let id = html.get(at..at + 11)?;
+    id.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        .then(|| id.to_string())
+}
+
+/// Swap a "play" plan's search page for the top video, so it plays instead
+/// of showing results. Without network or curl the search page stays.
+async fn resolve_videos(plan: &mut serde_json::Value) {
+    if cfg!(test) || !wants_playing(plan) {
+        return;
+    }
+    let Some(actions) = plan.as_array_mut() else { return };
+    let Some(launch) = actions.iter_mut().find(|a| a.get("play").is_some()) else { return };
+    let in_args = !launch["target"].as_str().unwrap_or("").contains("://");
+    let search = if in_args {
+        launch["args"].as_array().and_then(|a| a.last()).and_then(|v| v.as_str())
+    } else {
+        launch["target"].as_str()
+    };
+    let Some(search) = search.map(String::from) else { return };
+
+    let fetched = tokio::time::timeout(
+        std::time::Duration::from_secs(6),
+        tokio::process::Command::new("curl")
+            .args(["-sL", "--max-time", "5", "-A", "Mozilla/5.0 (X11; Linux x86_64)"])
+            .args(["-H", "Accept-Language: en", &search])
+            .output(),
+    )
+    .await;
+    let html = match fetched {
+        Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => {
+            warn!("Planner: couldn't reach YouTube to pick a video — opening the search");
+            return;
+        }
+    };
+    let Some(id) = first_video_id(&html) else {
+        warn!("Planner: no video found on the results page — opening the search");
+        return;
+    };
+    let watch = format!("https://www.youtube.com/watch?v={}", id);
+    info!("Planner: playing {}", watch);
+    if in_args {
+        if let Some(last) = launch["args"].as_array_mut().and_then(|a| a.last_mut()) {
+            *last = serde_json::json!(watch);
+        }
+    } else {
+        launch["target"] = serde_json::json!(watch);
+    }
+    for action in actions.iter_mut() {
+        if let Some(text) = action.get("text").and_then(|t| t.as_str()) {
+            let text = text.replacen("Searching YouTube for ", "Playing ", 1);
+            action["text"] = serde_json::json!(text);
+        }
+    }
+}
+
+/// Whether a transcript is a request MAVIS acts on without the model.
+/// Those skip the confidence gate in main: matching an installed app or a
+/// known phrase is better evidence than Whisper's own score.
+pub fn heard_as_command(text: &str, apps: &[AppEntry]) -> bool {
+    let t = strip_address(text);
+    is_stop_request(t)
+        || is_undo_request(t)
+        || match_action_intent(t, apps).is_some()
+        || close_request(t, &[], apps).is_some()
 }
 
 /// What "close <app>" turned out to mean.
@@ -645,7 +857,7 @@ fn close_request(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Optio
     for lead in ["the ", "all ", "my "] {
         target = target.strip_prefix(lead).unwrap_or(target);
     }
-    for tail in [" for me", " please", " windows", " window", " app"] {
+    for tail in [" mavis", " for me", " please", " windows", " window", " app"] {
         target = target.strip_suffix(tail).unwrap_or(target);
     }
     if target.is_empty() {
@@ -653,7 +865,7 @@ fn close_request(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Optio
     }
 
     // The installed app the words name, if any, also tells us its binary.
-    let app = find_app(target, apps);
+    let app = find_named_app(target, apps);
     let binary = app.and_then(|a| {
         let bin = crate::util::split_command_line(&a.exec).into_iter().next()?;
         Some(bin.rsplit('/').next().unwrap_or(&bin).to_lowercase())
@@ -696,7 +908,7 @@ fn window_app_words(app_id: &str) -> String {
 fn opened_app<'a>(clause: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
     ["open ", "launch ", "start ", "run "].iter().find_map(|verb| {
         let at = find_verb(clause, verb)?;
-        find_app(clause[at + verb.len()..].trim(), apps)
+        find_named_app(clause[at + verb.len()..].trim(), apps)
     })
 }
 
@@ -935,6 +1147,7 @@ impl Planner {
             .or_else(|| event.payload.get("intent").and_then(|v| v.as_str()))
             .unwrap_or("unknown");
         // "MAVIS, …" (or a mishearing of it) is who it's said to, not what.
+        let only_name = strip_address(intent).is_empty() && !intent.trim().is_empty();
         let intent = match strip_address(intent) {
             "" => intent,
             rest => rest,
@@ -960,13 +1173,24 @@ impl Planner {
             let wm = self.working.read().await;
             close_request(intent, &wm.open_windows, &self.apps)
         };
-        let answering = self.awaiting.lock().unwrap_or_else(|p| p.into_inner()).claims(event.id);
+        let (answering, repeats) = {
+            let awaiting = self.awaiting.lock().unwrap_or_else(|p| p.into_inner());
+            (awaiting.claims(event.id), awaiting.repeats(intent))
+        };
+        // Repeating the request ("close firefox" again) answers it too.
         if answering
-            && !is_undo_request(intent)
-            && close.is_none()
-            && match_action_intent(intent, &self.apps).is_none()
+            && (repeats
+                || (!is_undo_request(intent)
+                    && close.is_none()
+                    && match_action_intent(intent, &self.apps).is_none()))
         {
             info!("Planner: that answers a confirmation — left to the permission gate");
+            return Ok(());
+        }
+
+        // Just the name: they want attention, not an answer from the model.
+        if only_name {
+            self.say("Yes?".to_string());
             return Ok(());
         }
 
@@ -1077,7 +1301,8 @@ impl Planner {
 
         // Action intents — deterministic, no LLM round trip. Emitted as a
         // say+action plan so the user gets spoken confirmation.
-        if let Some(plan) = match_action_intent(intent, &self.apps) {
+        if let Some(mut plan) = match_action_intent(intent, &self.apps) {
+            resolve_videos(&mut plan).await;
             info!("Planner: matched action intent — {}", plan);
             let plan_event = Event {
                 id: uuid::Uuid::new_v4(),
@@ -1103,12 +1328,10 @@ impl Planner {
                 "messages": [
                     {"role": "user", "content": user_message}
                 ],
-                // Replies are cut to two sentences / 180 characters after
-                // generation anyway, so anything past ~50 tokens was
-                // generated only to be thrown away — at 256 that was most
-                // of an 11-second wait. The worker also stops early once
-                // two sentences are complete; this is the backstop.
-                "max_tokens": 96,
+                // Replies are cut to three sentences / 320 characters
+                // after generation, about 80 tokens. The worker stops at
+                // that point itself; this is the backstop.
+                "max_tokens": 128,
                 "temperature": 0.7,
                 "working_memory": working_memory
             }),
@@ -1923,7 +2146,7 @@ mod tests {
             window("notes", "todo", 2, false),
         ];
         let line = describe_open_windows(&windows, Some(1)).unwrap();
-        assert!(line.starts_with("4 applications are open:"), "{}", line);
+        assert!(line.starts_with("5 windows are open, from 4 applications:"), "{}", line);
         assert!(line.contains("term (2 windows, workspace 1)"), "{}", line);
         assert!(line.contains("files (workspace 1)"), "{}", line);
         assert!(line.contains("Windows are on 2 workspaces: 1 and 2."), "{}", line);
@@ -1936,6 +2159,82 @@ mod tests {
         assert_eq!(describe_active_window(&w), "The focused window is anything — \"cargo run\".");
         let w = window("editor", "main.rs - mavis_core", 1, true);
         assert!(describe_active_window(&w).ends_with("Its title names the file main.rs."));
+        // Read aloud, "2>&1 | tee ~/log" was symbols.
+        let w = window("term", "cargo run 2>&1 | tee ~/mavis-test.log", 1, true);
+        assert_eq!(describe_active_window(&w), "The focused window is term — \"cargo run\".");
+        let w = window("term", "make && make install", 1, true);
+        assert_eq!(describe_active_window(&w), "The focused window is term — \"make\".");
+        // A page title's separator is not a redirection.
+        let w = window("webby", "News | Site", 1, true);
+        assert_eq!(describe_active_window(&w), "The focused window is webby — \"News | Site\".");
+    }
+
+    fn file_manager_apps() -> Vec<AppEntry> {
+        let mut apps = test_apps();
+        apps.push(AppEntry { name: "Thunar File Manager".into(), exec: "thunar %F".into(), opens_links: false });
+        apps
+    }
+
+    /// 2026-11-05: "can you open tuner for me?" reached the model, which
+    /// said it can't open applications.
+    #[test]
+    fn a_misheard_app_name_still_opens_it() {
+        let apps = file_manager_apps();
+        let plan = match_action_intent("Babys, can you open tuner for me?", &apps).unwrap();
+        assert_eq!(plan[1]["target"], "thunar", "{}", plan);
+        // Too far from any name, or close to two: nothing is guessed.
+        assert!(misheard_app("tunnel", &apps).is_none());
+        let twins = vec![
+            AppEntry { name: "Nodes".into(), exec: "nodes".into(), opens_links: false },
+            AppEntry { name: "Notes".into(), exec: "notes".into(), opens_links: false },
+        ];
+        assert!(misheard_app("nopes", &twins).is_none());
+    }
+
+    #[test]
+    fn asking_for_an_app_that_is_not_installed_says_so() {
+        let apps = test_apps();
+        let plan = match_action_intent("please open the gimp", &apps).unwrap();
+        assert_eq!(plan["text"], "I couldn't find an app called gimp.");
+        // Mid-sentence it's a question for the model.
+        assert!(match_action_intent("how do I open a file", &apps).is_none());
+    }
+
+    #[test]
+    fn polite_wrapping_is_not_part_of_the_request() {
+        assert_eq!(request_body("i want you to open firefox and play daylight for me"), "open firefox and play daylight");
+        assert_eq!(request_body("can you play lofi please."), "play lofi");
+        assert_eq!(request_body("what can you do"), "what can you do");
+        let apps = test_apps();
+        let plan = match_action_intent("I want you to open Webby and play Daylight by Maroon 5 for me.", &apps).unwrap();
+        assert!(plan[1]["args"][1].as_str().unwrap().ends_with("=daylight+by+maroon+5"), "{}", plan);
+    }
+
+    #[test]
+    fn play_asks_for_the_video_and_search_does_not() {
+        let apps = test_apps();
+        assert!(wants_playing(&match_action_intent("play daylight", &apps).unwrap()));
+        assert!(wants_playing(&match_action_intent("open webby and play daylight", &apps).unwrap()));
+        assert!(!wants_playing(&match_action_intent("search youtube for daylight", &apps).unwrap()));
+    }
+
+    #[test]
+    fn the_top_video_is_found_past_the_ads() {
+        let html = r#"{"adSlotRenderer":{"videoId":"AAAAAAAAAAA"}},{"videoRenderer":{"videoId":"u9Dg-g7t2l4","thumbnail""#;
+        assert_eq!(first_video_id(html).as_deref(), Some("u9Dg-g7t2l4"));
+        assert_eq!(first_video_id("<html>consent</html>"), None);
+        assert_eq!(first_video_id(r#""videoRenderer":{"videoId":"short""#), None);
+    }
+
+    #[test]
+    fn commands_are_recognised_for_the_confidence_gate() {
+        let apps = file_manager_apps();
+        for said in ["close notes mavis", "Mavis, stop.", "Mavis, open tuner.", "play daylight", "volume up"] {
+            assert!(heard_as_command(said, &apps), "{said}");
+        }
+        for said in ["And what are those?", "We'll all be raising recent changes on my system."] {
+            assert!(!heard_as_command(said, &apps), "{said}");
+        }
     }
 
     #[test]

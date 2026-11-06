@@ -120,6 +120,7 @@ async fn main() -> Result<()> {
     let installed_apps = platform.installed_apps();
     // The names of this machine's apps, so Whisper expects them.
     let stt_hints = speech_hints(&installed_apps);
+    let apps_for_stt = installed_apps.clone();
     // The planner's own sentinel.db connection, only when the Sentinel is on.
     let sentinel_for_planner = if sentinel::enabled() {
         match sentinel::store::SentinelStore::new(&data_dir.join("sentinel.db")) {
@@ -137,6 +138,7 @@ async fn main() -> Result<()> {
     let awaiting = safety::SharedAwaiting::default();
     let awaiting_for_planner = awaiting.clone();
     let awaiting_for_router = awaiting.clone();
+    let awaiting_for_stt = awaiting.clone();
     let tts_active_for_planner = tts_active.clone();
     let planner_handle = supervise("Planner", Arc::clone(&bus), move || {
         let mut planner = planner::Planner::new(
@@ -522,10 +524,14 @@ async fn main() -> Result<()> {
             };
 
             if let Some((text, confidence)) = response_text {
-                // A short "stop" decodes with low confidence, and lost the
-                // reply it was meant to end. It's honoured anyway: the worst
-                // it can do is pause something.
-                let unclear = confidence < UNCLEAR_CONFIDENCE && !planner::is_stop_request(&text);
+                // Not for a known command ("stop", "close firefox"): naming
+                // an installed app is better evidence than Whisper's score,
+                // and on 2026-11-05 correct commands scored 0.49–0.51. Nor
+                // for the answer to "Shall I?", which the gate checks itself.
+                let answering = awaiting_for_stt.lock().unwrap_or_else(|p| p.into_inner()).is_open();
+                let unclear = confidence < UNCLEAR_CONFIDENCE
+                    && !answering
+                    && !planner::heard_as_command(&text, &apps_for_stt);
                 if text.is_empty() && paused_playback {
                     resume("nothing but noise");
                 } else if text.is_empty() {
@@ -970,7 +976,9 @@ fn speech_hints(apps: &[context_snapshot::AppEntry]) -> String {
     names.dedup();
     let mut out = String::new();
     for name in names {
-        if out.len() + name.len() + 2 > 300 {
+        // 300 cut the list off alphabetically, so Thunar never made it.
+        // Whisper's prompt holds about 220 tokens; this leaves room.
+        if out.len() + name.len() + 2 > 600 {
             break;
         }
         if !out.is_empty() {

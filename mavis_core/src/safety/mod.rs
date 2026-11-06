@@ -27,6 +27,8 @@ struct Pending {
     /// acknowledgement of the risk, not a bare "yeah".
     requires_explicit: bool,
     asked_at: Instant,
+    /// What was asked, e.g. "close Firefox".
+    what: String,
 }
 
 /// How long a held action stays answerable. Short on purpose: a "yes" thirty
@@ -41,6 +43,8 @@ pub const CONFIRMATION_WINDOW: Duration = Duration::from_secs(if cfg!(test) { 2 
 pub struct Awaiting {
     asked_at: Option<Instant>,
     answered_by: Option<uuid::Uuid>,
+    /// What the open question asks, for answers that repeat it.
+    what: Option<String>,
 }
 
 pub type SharedAwaiting = Arc<std::sync::Mutex<Awaiting>>;
@@ -50,7 +54,17 @@ impl Awaiting {
     /// whichever of the gate and the planner sees the utterance first.
     pub fn claims(&self, utterance: uuid::Uuid) -> bool {
         self.answered_by == Some(utterance)
-            || self.asked_at.is_some_and(|at| at.elapsed() <= CONFIRMATION_WINDOW)
+            || self.is_open()
+    }
+
+    /// A question is open and still answerable.
+    pub fn is_open(&self) -> bool {
+        self.asked_at.is_some_and(|at| at.elapsed() <= CONFIRMATION_WINDOW)
+    }
+
+    /// The utterance repeats the open question's request.
+    pub fn repeats(&self, said: &str) -> bool {
+        self.is_open() && self.what.as_deref().is_some_and(|what| repeats_request(said, what))
     }
 }
 
@@ -177,8 +191,9 @@ impl PermissionGate {
                     score: assessment.score,
                     requires_explicit,
                     asked_at,
+                    what: assessment.what.clone(),
                 });
-                self.set_awaiting(Some(asked_at), None);
+                self.set_awaiting(Some(asked_at), None, Some(&assessment.what));
                 self.show("asking");
                 self.speak(question);
             }
@@ -194,7 +209,7 @@ impl PermissionGate {
         if let Some(pending) = self.pending.take() {
             info!("PermissionGate: confirmation window expired, discarding");
             self.record(&pending, "expired", "no answer in time").await;
-            self.set_awaiting(None, None);
+            self.set_awaiting(None, None, None);
             self.show("answered");
         }
     }
@@ -215,7 +230,7 @@ impl PermissionGate {
             self.expire().await;
             return;
         }
-        self.set_awaiting(None, Some(event.id));
+        self.set_awaiting(None, Some(event.id), None);
         self.show("answered");
 
         // Typed intents (the hotkey socket) carry "intent" rather than "text".
@@ -233,7 +248,9 @@ impl PermissionGate {
             // a mistranscription to produce. High-risk actions need the word.
             said.contains("administrator") && is_affirmative(said)
         } else {
-            is_affirmative(said)
+            // Saying the request again ("close firefox") means yes too: on
+            // 2026-11-05 that was the natural answer, and it cancelled.
+            is_affirmative(said) || repeats_request(said, &pending.what)
         };
 
         if approved {
@@ -286,7 +303,7 @@ impl PermissionGate {
             return;
         }
         info!("PermissionGate: confirmed by a tap on the orb, executing");
-        self.set_awaiting(None, Some(tap.id));
+        self.set_awaiting(None, Some(tap.id), None);
         self.show("answered");
         self.record(&pending, "confirmed", "user tapped the orb").await;
         self.bus.publish(Event {
@@ -306,10 +323,11 @@ impl PermissionGate {
         }
     }
 
-    fn set_awaiting(&self, asked_at: Option<Instant>, answered_by: Option<uuid::Uuid>) {
+    fn set_awaiting(&self, asked_at: Option<Instant>, answered_by: Option<uuid::Uuid>, what: Option<&str>) {
         let mut awaiting = self.awaiting.lock().unwrap_or_else(|p| p.into_inner());
         awaiting.asked_at = asked_at;
         awaiting.answered_by = answered_by;
+        awaiting.what = what.map(String::from);
     }
 
     /// Tell the orb a question is open ("asking") or closed ("answered").
@@ -357,6 +375,27 @@ fn summarise(plan: &serde_json::Value) -> String {
         })
         .collect::<Vec<_>>()
         .join(" | ")
+}
+
+fn words_of(said: &str) -> Vec<String> {
+    said.to_lowercase()
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .map(String::from)
+        .collect()
+}
+
+/// The answer says the request again and nothing else: "close firefox,
+/// mavis" for "close Firefox". Its verb and at least one more of its words,
+/// and no word it doesn't have, apart from fillers.
+pub fn repeats_request(said: &str, what: &str) -> bool {
+    const FILLER: &[&str] = &["mavis", "please", "just", "yes", "now", "the", "it", "i", "said"];
+    let said: Vec<String> = words_of(said).into_iter().filter(|w| !FILLER.contains(&w.as_str())).collect();
+    let asked = words_of(what);
+    let Some(verb) = asked.first() else { return false };
+    said.first() == Some(verb) && said.len() >= 2 && said.iter().all(|w| asked.contains(w))
 }
 
 /// Whether an utterance is a clear yes.
@@ -443,6 +482,16 @@ mod tests {
     // ---------------------------------------------------------------
     // is_affirmative
     // ---------------------------------------------------------------
+
+    #[test]
+    fn repeating_the_request_answers_it() {
+        assert!(repeats_request("close firefox mavis", "close Firefox"));
+        assert!(repeats_request("Close Thunar.", "close Thunar File Manager"));
+        assert!(!repeats_request("close", "close Firefox"));
+        assert!(!repeats_request("close brave", "close Firefox"));
+        assert!(!repeats_request("don't close firefox", "close Firefox"));
+        assert!(!repeats_request("firefox", "close Firefox"));
+    }
 
     #[test]
     fn clear_agreement_is_affirmative() {
