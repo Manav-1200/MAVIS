@@ -35,6 +35,11 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **"Play X" only searched YouTube.** It now opens the top video, falling back to the search if YouTube can't be reached.
+- **Apps with a misheard name didn't open** ("open tuner" for Thunar), and MAVIS claimed it couldn't open applications. Near misses match now, and a missing app is named as missing.
+- **"Close Firefox" couldn't be confirmed** by saying it again, and short commands were dropped as "didn't catch that". Repeating the request confirms it, and recognised commands are never dropped.
+- **MAVIS was heard as "Movies" and "Maybe".** The English-only speech model is the default, and Whisper is told how people address MAVIS.
+- **"How many windows?" gave the number of apps**, "what am I looking at?" read out shell symbols, and "tell me the recent changes" got a promise instead of an answer.
 - **MAVIS said it had no voice**, and sometimes narrated itself ("Mavis responds…") instead of answering. It now knows its replies are spoken and talks in the first person; narration is reduced to what it says.
 - **Replies were clipped** to two sentences and 180 characters ("4 workspaces open."). Up to three full sentences now.
 - **"Sorry, how was that?" got a different answer.** Asked to repeat, MAVIS repeats.

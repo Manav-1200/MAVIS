@@ -50,6 +50,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 28. [The 2026-11-01 run](#28-the-2026-11-01-run)
 29. [A natural voice](#29-a-natural-voice)
 30. [What MAVIS says about itself](#30-what-mavis-says-about-itself)
+31. [The 2026-11-05 full run](#31-the-2026-11-05-full-run)
 
 ---
 
@@ -95,6 +96,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-05 | 6 | Full run: "play" only searched, "open tuner" (Thunar) got "I can't open applications", "close Firefox" repeated as the answer was dropped as unclear. Play picks the top video, near-miss app names match, commands skip the confidence gate (§31) |
 | 11-05 | 6 | Voice run: the model said it had no voice, narrated itself in the third person, was clipped to two sentences and ignored "how was that?" — instructions and reply clean-up fixed (§30) |
 | 11-05 | 6 | Kokoro made the default voice — Piper had been playing every reply while Kokoro sat loaded and unused; replies spoken a sentence at a time (§29) |
 | 11-01 | 6–8 | Same day, second run: MAVIS knew no focused window because the orb took focus at startup — now it reads the window first and hands focus back. Mic noise floor up 3× since 10-15 (§28) |
@@ -1615,6 +1617,55 @@ Rule 15 forbade repeating a reply, to stop MAVIS answering a misheard message wi
 - Focus: kitty read at startup and handed back.
 - "Thank you for watching." on background noise, a known Whisper hallucination, was dropped as it should be.
 - Whisper still ran `small`, not `small.en`. "Mavis, can you hear me" became "What if it's going to hear me?". `[stt] model = "small.en"` is the setting to try.
+
+---
+
+## 31. The 2026-11-05 full run
+
+*2026-11-05, later.* "It can't open every application, it can't close applications, it can't play music and just searches them on YouTube."
+
+### Problem · "Play" opened a search page
+"Open Firefox and play Daylight by Maroon 5 for me" opened Firefox on the results for "daylight by maroon 5 for me". Searching was all "play" ever did.
+**Fix:** "play X" and "put on X" now fetch the results page with `curl` and open the top video (`watch?v=…`). Ads use a different renderer from real results, so the first real result is picked. If curl is missing, the network is down or no video is found, the search page opens as before and the log says why. "Search YouTube for X" still searches. Polite wrapping is stripped from the edges of a request: "can you", "I want you to", "for me", "please".
+**Evidence:** **Proven** for the parsing and the wrapping (tests). **Not yet run:** the fetch itself, which this sandbox's network can't reach. Firefox may block a video with sound from starting by itself; README says how to allow it.
+
+### Problem · "Open tuner" got "I can't open applications"
+Whisper heard Thunar as "tuner". Nothing matched, so the request went to the model, and rule 14 had it say it can't open apps.
+**Fix:**
+- For "open" and "close", a one-word name one letter off (or two, for names of six letters or more) matches an app's name word or binary. Only a single closest app counts, so two near names give nothing.
+- "Open X" or "launch X" said outright, with nothing installed by that name, answers "I couldn't find an app called X." Mid-sentence ("how do I open a file") it still goes to the model.
+- Rule 14 now says that if an action request reaches the model, it wasn't understood: ask them to say it again. It never says it can't open apps.
+- Whisper's app hints stopped at 300 characters, alphabetically, so later names like Thunar were never in them. The limit is 600.
+**Evidence:** **Proven** (tests: "Babys, can you open tuner for me?" opens Thunar; a tie opens nothing).
+
+### Problem · "Close Firefox" couldn't be confirmed
+MAVIS asked "Shall I close Firefox?". The user said "close firefox mavis" (confidence 0.50), then "Maybe it's close Firefox" (0.51). Both were dropped as unclear, and the question expired.
+**Fix:**
+- Saying the request again answers yes: the question's verb plus at least one more of its words, and nothing else apart from fillers like "mavis" and "please".
+- While a question is open, the confidence gate doesn't apply; the gate's own strict check does.
+- A transcript that matches a known command skips the gate too ("stop", "close firefox", "open tuner", "volume up"). Naming an installed app or a fixed phrase is better evidence than Whisper's score: in this run correct commands scored 0.49–0.51. The gate stays at 0.55 for everything else, because 0.52 still produced "We'll all be raising recent changes on my system".
+**Evidence:** **Proven** (tests for the repeat rule and the command check).
+
+### Problem · Mishearing the name
+"Movies, can you hear me?" got "What would you like to know about movies?". "Maybe" and "Babys" were the same name. The run still used `small`.
+**Fix:**
+- `small.en` is now the default in `config/config.toml`.
+- Whisper's prompt is written as things said to Mavis ("Mavis, open the terminal. …") instead of a bare "MAVIS.".
+- Just the name, on its own, gets "Yes?" instead of a reply from the model.
+**Evidence:** **Reasoned**; to be heard. Widening the misheard-name rule to two letters was rejected, since "Magic, show me" would have lost its first word.
+
+### Smaller fixes
+- **"How many windows?"** was answered with the number of applications. The fact now gives both: "5 windows are open, from 4 applications". **Proven** (test).
+- **"What am I looking at?"** read out `cargo run 2>&1 | tee ~/mavis-test.log`, symbols included; the phonemizer warned on every one. A window title now stops at its first shell redirection (`2>&1`, `>`, `&&`, `;`). Pipes stay, since page titles use them as separators. **Proven** (test).
+- **"Tell me the recent changes on my system"** got "I'll provide a summary", and nothing followed. The Sentinel now also answers the noun form: "recent changes" or "latest updates" with request words around them. **Proven** (test).
+- **Closing offers of help** ("What else can I assist you with?") are dropped from the end of a reply. Rule 5 already banned them. **Measured** on this run's replies.
+- **"close firefox mavis"**: a trailing "mavis" is no longer read as part of the app name.
+
+### Seen, no change
+- "Mavis, stop" over a reply stopped it at once.
+- Kitty was named as the focused window, and niri as the window manager.
+- Replies were up to three sentences ("history of Linux").
+- Whether "4 applications" (antigravity-ide, brave-browser, firefox, kitty) was right is for the user to say.
 
 ---
 

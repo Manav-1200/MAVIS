@@ -454,6 +454,17 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.12 — Full run (2026-11-05)
+
+Details in [`DECISIONS.md` §31](DECISIONS.md#31-the-2026-11-05-full-run).
+
+- [x] **"Play X" plays the top YouTube video** instead of opening a search; the search page is the fallback.
+- [x] **Misheard app names still open** ("tuner" → Thunar), and an app that isn't installed is said to be missing instead of the model claiming it can't open apps.
+- [x] **"Close X" can be confirmed by saying it again**, and commands and answers are no longer dropped as unclear.
+- [x] **`small.en` by default**, and a Whisper prompt that writes "Mavis" instead of "Movies".
+- [x] Window counts, terminal titles, "recent changes" and closing offers of help fixed
+- [ ] Hear these on hardware; confirm a video starts in Firefox
+
 ### 6.11 — What MAVIS says about itself (2026-11-05)
 
 Details in [`DECISIONS.md` §30](DECISIONS.md#30-what-mavis-says-about-itself).
@@ -970,4 +981,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-05*
+*Last updated: 2026-11-06*

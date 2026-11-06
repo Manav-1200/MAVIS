@@ -92,7 +92,7 @@ Full roadmap in [`PHASES.md`](PHASES.md). **Why** each thing is built the way it
 | UI | minifb |
 | System | DBus, inotify, global hotkeys |
 | AI | Python, llama-cpp-python (Q4_K_M) |
-| STT | faster-whisper `small` (CPU int8) |
+| STT | faster-whisper `small.en` (CPU int8) |
 | TTS | piper, kokoro |
 | Audio | cpal |
 | Memory search | SQLite FTS5 |
@@ -150,12 +150,13 @@ Some phrases are handled directly by the planner without an LLM round trip, so t
 
 | Say | MAVIS does |
 |-----|------------|
-| "open firefox", "launch terminal" | Launches the app |
-| "play lofi hip hop" | Opens a YouTube search |
+| "open firefox", "launch terminal", "can you open thunar for me" | Launches the app; a name misheard by a letter or two ("tuner") still finds it |
+| "play lofi hip hop" | Plays the top YouTube result (needs `curl`; without it, opens the search) |
+| "search youtube for lofi" | Opens a YouTube search |
 | "google rust async traits" | Opens a web search |
 | "volume up", "louder", "mute" | Adjusts volume |
 | "pause", "resume", "next song" | Media control |
-| "close Firefox", "quit the file manager" | Asks first, then closes that app's windows (niri for now) |
+| "close Firefox", "quit the file manager" | Asks first, then closes that app's windows (niri for now). Answer "yes", or say the request again |
 | "play lofi in Firefox", "open Firefox and play lofi" | Opens the video in that app — any installed app that handles web links |
 | "brighter", "dim the screen" | Adjusts brightness |
 
@@ -283,7 +284,9 @@ MAVIS_VAD_DEBUG=1 cargo run               # logs levels every ~3 s
 
 `VAD: calibrated — noise_floor=…` shows what MAVIS measured. While you talk, `peak=` should clearly exceed `start=`; while you're silent, `level=` should sit below `end=`. If speech barely clears `start=`, raise the mic (`wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.5`, say). If the room alone is near `start=`, lower it or reduce the noise — MAVIS can follow a noisy room, but it can't hear speech that isn't much louder than it. `room got louder mid-utterance` in the log means it caught itself listening to the room and recovered. `No speech in N s of audio` means the worker's speech detector heard only noise, so nothing was transcribed — which is how MAVIS avoids inventing words.
 
-**MAVIS often says "Sorry, I didn't catch that."** Try the English-only speech model: set `model = "small.en"` under `[stt]` in `config/config.toml` (a one-time download of about 460 MB). Also check the microphone level, below.
+**MAVIS often says "Sorry, I didn't catch that."** The English-only `small.en` is the default (a one-time download of about 460 MB on first start); `medium.en` hears better but is about 3× slower on CPU. Also check the microphone level, below.
+
+**A video opens but doesn't start.** Firefox blocks videos with sound from starting on their own by default. Allow it for YouTube: open youtube.com, click the icon left of the address, and set Autoplay to "Allow Audio and Video".
 
 **MAVIS hears you wrong more than it used to.** Check `VAD: calibrated — noise_floor=…` near the start of the log. In a quiet room it should be below about 0.07; at 0.15 or more the background is drowning your voice. Turn Mic Boost down rather than up, and keep fans and music down while testing.
 
