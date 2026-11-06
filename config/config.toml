@@ -28,7 +28,7 @@ listen_mode = "always"
 # Whisper model for speech recognition. "small.en" is English-only and
 # hears English better than "small" at the same speed (downloaded once,
 # about 460 MB). "medium.en" is better again, but roughly 3x slower on CPU.
-model = "small"
+model = "small.en"
 device = "cpu"           # "cuda" only if the GPU has room beside the LLM
 compute_type = "int8"    # "float16" with cuda
 

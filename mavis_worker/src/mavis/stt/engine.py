@@ -234,10 +234,13 @@ class STTEngine:
             # Whisper which rare words exist, so a weak signal resolves to
             # "clipboard" rather than "clayboard", and "MAVIS" rather than
             # "Ladies". App names come from this machine, not from here.
+            # Written as things said to her: a bare "MAVIS." still came out
+            # as "Movies", "Maybe" and "Babys" on 2026-11-05.
             initial_prompt=(
-                "MAVIS. clipboard, workspace, terminal, window, desktop, "
-                "application, browser, project, repository, volume, brightness."
-                + (f" {hints}." if hints else "")
+                "Mavis, can you hear me? Mavis, open the terminal. Mavis, what's "
+                "on my clipboard? Mavis, close the browser window. Mavis, which "
+                "workspace and project am I on? Volume up, brightness down."
+                + (f" Apps: {hints}." if hints else "")
             ),
         )
 

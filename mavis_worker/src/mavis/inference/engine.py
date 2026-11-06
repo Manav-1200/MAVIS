@@ -22,6 +22,11 @@ except ImportError as e:
 MAX_SENTENCES = 3
 MAX_CHARS = 320
 
+GENERIC_OFFER = re.compile(
+    r"\b(?:how|what(?: else)?) can i (?:help|assist|do for)\b|\banything else i can\b",
+    re.IGNORECASE,
+)
+
 
 class LlamaEngine:
     def __init__(self, model_path: str | None = None, n_gpu_layers: int = 20):
@@ -232,8 +237,13 @@ class LlamaEngine:
         if narrated:
             text = narrated.group(1).strip()
 
-        # 6. Truncate to the first few sentences
+        # 6. Truncate to the first few sentences, without a closing offer
+        # of help ("What else can I assist you with?"), which rule 5 bans
+        # and the model adds anyway.
         sentences = re.split(r"(?<=[.!?])\s+", text)
+        while len(sentences) > 1 and GENERIC_OFFER.search(sentences[-1]):
+            sentences.pop()
+        text = " ".join(sentences)
         if len(sentences) > MAX_SENTENCES:
             text = " ".join(sentences[:MAX_SENTENCES])
 
