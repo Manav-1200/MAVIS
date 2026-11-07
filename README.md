@@ -153,14 +153,15 @@ Some phrases are handled directly by the planner without an LLM round trip, so t
 | Say | MAVIS does |
 |-----|------------|
 | "open firefox", "launch terminal", "can you open thunar for me" | Launches the app; a name misheard by a letter or two ("tuner") still finds it |
-| "play lofi hip hop" | Plays the top YouTube result (needs `curl`; without it, opens the search) |
-| "search youtube for lofi" | Opens a YouTube search |
-| "google rust async traits" | Opens a web search |
+| "play lofi hip hop" | Plays it in the app you last played something in; the first time, your default browser. In a browser it plays the top result from the site under `[media]` in `config/config.toml` (YouTube as shipped; needs `curl`, else the search page opens) |
+| "play daylight on youtube using firefox", "play daylight in spotify" | Plays it in that app, and remembers the app for next time. What happens depends on what the app registers for: a browser gets the site; a media player gets a matching file from your Music or Videos folder; an app with its own link type gets a search inside it; any other app is just opened |
+| "search youtube for lofi", "search spotify for lofi" | That site's or app's search, without playing |
+| "google rust async traits", "look up …" | A web search on the site under `[web]` in `config/config.toml` |
 | "volume up", "louder", "mute" | Adjusts volume |
 | "pause", "resume", "next song" | Media control |
 | "close Firefox", "quit the file manager" | Asks first, then closes that app's windows (niri for now). Answer "yes", or say the request again |
 | "close it", "close this window" | Asks first, then closes the focused window |
-| "play lofi in Firefox", "open Firefox and play lofi" | Opens the video in that app — any installed app that handles web links |
+| "open Firefox and play lofi" | Plays it in the app just opened, if that app can play anything |
 | "brighter", "dim the screen" | Adjusts brightness |
 
 Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. Anything else goes to the local model with context attached.
@@ -289,7 +290,9 @@ MAVIS_VAD_DEBUG=1 cargo run               # logs levels every ~3 s
 
 **MAVIS often says "Sorry, I didn't catch that."** The English-only `small.en` is the default (a one-time download of about 460 MB on first start); `medium.en` hears better but is about 3× slower on CPU. Also check the microphone level, below.
 
-**A video opens but doesn't start.** Firefox blocks videos with sound from starting on their own by default. Allow it for YouTube: open youtube.com, click the icon left of the address, and set Autoplay to "Allow Audio and Video".
+**A video opens but doesn't start.** Some browsers block videos with sound from starting on their own. Allow autoplay for the site in your browser's site settings.
+
+**"Play X in <app>" only opens the app.** The app registers no way to be handed a search or a file. Which apps can do what comes from their launcher files, so nothing is listed in MAVIS itself.
 
 **MAVIS hears you wrong more than it used to.** Check `VAD: calibrated — noise_floor=…` near the start of the log. In a quiet room it should be below about 0.07; at 0.15 or more the background is drowning your voice. Turn Mic Boost down rather than up, and keep fans and music down while testing.
 

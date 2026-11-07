@@ -454,6 +454,16 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.14 — Playing in any app (2026-11-07)
+
+Details in [`DECISIONS.md` §33](DECISIONS.md#33-playing-in-any-app).
+
+- [x] **No site or browser in code**: `[media]` and `[web]` in `config/config.toml`.
+- [x] **"Play X in <app>" for any app**, by what it registers for: browser → site, media player → your files, own link type → its search.
+- [x] **The app last played in is used next time.**
+- [ ] Try with a second browser and a music app on hardware
+- [ ] Decide: the model choosing actions instead of phrase matching
+
 ### 6.13 — Run fixes (2026-11-06)
 
 Details in [`DECISIONS.md` §32](DECISIONS.md#32-the-2026-11-06-run).
@@ -991,4 +1001,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-07*
+*Last updated: 2026-11-08*

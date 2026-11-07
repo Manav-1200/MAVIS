@@ -52,6 +52,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 30. [What MAVIS says about itself](#30-what-mavis-says-about-itself)
 31. [The 2026-11-05 full run](#31-the-2026-11-05-full-run)
 32. [The 2026-11-06 run](#32-the-2026-11-06-run)
+33. [Playing in any app](#33-playing-in-any-app)
 
 ---
 
@@ -97,6 +98,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-07 | 6 | "Play X" no longer hardcodes a site or browser: sites come from config, the app from what it registers for, and the last app is remembered (§33) |
 | 11-06 | 6 | Run: the worker never read `config/config.toml` (still `small`), "open Thunar" ran Bulk Rename, "That's Mavis, close …" cancelled, the model invented "no recent updates". Config read from the repo, binary-sharing entries ranked, "close it" added (§32) |
 | 11-05 | 6 | Full run: "play" only searched, "open tuner" (Thunar) got "I can't open applications", "close Firefox" repeated as the answer was dropped as unclear. Play picks the top video, near-miss app names match, commands skip the confidence gate (§31) |
 | 11-05 | 6 | Voice run: the model said it had no voice, narrated itself in the third person, was clipped to two sentences and ignored "how was that?" — instructions and reply clean-up fixed (§30) |
@@ -1709,6 +1711,31 @@ Pending updates ("how many updates do I have") are not something MAVIS can see y
 - "Mavis" alone got "Yes?"; "can you hear me" was heard right (0.79). The rest ran on `small`, so hearing should get better once `small.en` loads.
 - The window count said three (antigravity-ide, brave-browser, kitty), with no Thunar windows listed although Bulk Rename had been opened twice. Either they were closed by hand, or windows are missed; to be confirmed.
 - The orb took keyboard focus about ten times and gave it back each time. Whether that was the mouse passing over it or the compositor is unknown; the orb never asks for focus itself.
+
+---
+
+## 33. Playing in any app
+
+*2026-11-07.* "Not everyone uses Firefox… some might use Spotify for music and have Helium or another browser of choice." And: "lets not hardcode anything… Let it listen to the user and act upon it."
+
+### Problem · "Play" was hardcoded
+"Play X" always meant YouTube; "search for X" always meant Google. "Play X in <app>" only worked for apps that open web links.
+
+### Decision
+- **Sites come from config.** `[media]` holds the site "play" uses: its search link, and optionally how to read the top result's id off its results page and the link to play it. `[web]` holds the site for "search for X". The code has no site names. Without a `[media]` search link, MAVIS says so rather than guessing.
+- **What an app can do comes from its launcher file.** Every MimeType is kept (`AppEntry.opens`). For "play X in <app>":
+  - an app that opens web links gets the site;
+  - an app that opens audio or video gets the first file in the user's Music or Videos folders (from `user-dirs.dirs`) whose name has every word of the request;
+  - an app with a link type of its own (`x-scheme-handler/<name>`) gets `<name>:search:<query>`, a search inside it;
+  - any other app is opened, and MAVIS says it can't search inside it.
+- **The last app is remembered.** Naming an app that worked is saved (`memory/media_app`), and the next "play Y" with no app uses it. If none is saved, the default browser.
+- **The planner no longer builds links.** It emits a `play` or `search` step, which `resolve_media` (in `planner.rs`, "Playing and searching") turns into actions once it knows the config and what's installed. A separate file was tried first and folded in: one file just for media felt out of place.
+
+### Not done, by choice
+- **Streaming apps:** `<name>:search:` is a convention some apps follow, not a standard. It may open the search without starting a song. **Reasoned**, untested on any app.
+- **The model deciding:** the user wants MAVIS to be intelligent, not phrase-matched. Requests are still recognised by phrases ("play", "open", "close"); this change removes hardcoded names, not the phrases. Letting the model choose the action from the installed apps and open windows is the next design question.
+
+**Evidence:** **Proven** for the matching, config reading, file search, link types and remembering (tests, with invented apps and sites). The shipped config is checked to parse.
 
 ---
 

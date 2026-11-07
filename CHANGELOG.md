@@ -34,6 +34,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_VAD_DEBUG` to see what the microphone is actually producing.
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
+### Changed
+- **"Play X" works with any app**, not just a browser: browsers get the site from `[media]` in `config/config.toml`, media players get a matching file from your Music or Videos folder, and apps with their own link type get a search. The app you last played in is used next time. "Search for X" uses `[web]`. No site or app names in code.
+
 ### Fixed
 - **The speech model setting in `config/config.toml` was ignored**: the worker only looked in `~/.config/mavis`. It now falls back to the repo's file, whose model settings now match what actually runs.
 - **"Open Thunar" opened Bulk Rename**, another launcher entry using the same program.
