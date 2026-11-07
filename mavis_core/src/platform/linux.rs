@@ -541,7 +541,7 @@ fn strip_field_codes(exec: &str) -> String {
 fn parse_desktop_file(content: &str) -> Option<AppEntry> {
     let mut name: Option<String> = None;
     let mut exec: Option<String> = None;
-    let mut opens_links = false;
+    let mut opens: Vec<String> = Vec::new();
     let mut in_entry = false;
 
     for line in content.lines() {
@@ -562,7 +562,7 @@ fn parse_desktop_file(content: &str) -> Option<AppEntry> {
                 exec = Some(v.to_string());
             }
         } else if let Some(v) = line.strip_prefix("MimeType=") {
-            opens_links = v.split(';').any(|m| m == "x-scheme-handler/http" || m == "x-scheme-handler/https");
+            opens = v.split(';').filter(|m| !m.is_empty()).map(String::from).collect();
         } else if let Some(v) = line.strip_prefix("NoDisplay=") {
             if v.eq_ignore_ascii_case("true") {
                 return None;
@@ -582,7 +582,8 @@ fn parse_desktop_file(content: &str) -> Option<AppEntry> {
         (Some(n), Some(e)) if !n.is_empty() && !e.is_empty() => Some(AppEntry {
             name: n,
             exec: strip_field_codes(&e),
-            opens_links,
+            opens_links: opens.iter().any(|m| m == "x-scheme-handler/http" || m == "x-scheme-handler/https"),
+            opens,
         }),
         _ => None,
     }

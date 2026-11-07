@@ -359,22 +359,6 @@ fn misheard_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> 
     best.map(|(_, a)| a)
 }
 
-/// Percent-encode a search query. Hand-rolled to avoid pulling in a URL
-/// crate for one use; encodes everything outside the unreserved set.
-fn urlencode(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() * 2);
-    for b in s.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(b as char)
-            }
-            b' ' => out.push('+'),
-            _ => out.push_str(&format!("%{:02X}", b)),
-        }
-    }
-    out
-}
-
 /// Strip a leading address to MAVIS so "MAVIS, open firefox" matches the
 /// same as "open firefox".
 ///
@@ -506,7 +490,7 @@ fn match_system_intent(text: &str) -> Option<serde_json::Value> {
 
     const OVERRIDING_PREFIXES: &[&str] = &[
         "google ", "search for ", "look up ", "open ", "launch ", "start ", "run ",
-        "play ", "put on ", "search youtube for ",
+        "play ", "put on ", "search ",
     ];
     if OVERRIDING_PREFIXES.iter().any(|p| t.starts_with(p)) {
         return None;
@@ -624,16 +608,13 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
 
     // Two requests in one breath: "open firefox and play daylight".
     if let Some((first, second)) = t.split_once(" and ") {
-        if let Some(then) = match_action_intent(second, apps) {
-            // The video opens in the app just named, if it can show links.
-            if let (Some(app), Some((said, url))) =
-                (opened_app(first, apps).filter(|a| a.opens_links), link_in(&then))
-            {
-                let mut plan = open_link(said.trim_end_matches('.').to_string(), url, Some(app));
-                if wants_playing(&then) {
-                    mark_play(&mut plan);
+        if let Some(mut then) = match_action_intent(second, apps) {
+            // "open X and play Y": Y plays in X, if X can play anything.
+            if let Some(app) = opened_app(first, apps).filter(|a| can_play(a)) {
+                if let Some(step) = then.as_array_mut().and_then(|a| a.iter_mut().find(|s| s["type"] == "play")) {
+                    step["app"] = serde_json::json!(app.name);
+                    return Some(then);
                 }
-                return Some(plan);
             }
             if let Some(Some(mut plan)) = match_action_intent(first, apps).map(|p| p.as_array().cloned()) {
                 plan.extend(then.as_array().cloned().unwrap_or_default());
@@ -653,20 +634,25 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
         ]))
     };
 
-    // "play X", "play X on youtube in <app>", "play X. Use <app>."
-    for prefix in ["play ", "put on ", "search youtube for "] {
+    // "play X", "play X on <site> using <app>", "play X. Use <app>." Which
+    // app and site is worked out later, from config and what's installed.
+    for prefix in ["play ", "put on "] {
         if let Some(rest) = t.strip_prefix(prefix) {
             let (query, app) = link_request(rest, apps);
             if query.is_empty() {
                 continue;
             }
-            let url = format!("https://www.youtube.com/results?search_query={}", urlencode(&query));
-            let mut plan = open_link(format!("Searching YouTube for {}", query), url, app);
-            // "play" means the video itself; the planner picks it before launch.
-            if prefix != "search youtube for " {
-                mark_play(&mut plan);
-            }
-            return Some(plan);
+            return Some(serde_json::json!([
+                {"type": "play", "query": query, "app": app.map(|a| a.name.clone())}
+            ]));
+        }
+    }
+    // "search <site or app> for X": its search, not the top result.
+    if let Some((on, query)) = t.strip_prefix("search ").and_then(|r| r.split_once(" for ")) {
+        if !on.is_empty() && on.split_whitespace().count() <= 3 && !query.trim().is_empty() {
+            return Some(serde_json::json!([
+                {"type": "play", "query": query.trim(), "on": on, "search_only": true}
+            ]));
         }
     }
 
@@ -722,8 +708,9 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
             if query.is_empty() {
                 continue;
             }
-            let url = format!("https://www.google.com/search?q={}", urlencode(&query));
-            return Some(open_link(format!("Searching for {}", query), url, app));
+            return Some(serde_json::json!([
+                {"type": "search", "query": query, "app": app.map(|a| a.name.clone())}
+            ]));
         }
     }
 
@@ -750,83 +737,6 @@ fn request_body(t: &str) -> &str {
         t = t.trim().trim_end_matches(|c: char| c.is_ascii_punctuation()).trim();
         if t == before {
             return t;
-        }
-    }
-}
-
-/// Whether a plan asks for a video to be played rather than searched.
-fn wants_playing(plan: &serde_json::Value) -> bool {
-    plan.as_array()
-        .is_some_and(|a| a.iter().any(|x| x.get("play").and_then(|v| v.as_bool()) == Some(true)))
-}
-
-fn mark_play(plan: &mut serde_json::Value) {
-    if let Some(actions) = plan.as_array_mut() {
-        for action in actions.iter_mut().filter(|a| a.get("type").and_then(|t| t.as_str()) == Some("app")) {
-            action["play"] = serde_json::json!(true);
-        }
-    }
-}
-
-/// The first video on a YouTube results page. Ads use a different
-/// renderer, so this is the top real result.
-fn first_video_id(html: &str) -> Option<String> {
-    const MARK: &str = "\"videoRenderer\":{\"videoId\":\"";
-    let at = html.find(MARK)? + MARK.len();
-    let id = html.get(at..at + 11)?;
-    id.chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        .then(|| id.to_string())
-}
-
-/// Swap a "play" plan's search page for the top video, so it plays instead
-/// of showing results. Without network or curl the search page stays.
-async fn resolve_videos(plan: &mut serde_json::Value) {
-    if cfg!(test) || !wants_playing(plan) {
-        return;
-    }
-    let Some(actions) = plan.as_array_mut() else { return };
-    let Some(launch) = actions.iter_mut().find(|a| a.get("play").is_some()) else { return };
-    let in_args = !launch["target"].as_str().unwrap_or("").contains("://");
-    let search = if in_args {
-        launch["args"].as_array().and_then(|a| a.last()).and_then(|v| v.as_str())
-    } else {
-        launch["target"].as_str()
-    };
-    let Some(search) = search.map(String::from) else { return };
-
-    let fetched = tokio::time::timeout(
-        std::time::Duration::from_secs(6),
-        tokio::process::Command::new("curl")
-            .args(["-sL", "--max-time", "5", "-A", "Mozilla/5.0 (X11; Linux x86_64)"])
-            .args(["-H", "Accept-Language: en", &search])
-            .output(),
-    )
-    .await;
-    let html = match fetched {
-        Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
-        _ => {
-            warn!("Planner: couldn't reach YouTube to pick a video — opening the search");
-            return;
-        }
-    };
-    let Some(id) = first_video_id(&html) else {
-        warn!("Planner: no video found on the results page — opening the search");
-        return;
-    };
-    let watch = format!("https://www.youtube.com/watch?v={}", id);
-    info!("Planner: playing {}", watch);
-    if in_args {
-        if let Some(last) = launch["args"].as_array_mut().and_then(|a| a.last_mut()) {
-            *last = serde_json::json!(watch);
-        }
-    } else {
-        launch["target"] = serde_json::json!(watch);
-    }
-    for action in actions.iter_mut() {
-        if let Some(text) = action.get("text").and_then(|t| t.as_str()) {
-            let text = text.replacen("Searching YouTube for ", "Playing ", 1);
-            action["text"] = serde_json::json!(text);
         }
     }
 }
@@ -942,27 +852,16 @@ fn opened_app<'a>(clause: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
     })
 }
 
-/// The link a plan opens, with what it says while doing so.
-fn link_in(plan: &serde_json::Value) -> Option<(String, String)> {
-    let actions = plan.as_array()?;
-    let url = actions.iter().find_map(|a| {
-        let target = a.get("target")?.as_str()?;
-        target.contains("://").then(|| target.to_string())
-    })?;
-    let said = actions.iter().find_map(|a| a.get("text")?.as_str().map(String::from))?;
-    Some((said, url))
-}
-
 /// Split "daylight by maroon 5 on youtube in firefox" into the search and
-/// the app asked to show it. Only an installed app registered for web
-/// links counts, so "play songs with friends" searches for all of it.
+/// the app asked to play it. Only an installed app that can play something
+/// counts, so "play songs with friends" searches for all of it.
 fn link_request<'a>(rest: &str, apps: &'a [AppEntry]) -> (String, Option<&'a AppEntry>) {
     // "use brave, thanks": try "brave thanks", then "brave".
     let link_app = |said: &str| {
         let words: Vec<&str> = said.split_whitespace().collect();
         (1..=words.len().min(4))
             .rev()
-            .find_map(|n| find_app(&words[..n].join(" "), apps).filter(|a| a.opens_links))
+            .find_map(|n| find_app(&words[..n].join(" "), apps).filter(|a| can_play(a)))
     };
     let mut sentences = rest.split(['.', '?', '!']).map(str::trim).filter(|s| !s.is_empty());
     let mut query = sentences.next().unwrap_or("").to_string();
@@ -984,35 +883,7 @@ fn link_request<'a>(rest: &str, apps: &'a [AppEntry]) -> (String, Option<&'a App
             link_app(named)
         });
     }
-    let query = query.trim();
-    let query = query
-        .strip_suffix(" on youtube")
-        .or_else(|| query.strip_suffix(" on you tube"))
-        .unwrap_or(query);
     (query.trim().to_string(), app)
-}
-
-/// Open a link in the app asked for, or the default browser.
-fn open_link(said: String, url: String, app: Option<&AppEntry>) -> serde_json::Value {
-    match app {
-        Some(app) => {
-            // Flatpak's @@ markers bracket file arguments; a URL goes after.
-            let mut parts = crate::util::split_command_line(&app.exec)
-                .into_iter()
-                .filter(|p| !p.starts_with("@@"));
-            let bin = parts.next().unwrap_or_default();
-            let mut args: Vec<String> = parts.collect();
-            args.push(url);
-            serde_json::json!([
-                {"type": "say", "text": format!("{} in {}.", said, app.name)},
-                {"type": "app", "target": bin, "args": args},
-            ])
-        }
-        None => serde_json::json!([
-            {"type": "say", "text": format!("{}.", said)},
-            {"type": "app", "target": url},
-        ]),
-    }
 }
 
 /// Recognise "yesterday", "this morning", "last week" and friends, mapping
@@ -1093,6 +964,8 @@ pub struct Planner {
     last_told: std::sync::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
     /// True while MAVIS is speaking, so "stop" knows what it means.
     speaking: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Sites for "play" and "search", and the app last played in.
+    media: Media,
 }
 
 impl Planner {
@@ -1119,7 +992,13 @@ impl Planner {
             awaiting: SharedAwaiting::default(),
             last_told: std::sync::Mutex::new(None),
             speaking: None,
+            media: Media::default(),
         }
+    }
+
+    pub fn with_media(mut self, media: Media) -> Self {
+        self.media = media;
+        self
     }
 
     /// Share the permission gate's "question open" state, so the answer
@@ -1336,7 +1215,7 @@ impl Planner {
         // Action intents — deterministic, no LLM round trip. Emitted as a
         // say+action plan so the user gets spoken confirmation.
         if let Some(mut plan) = match_action_intent(intent, &self.apps) {
-            resolve_videos(&mut plan).await;
+            resolve_media(&mut plan, &self.apps, &self.media).await;
             info!("Planner: matched action intent — {}", plan);
             let plan_event = Event {
                 id: uuid::Uuid::new_v4(),
@@ -1805,6 +1684,343 @@ impl Planner {
         Ok(())
     }
 }
+// ---------------------------------------------------------------------------
+// Playing and searching
+// ---------------------------------------------------------------------------
+//
+// "Play X" and "search for X": which app and which site, decided from what
+// each installed app registers for and from config.toml. No app or site
+// names live in code.
+
+/// A site from config.toml: where a query goes, and optionally how to pick
+/// the top result off its results page.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Site {
+    pub name: String,
+    search_url: String,
+    result_marker: Option<String>,
+    play_url: Option<String>,
+}
+
+impl Site {
+    #[cfg(test)]
+    pub fn new(name: &str, search_url: &str) -> Self {
+        Self { name: name.to_string(), search_url: search_url.to_string(), ..Default::default() }
+    }
+
+    fn from_config(text: &str, section: &str) -> Option<Self> {
+        let get = |key| crate::listen::read_setting(text, section, key).filter(|v| !v.is_empty());
+        Some(Self {
+            name: get("site_name").unwrap_or_default(),
+            search_url: get("search_url").filter(|u| u.contains("{query}"))?,
+            result_marker: get("result_marker"),
+            play_url: get("play_url").filter(|u| u.contains("{id}")),
+        })
+    }
+
+    fn search(&self, query: &str) -> String {
+        self.search_url.replace("{query}", &crate::util::urlencode(query))
+    }
+
+    /// "daylight on youtube" → "daylight", when the site is called that.
+    fn strip_from<'a>(&self, query: &'a str) -> &'a str {
+        let squash = |s: &str| s.to_lowercase().replace(' ', "");
+        let name = squash(&self.name);
+        match query.rfind(" on ") {
+            Some(at) if !name.is_empty() && squash(&query[at + 4..]) == name => query[..at].trim(),
+            _ => query,
+        }
+    }
+
+    fn named(&self, spoken: &str) -> bool {
+        let squash = |s: &str| s.to_lowercase().replace(' ', "");
+        !self.name.is_empty() && squash(spoken) == squash(&self.name)
+    }
+
+    /// The top result's link, read off the results page. None without a
+    /// marker in config, without network or curl, or with nothing found.
+    async fn top_result(&self, search: &str) -> Option<String> {
+        let (marker, play_url) = (self.result_marker.as_deref()?, self.play_url.as_deref()?);
+        if cfg!(test) {
+            return None;
+        }
+        let fetched = tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            tokio::process::Command::new("curl")
+                .args(["-sL", "--max-time", "5", "-A", "Mozilla/5.0 (X11; Linux x86_64)"])
+                .args(["-H", "Accept-Language: en", search])
+                .output(),
+        )
+        .await;
+        let page = match fetched {
+            Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+            _ => {
+                warn!("Media: couldn't reach {} — opening the search", self.name);
+                return None;
+            }
+        };
+        let Some(id) = id_after(&page, marker) else {
+            warn!("Media: no result found on the {} page — opening the search", self.name);
+            return None;
+        };
+        Some(play_url.replace("{id}", &id))
+    }
+}
+
+/// The id right after `marker`: letters, digits, '-' and '_'.
+fn id_after(page: &str, marker: &str) -> Option<String> {
+    let at = page.find(marker)? + marker.len();
+    let id: String = page[at..]
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+        .collect();
+    (!id.is_empty()).then_some(id)
+}
+
+/// Sites from config, and the app last asked to play something.
+#[derive(Debug, Default)]
+pub struct Media {
+    pub play_site: Option<Site>,
+    pub web_site: Option<Site>,
+    last_app_file: Option<std::path::PathBuf>,
+}
+
+impl Media {
+    /// `[media]` and `[web]` in config.toml; the last app is kept in `data_dir`.
+    pub fn configured(data_dir: &std::path::Path) -> Self {
+        let text = crate::listen::config_text().unwrap_or_default();
+        let media = Self {
+            play_site: Site::from_config(&text, "media"),
+            web_site: Site::from_config(&text, "web"),
+            last_app_file: Some(data_dir.join("media_app")),
+        };
+        if media.play_site.is_none() {
+            info!("Media: no [media] search_url in config.toml — \"play\" in a browser is off");
+        }
+        media
+    }
+
+    #[cfg(test)]
+    pub fn with_sites(play_site: Option<Site>, web_site: Option<Site>, last_app_file: Option<std::path::PathBuf>) -> Self {
+        Self { play_site, web_site, last_app_file }
+    }
+
+    fn last_app(&self) -> Option<String> {
+        let text = std::fs::read_to_string(self.last_app_file.as_ref()?).ok()?;
+        Some(text.trim().to_string()).filter(|s| !s.is_empty())
+    }
+
+    fn remember(&self, app: &str) {
+        if let Some(path) = &self.last_app_file {
+            if let Err(e) = std::fs::write(path, app) {
+                warn!("Media: couldn't remember {}: {}", app, e);
+            }
+        }
+    }
+}
+
+/// An app that can play or show something, by its own registration.
+pub fn can_play(app: &AppEntry) -> bool {
+    app.opens_links || plays_files(app) || own_scheme(app).is_some()
+}
+
+fn plays_files(app: &AppEntry) -> bool {
+    app.opens.iter().any(|m| m.starts_with("audio/") || m.starts_with("video/"))
+}
+
+/// A link type of the app's own ("x-scheme-handler/<name>"), not the web's.
+fn own_scheme(app: &AppEntry) -> Option<&str> {
+    app.opens
+        .iter()
+        .filter_map(|m| m.strip_prefix("x-scheme-handler/"))
+        .find(|s| !matches!(*s, "http" | "https" | "ftp" | "file" | "mailto"))
+}
+
+/// Replace a planner placeholder ("play" or "search") with real actions.
+pub async fn resolve_media(plan: &mut serde_json::Value, apps: &[AppEntry], media: &Media) {
+    let Some(actions) = plan.as_array_mut() else { return };
+    let Some(at) = actions.iter().position(|a| matches!(a["type"].as_str(), Some("play" | "search"))) else {
+        return;
+    };
+    let step = actions.remove(at);
+    let query = step["query"].as_str().unwrap_or_default();
+    let find = |name: &str| apps.iter().find(|a| a.name == name);
+    let named = step["app"].as_str().and_then(find);
+
+    let concrete = if step["type"] == "search" {
+        match &media.web_site {
+            Some(site) => in_browser(site.search(query), format!("Searching for {}", query), named),
+            None => spoken("No search site is set. Add one under [web] in config.toml."),
+        }
+    } else {
+        let search_only = step["search_only"].as_bool() == Some(true);
+        // "search spotify for X": a site or an app, whichever it names.
+        let on = step["on"].as_str();
+        let on_app = on.and_then(|o| find_app(o, apps)).filter(|a| can_play(a));
+        let (target, used_last) = match (named.or(on_app), on) {
+            (Some(app), _) => (Some(app), false),
+            (None, Some(o)) if !media.play_site.as_ref().is_some_and(|s| s.named(o)) => {
+                return splice(actions, at, spoken(&format!("I don't know how to search {}.", o)));
+            }
+            _ => {
+                let last = media.last_app().and_then(|n| find(&n));
+                (last, last.is_some())
+            }
+        };
+        let query = media.play_site.as_ref().map_or(query, |s| s.strip_from(query));
+        let (actions_out, worked) = play_in(query, target, search_only, media).await;
+        if worked && !used_last {
+            if let Some(app) = target {
+                media.remember(&app.name);
+            }
+        }
+        actions_out
+    };
+    splice(actions, at, concrete);
+}
+
+fn splice(actions: &mut Vec<serde_json::Value>, at: usize, with: Vec<serde_json::Value>) {
+    for (i, a) in with.into_iter().enumerate() {
+        actions.insert(at + i, a);
+    }
+}
+
+fn spoken(text: &str) -> Vec<serde_json::Value> {
+    vec![serde_json::json!({"type": "say", "text": text})]
+}
+
+/// Launch `app`, with a link or a file after its own arguments.
+fn launch_with(app: &AppEntry, arg: Option<String>) -> serde_json::Value {
+    // Flatpak's @@ markers bracket file arguments; ours goes after.
+    let mut parts = crate::util::split_command_line(&app.exec).into_iter().filter(|p| !p.starts_with("@@"));
+    let bin = parts.next().unwrap_or_default();
+    let args: Vec<String> = parts.chain(arg).collect();
+    serde_json::json!({"type": "app", "target": bin, "args": args})
+}
+
+fn in_browser(url: String, said: String, app: Option<&AppEntry>) -> Vec<serde_json::Value> {
+    match app {
+        Some(app) => vec![serde_json::json!({"type": "say", "text": format!("{} in {}.", said, app.name)}), launch_with(app, Some(url))],
+        None => vec![serde_json::json!({"type": "say", "text": format!("{}.", said)}), serde_json::json!({"type": "app", "target": url})],
+    }
+}
+
+/// The actions for playing `query` in `app` (None: the default browser),
+/// and whether it found something to play.
+async fn play_in(query: &str, app: Option<&AppEntry>, search_only: bool, media: &Media) -> (Vec<serde_json::Value>, bool) {
+    // A browser, or no app at all: the configured site.
+    if app.is_none_or(|a| a.opens_links) {
+        let Some(site) = &media.play_site else {
+            return (spoken("No site is set for playing. Add one under [media] in config.toml."), false);
+        };
+        let search = site.search(query);
+        if !search_only {
+            if let Some(link) = site.top_result(&search).await {
+                info!("Media: playing {}", link);
+                return (in_browser(link, format!("Playing {}", query), app), true);
+            }
+        }
+        return (in_browser(search, format!("Searching {} for {}", site.name, query), app), true);
+    }
+    let app = app.expect("checked above");
+
+    // A media player: a matching file from the user's music or videos.
+    if plays_files(app) && !search_only {
+        if let Some(file) = find_media_file(query, &media_dirs()) {
+            let title = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            return (
+                vec![
+                    serde_json::json!({"type": "say", "text": format!("Playing {} in {}.", title, app.name)}),
+                    launch_with(app, Some(file.to_string_lossy().into_owned())),
+                ],
+                true,
+            );
+        }
+    }
+
+    // An app with its own link type: hand it a search.
+    if let Some(scheme) = own_scheme(app) {
+        let uri = format!("{}:search:{}", scheme, crate::util::urlencode(query).replace('+', "%20"));
+        return (
+            vec![serde_json::json!({"type": "say", "text": format!("Searching {} for {}.", app.name, query)}), launch_with(app, Some(uri))],
+            true,
+        );
+    }
+
+    if plays_files(app) {
+        return (spoken(&format!("I couldn't find {} in your music or videos.", query)), false);
+    }
+    let said = format!("I opened {}, but I can't search inside it.", app.name);
+    (vec![serde_json::json!({"type": "say", "text": said}), launch_with(app, None)], false)
+}
+
+/// The user's Music and Videos folders, from user-dirs.dirs, else ~/Music
+/// and ~/Videos.
+fn media_dirs() -> Vec<std::path::PathBuf> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else { return Vec::new() };
+    let config = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).unwrap_or_else(|| home.join(".config"));
+    let text = std::fs::read_to_string(config.join("user-dirs.dirs")).unwrap_or_default();
+    let from_file = |key: &str| {
+        text.lines().find_map(|l| {
+            let v = l.strip_prefix(key)?.strip_prefix('=')?.trim().trim_matches('"');
+            Some(std::path::PathBuf::from(v.replace("$HOME", &home.to_string_lossy())))
+        })
+    };
+    vec![
+        from_file("XDG_MUSIC_DIR").unwrap_or_else(|| home.join("Music")),
+        from_file("XDG_VIDEOS_DIR").unwrap_or_else(|| home.join("Videos")),
+    ]
+}
+
+/// The first media file whose name has every word of the query, apart from
+/// small words: "daylight by maroon 5" finds "Maroon 5 - Daylight.mp3".
+fn find_media_file(query: &str, dirs: &[std::path::PathBuf]) -> Option<std::path::PathBuf> {
+    const SMALL: &[&str] = &["by", "the", "a", "an", "of", "song", "music", "video", "from"];
+    const MEDIA: &[&str] = &[
+        "mp3", "flac", "ogg", "opus", "m4a", "aac", "wav", "wma", "mp4", "mkv", "webm", "avi", "mov", "m4v",
+    ];
+    let words = |s: &str| -> Vec<String> {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(String::from)
+            .collect()
+    };
+    let wanted: Vec<String> = words(query).into_iter().filter(|w| !SMALL.contains(&w.as_str())).collect();
+    if wanted.is_empty() {
+        return None;
+    }
+    let mut stack: Vec<(std::path::PathBuf, u8)> = dirs.iter().map(|d| (d.clone(), 0)).collect();
+    let mut seen = 0;
+    let mut found: Vec<std::path::PathBuf> = Vec::new();
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > 20_000 {
+                break;
+            }
+            let path = entry.path();
+            if path.is_dir() {
+                if depth < 5 {
+                    stack.push((path, depth + 1));
+                }
+                continue;
+            }
+            let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if !MEDIA.contains(&ext.as_str()) {
+                continue;
+            }
+            let have = words(&path.file_stem().unwrap_or_default().to_string_lossy());
+            if wanted.iter().all(|w| have.contains(w)) {
+                found.push(path);
+            }
+        }
+    }
+    found.sort();
+    found.into_iter().next()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1953,6 +2169,7 @@ mod tests {
 
     #[test]
     fn urlencode_escapes_correctly() {
+        use crate::util::urlencode;
         assert_eq!(urlencode("hello world"), "hello+world");
         assert_eq!(urlencode("a&b=c"), "a%26b%3Dc");
         assert_eq!(urlencode("safe-_.~"), "safe-_.~");
@@ -1960,6 +2177,7 @@ mod tests {
 
     #[test]
     fn urlencode_handles_non_ascii() {
+        use crate::util::urlencode;
         // Must encode per-byte and never panic.
         assert_eq!(urlencode("é"), "%C3%A9");
         let _ = urlencode("日本語 🙂");
@@ -2024,7 +2242,7 @@ mod tests {
         let planner = Planner::new(
             bus,
             Arc::new(RwLock::new(WorkingMemory::new())),
-            vec![AppEntry { name: "Firefox".into(), exec: "firefox".into(), opens_links: true }],
+            vec![AppEntry { name: "Firefox".into(), exec: "firefox".into(), opens_links: true, ..Default::default() }],
             Arc::new(Mutex::new(RecallStore::new(&dir.join("recall.db")).unwrap())),
             Arc::new(Mutex::new(LongTermMemory::new(&dir.join("long_term.db")).unwrap())),
             Arc::new(Mutex::new(EntityStore::new(&dir.join("entities.db")).unwrap())),
@@ -2163,8 +2381,8 @@ mod tests {
 
     fn test_apps() -> Vec<AppEntry> {
         vec![
-            AppEntry { name: "Webby Browser".into(), exec: "webby --new".into(), opens_links: true },
-            AppEntry { name: "Notes".into(), exec: "notes".into(), opens_links: false },
+            AppEntry { name: "Webby Browser".into(), exec: "webby --new".into(), opens_links: true, ..Default::default() },
+            AppEntry { name: "Notes".into(), exec: "notes".into(), opens_links: false, ..Default::default() },
         ]
     }
 
@@ -2205,7 +2423,7 @@ mod tests {
 
     fn file_manager_apps() -> Vec<AppEntry> {
         let mut apps = test_apps();
-        apps.push(AppEntry { name: "Thunar File Manager".into(), exec: "thunar %F".into(), opens_links: false });
+        apps.push(AppEntry { name: "Thunar File Manager".into(), exec: "thunar %F".into(), opens_links: false, ..Default::default() });
         apps
     }
 
@@ -2219,8 +2437,8 @@ mod tests {
         // Too far from any name, or close to two: nothing is guessed.
         assert!(misheard_app("tunnel", &apps).is_none());
         let twins = vec![
-            AppEntry { name: "Nodes".into(), exec: "nodes".into(), opens_links: false },
-            AppEntry { name: "Notes".into(), exec: "notes".into(), opens_links: false },
+            AppEntry { name: "Nodes".into(), exec: "nodes".into(), opens_links: false, ..Default::default() },
+            AppEntry { name: "Notes".into(), exec: "notes".into(), opens_links: false, ..Default::default() },
         ];
         assert!(misheard_app("nopes", &twins).is_none());
     }
@@ -2241,23 +2459,20 @@ mod tests {
         assert_eq!(request_body("what can you do"), "what can you do");
         let apps = test_apps();
         let plan = match_action_intent("I want you to open Webby and play Daylight by Maroon 5 for me.", &apps).unwrap();
-        assert!(plan[1]["args"][1].as_str().unwrap().ends_with("=daylight+by+maroon+5"), "{}", plan);
+        assert_eq!(plan, serde_json::json!([{"type": "play", "query": "daylight by maroon 5", "app": "Webby Browser"}]));
     }
 
     #[test]
-    fn play_asks_for_the_video_and_search_does_not() {
+    fn search_names_a_site_or_an_app() {
         let apps = test_apps();
-        assert!(wants_playing(&match_action_intent("play daylight", &apps).unwrap()));
-        assert!(wants_playing(&match_action_intent("open webby and play daylight", &apps).unwrap()));
-        assert!(!wants_playing(&match_action_intent("search youtube for daylight", &apps).unwrap()));
-    }
-
-    #[test]
-    fn the_top_video_is_found_past_the_ads() {
-        let html = r#"{"adSlotRenderer":{"videoId":"AAAAAAAAAAA"}},{"videoRenderer":{"videoId":"u9Dg-g7t2l4","thumbnail""#;
-        assert_eq!(first_video_id(html).as_deref(), Some("u9Dg-g7t2l4"));
-        assert_eq!(first_video_id("<html>consent</html>"), None);
-        assert_eq!(first_video_id(r#""videoRenderer":{"videoId":"short""#), None);
+        assert_eq!(
+            match_action_intent("search tube for daylight", &apps).unwrap(),
+            serde_json::json!([{"type": "play", "query": "daylight", "on": "tube", "search_only": true}])
+        );
+        assert_eq!(
+            match_action_intent("look up rust traits", &apps).unwrap(),
+            serde_json::json!([{"type": "search", "query": "rust traits", "app": null}])
+        );
     }
 
     #[test]
@@ -2283,32 +2498,28 @@ mod tests {
     #[test]
     fn a_video_opens_in_the_app_asked_for() {
         let apps = test_apps();
-        let plan = match_action_intent("Play Daylight by Maroon 5 on YouTube. Use Webby, thanks.", &apps).unwrap();
-        let launch = &plan[1];
-        assert_eq!(launch["target"], "webby");
-        assert_eq!(launch["args"][0], "--new");
-        assert_eq!(
-            launch["args"][1],
-            "https://www.youtube.com/results?search_query=daylight+by+maroon+5"
-        );
+        let play = |t: &str| match_action_intent(t, &apps).unwrap()[0].clone();
+        let step = play("Play Daylight by Maroon 5 on Tube. Use Webby, thanks.");
+        assert_eq!(step["app"], "Webby Browser");
+        // The site's name stays in; resolve_media strips it against config.
+        assert_eq!(step["query"], "daylight by maroon 5 on tube");
+        assert_eq!(play("play daylight on tube using webby browser")["app"], "Webby Browser");
 
-        let plan = match_action_intent("play daylight in webby browser", &apps).unwrap();
-        assert_eq!(plan[1]["target"], "webby");
-
-        // Not an app that opens links, or not an app at all: part of the search.
-        let plan = match_action_intent("play songs with notes", &apps).unwrap();
-        assert!(plan[1]["target"].as_str().unwrap().ends_with("songs+with+notes"));
-        let plan = match_action_intent("play daylight", &apps).unwrap();
-        assert!(plan[1]["target"].as_str().unwrap().ends_with("=daylight"));
+        // Not an app that can play anything, or not an app at all: part of the search.
+        let step = play("play songs with notes");
+        assert_eq!((step["query"].as_str(), step["app"].is_null()), (Some("songs with notes"), true));
+        assert!(play("play daylight")["app"].is_null());
     }
 
     #[test]
     fn two_requests_in_one_sentence_are_both_carried_out() {
         let apps = test_apps();
         let plan = match_action_intent("open webby and play daylight with maroon 5", &apps).unwrap();
-        assert_eq!(plan.as_array().unwrap().len(), 2, "one launch, with the video: {}", plan);
-        assert_eq!(plan[1]["target"], "webby");
-        assert!(plan[1]["args"][1].as_str().unwrap().contains("daylight+with+maroon+5"));
+        assert_eq!(plan, serde_json::json!([{"type": "play", "query": "daylight with maroon 5", "app": "Webby Browser"}]));
+        // An app that can't play anything is opened, then the play follows.
+        let plan = match_action_intent("open notes and play daylight", &apps).unwrap();
+        assert_eq!(plan[1]["target"], "notes");
+        assert_eq!(plan[2]["type"], "play");
 
         let plan = match_action_intent("volume up and next song", &apps).unwrap();
         let ops: Vec<&str> = plan.as_array().unwrap().iter().filter_map(|a| a["op"].as_str()).collect();
@@ -2316,7 +2527,7 @@ mod tests {
 
         // "and" inside a title isn't two requests.
         let plan = match_action_intent("play tom and jerry", &apps).unwrap();
-        assert!(plan[1]["target"].as_str().unwrap().ends_with("tom+and+jerry"));
+        assert_eq!(plan[0]["query"], "tom and jerry");
     }
 
     #[test]
@@ -2348,9 +2559,9 @@ mod tests {
     #[test]
     fn close_names_the_windows_actually_open() {
         let apps = vec![
-            AppEntry { name: "Files".into(), exec: "nautilus --new-window".into(), opens_links: false },
-            AppEntry { name: "Brave Web Browser".into(), exec: "/usr/bin/brave".into(), opens_links: true },
-            AppEntry { name: "Notes".into(), exec: "notes".into(), opens_links: false },
+            AppEntry { name: "Files".into(), exec: "nautilus --new-window".into(), opens_links: false, ..Default::default() },
+            AppEntry { name: "Brave Web Browser".into(), exec: "/usr/bin/brave".into(), opens_links: true, ..Default::default() },
+            AppEntry { name: "Notes".into(), exec: "notes".into(), opens_links: false, ..Default::default() },
         ];
         let mut a = window("brave-browser", "News", 1, false);
         a.id = Some(11);
@@ -2385,8 +2596,8 @@ mod tests {
     #[test]
     fn an_app_is_preferred_over_another_entry_sharing_its_binary() {
         let apps = vec![
-            AppEntry { name: "Bulk Rename".into(), exec: "thunar --bulk-rename".into(), opens_links: false },
-            AppEntry { name: "Thunar File Manager".into(), exec: "thunar".into(), opens_links: false },
+            AppEntry { name: "Bulk Rename".into(), exec: "thunar --bulk-rename".into(), opens_links: false, ..Default::default() },
+            AppEntry { name: "Thunar File Manager".into(), exec: "thunar".into(), opens_links: false, ..Default::default() },
         ];
         assert_eq!(find_app("thunar", &apps).unwrap().name, "Thunar File Manager");
         let plan = match_action_intent("Mavis, can you open Thunar for me?", &apps).unwrap();
@@ -2479,5 +2690,132 @@ mod tests {
             .any(|e| e.event_type == EventType::PlanReady && e.payload.to_string().contains("\"say\""));
         assert!(!said);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    mod media {
+            use super::*;
+
+        fn app(name: &str, exec: &str, opens: &[&str]) -> AppEntry {
+            AppEntry {
+                name: name.into(),
+                exec: exec.into(),
+                opens_links: opens.iter().any(|m| m.ends_with("/https")),
+                opens: opens.iter().map(|s| s.to_string()).collect(),
+            }
+        }
+
+        fn sites() -> (Site, Site) {
+            let mut video = Site::new("Tube", "https://tube.test/results?q={query}");
+            video.result_marker = Some("\"id\":\"".into());
+            video.play_url = Some("https://tube.test/watch?v={id}".into());
+            (video, Site::new("", "https://find.test/?q={query}"))
+        }
+
+        fn apps() -> Vec<AppEntry> {
+            vec![
+                app("Webby", "webby --new", &["text/html", "x-scheme-handler/https"]),
+                app("Tunes", "tunes", &["x-scheme-handler/tunes"]),
+                app("Player", "player", &["audio/mpeg", "video/mp4"]),
+                app("Notes", "notes", &[]),
+            ]
+        }
+
+        async fn resolved(plan: serde_json::Value, media: &Media) -> serde_json::Value {
+            let mut plan = plan;
+            resolve_media(&mut plan, &apps(), media).await;
+            plan
+        }
+
+        #[test]
+        fn config_gives_the_sites() {
+            let text = "[media]\nsite_name = \"Tube\"\nsearch_url = \"https://tube.test/r?q={query}\"\n\
+                        result_marker = '\"id\":\"'\nplay_url = \"https://tube.test/w?v={id}\"\n\
+                        [web]\nsearch_url = \"https://find.test/?q={query}\"\n";
+            let site = Site::from_config(text, "media").unwrap();
+            assert_eq!(site.name, "Tube");
+            assert_eq!(site.result_marker.as_deref(), Some("\"id\":\""));
+            assert_eq!(site.search("lo fi"), "https://tube.test/r?q=lo+fi");
+            assert!(Site::from_config(text, "web").is_some());
+            assert!(Site::from_config("[media]\nsearch_url = \"no placeholder\"", "media").is_none());
+        }
+
+        #[test]
+        fn the_shipped_config_has_both_sites() {
+            let text = crate::listen::config_text().unwrap();
+            let play = Site::from_config(&text, "media").unwrap();
+            assert!(play.result_marker.is_some() && play.play_url.is_some());
+            assert!(Site::from_config(&text, "web").is_some());
+        }
+
+        #[test]
+        fn the_top_result_is_read_after_the_marker() {
+            assert_eq!(id_after(r#"{"ad":"x"},{"id":"u9Dg-g7t2l4","t""#, "\"id\":\"").as_deref(), Some("u9Dg-g7t2l4"));
+            assert_eq!(id_after("<html>consent</html>", "\"id\":\""), None);
+        }
+
+        #[tokio::test]
+        async fn a_browser_gets_the_site_and_the_site_name_is_not_searched() {
+            let (video, web) = sites();
+            let media = Media::with_sites(Some(video), Some(web), None);
+            let plan = resolved(serde_json::json!([{"type": "play", "query": "daylight on tube", "app": "Webby"}]), &media).await;
+            assert_eq!(plan[0]["text"], "Searching Tube for daylight in Webby.");
+            assert_eq!(plan[1]["target"], "webby");
+            assert_eq!(plan[1]["args"], serde_json::json!(["--new", "https://tube.test/results?q=daylight"]));
+
+            // No app, nothing remembered: the default browser.
+            let plan = resolved(serde_json::json!([{"type": "play", "query": "daylight"}]), &media).await;
+            assert_eq!(plan[1]["target"], "https://tube.test/results?q=daylight");
+
+            let plan = resolved(serde_json::json!([{"type": "search", "query": "rust traits"}]), &media).await;
+            assert_eq!(plan[1]["target"], "https://find.test/?q=rust+traits");
+        }
+
+        #[tokio::test]
+        async fn an_app_with_its_own_link_type_gets_a_search() {
+            let media = Media::with_sites(Some(sites().0), None, None);
+            let plan = resolved(serde_json::json!([{"type": "play", "query": "daylight by maroon 5", "app": "Tunes"}]), &media).await;
+            assert_eq!(plan[0]["text"], "Searching Tunes for daylight by maroon 5.");
+            assert_eq!(plan[1]["args"], serde_json::json!(["tunes:search:daylight%20by%20maroon%205"]));
+            // Named the way a site would be: "search tunes for daylight".
+            let plan = resolved(serde_json::json!([{"type": "play", "query": "daylight", "on": "tunes", "search_only": true}]), &media).await;
+            assert_eq!(plan[1]["target"], "tunes");
+            let plan = resolved(serde_json::json!([{"type": "play", "query": "daylight", "on": "elsewhere", "search_only": true}]), &media).await;
+            assert_eq!(plan[0]["text"], "I don't know how to search elsewhere.");
+        }
+
+        #[tokio::test]
+        async fn an_app_that_cannot_search_is_opened_and_says_so() {
+            let media = Media::with_sites(Some(sites().0), None, None);
+            let plan = resolved(serde_json::json!([{"type": "play", "query": "daylight", "app": "Notes"}]), &media).await;
+            assert_eq!(plan[0]["text"], "I opened Notes, but I can't search inside it.");
+            assert_eq!(plan[1]["args"], serde_json::json!([]));
+        }
+
+        #[tokio::test]
+        async fn the_app_last_asked_for_is_used_next_time() {
+            let dir = std::env::temp_dir().join(format!("mavis-media-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let media = Media::with_sites(Some(sites().0), None, Some(dir.join("media_app")));
+            resolved(serde_json::json!([{"type": "play", "query": "daylight", "app": "Webby"}]), &media).await;
+            let plan = resolved(serde_json::json!([{"type": "play", "query": "sunrise"}]), &media).await;
+            assert_eq!(plan[1]["target"], "webby", "{}", plan);
+            // An app that couldn't play it isn't remembered.
+            resolved(serde_json::json!([{"type": "play", "query": "x", "app": "Notes"}]), &media).await;
+            let plan = resolved(serde_json::json!([{"type": "play", "query": "sunrise"}]), &media).await;
+            assert_eq!(plan[1]["target"], "webby");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn a_media_file_is_found_by_its_words() {
+            let dir = std::env::temp_dir().join(format!("mavis-music-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(dir.join("Pop")).unwrap();
+            std::fs::write(dir.join("Pop/Maroon 5 - Daylight.mp3"), b"").unwrap();
+            std::fs::write(dir.join("Daylight notes.txt"), b"").unwrap();
+            let found = find_media_file("daylight by maroon 5", std::slice::from_ref(&dir)).unwrap();
+            assert!(found.ends_with("Pop/Maroon 5 - Daylight.mp3"));
+            assert!(find_media_file("sunrise", std::slice::from_ref(&dir)).is_none());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

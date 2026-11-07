@@ -24,11 +24,7 @@ impl ListenMode {
     /// `config/config.toml`, else Always.
     pub fn configured() -> Self {
         let from_env = std::env::var("MAVIS_LISTEN_MODE").ok();
-        // Relative to mavis_core/ when run with cargo, else the source tree.
-        let from_file = std::fs::read_to_string("../config/config.toml")
-            .or_else(|_| std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../config/config.toml")))
-            .ok()
-            .and_then(|text| read_setting(&text, "voice", "listen_mode"));
+        let from_file = config_text().and_then(|text| read_setting(&text, "voice", "listen_mode"));
         Self::parse(from_env.or(from_file).as_deref())
     }
 
@@ -40,23 +36,52 @@ impl ListenMode {
     }
 }
 
+/// config/config.toml: relative to mavis_core/ when run with cargo, else
+/// the source tree.
+pub fn config_text() -> Option<String> {
+    std::fs::read_to_string("../config/config.toml")
+        .or_else(|_| std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../config/config.toml")))
+        .ok()
+}
+
 /// `key = "value"` inside `[section]` of a TOML file. Just enough to read
 /// one setting without a TOML dependency; anything unusual reads as absent.
 pub fn read_setting(text: &str, section: &str, key: &str) -> Option<String> {
     let mut current = String::new();
     for line in text.lines() {
-        let line = line.split('#').next().unwrap_or("").trim();
-        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.split(']').next()) {
             current = name.trim().to_string();
         } else if current == section {
             if let Some((k, v)) = line.split_once('=') {
                 if k.trim() == key {
-                    return Some(v.trim().trim_matches('"').to_string());
+                    return Some(value_of(v.trim()));
                 }
             }
         }
     }
     None
+}
+
+/// A TOML value: 'literal' as written, "basic" with \" unescaped, bare up
+/// to a comment. A '#' inside quotes is kept.
+fn value_of(v: &str) -> String {
+    if let Some(rest) = v.strip_prefix('\'') {
+        return rest.split('\'').next().unwrap_or("").to_string();
+    }
+    if let Some(rest) = v.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = rest.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '\\' => out.extend(chars.next()),
+                '"' => break,
+                c => out.push(c),
+            }
+        }
+        return out;
+    }
+    v.split('#').next().unwrap_or("").trim().to_string()
 }
 
 /// Shared between the audio thread, the hotkey handler and the orb.
@@ -123,6 +148,14 @@ impl ListenGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quoted_values_keep_their_symbols() {
+        let text = "[media]\nmarker = '\"id\":\"' # note\nurl = \"https://x.test/#{q}\"\nbare = on # c\n";
+        assert_eq!(read_setting(text, "media", "marker").as_deref(), Some("\"id\":\""));
+        assert_eq!(read_setting(text, "media", "url").as_deref(), Some("https://x.test/#{q}"));
+        assert_eq!(read_setting(text, "media", "bare").as_deref(), Some("on"));
+    }
 
     #[test]
     fn the_setting_is_read_from_its_section_only() {

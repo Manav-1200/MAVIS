@@ -76,6 +76,7 @@ fn scan_macos_apps() -> Vec<AppEntry> {
                     name: name.to_string(),
                     exec: format!("open -a \"{}\"", name),
                     opens_links: false,
+                    opens: Vec::new(),
                 });
             }
         }

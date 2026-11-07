@@ -32,6 +32,20 @@ model = "small.en"
 device = "cpu"           # "cuda" only if the GPU has room beside the LLM
 compute_type = "int8"    # "float16" with cuda
 
+[media]
+# "play X" in a browser. {query} is what you asked for. Change all four
+# lines to use another site; with only search_url, its search page opens.
+site_name = "YouTube"
+search_url = "https://www.youtube.com/results?search_query={query}"
+# To play the top result instead of showing the search: the text just
+# before a result's id on the results page, and the link for that id.
+result_marker = '"videoRenderer":{"videoId":"'
+play_url = "https://www.youtube.com/watch?v={id}"
+
+[web]
+# "search for X", "look up X", "google X".
+search_url = "https://www.google.com/search?q={query}"
+
 [ai]
 provider = "local"
 

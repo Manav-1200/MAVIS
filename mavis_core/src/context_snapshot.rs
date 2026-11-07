@@ -30,7 +30,7 @@ pub struct ProjectInfo {
 /// An installed application, discovered from whatever the platform uses
 /// to register apps: .desktop files on Linux, Start Menu shortcuts on
 /// Windows, .app bundles on macOS.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AppEntry {
     pub name: String,
     /// Command line to launch it, binary first then any fixed args.
@@ -39,6 +39,10 @@ pub struct AppEntry {
     /// the URL. Read from the app's own registration, never from its name.
     #[serde(default)]
     pub opens_links: bool,
+    /// Everything it registers for (MimeType): "audio/mpeg",
+    /// "x-scheme-handler/<its own link type>". What "play X in <it>" can do.
+    #[serde(default)]
+    pub opens: Vec<String>,
 }
 
 /// Next upcoming calendar event, read from Evolution's local .ics.

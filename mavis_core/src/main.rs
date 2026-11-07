@@ -151,7 +151,8 @@ async fn main() -> Result<()> {
             sentinel_for_planner.clone(),
         )
         .with_confirmations(awaiting_for_planner.clone())
-        .with_speaking(tts_active_for_planner.clone());
+        .with_speaking(tts_active_for_planner.clone())
+        .with_media(planner::Media::configured(data_dir));
         async move {
             planner.run().await;
         }
