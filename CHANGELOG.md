@@ -35,6 +35,10 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Fixed
+- **The speech model setting in `config/config.toml` was ignored**: the worker only looked in `~/.config/mavis`. It now falls back to the repo's file, whose model settings now match what actually runs.
+- **"Open Thunar" opened Bulk Rename**, another launcher entry using the same program.
+- **Answering "Shall I close…?" with "Yes Mavis, close …" cancelled.** It confirms now; "close it" closes the focused window.
+- **MAVIS made up whether the system had changed or had updates.** It no longer guesses, and a misheard "what changed recently" still gets the real answer.
 - **"Play X" only searched YouTube.** It now opens the top video, falling back to the search if YouTube can't be reached.
 - **Apps with a misheard name didn't open** ("open tuner" for Thunar), and MAVIS claimed it couldn't open applications. Near misses match now, and a missing app is named as missing.
 - **"Close Firefox" couldn't be confirmed** by saying it again, and short commands were dropped as "didn't catch that". Repeating the request confirms it, and recognised commands are never dropped.

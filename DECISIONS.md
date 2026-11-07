@@ -51,6 +51,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 29. [A natural voice](#29-a-natural-voice)
 30. [What MAVIS says about itself](#30-what-mavis-says-about-itself)
 31. [The 2026-11-05 full run](#31-the-2026-11-05-full-run)
+32. [The 2026-11-06 run](#32-the-2026-11-06-run)
 
 ---
 
@@ -96,6 +97,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-06 | 6 | Run: the worker never read `config/config.toml` (still `small`), "open Thunar" ran Bulk Rename, "That's Mavis, close …" cancelled, the model invented "no recent updates". Config read from the repo, binary-sharing entries ranked, "close it" added (§32) |
 | 11-05 | 6 | Full run: "play" only searched, "open tuner" (Thunar) got "I can't open applications", "close Firefox" repeated as the answer was dropped as unclear. Play picks the top video, near-miss app names match, commands skip the confidence gate (§31) |
 | 11-05 | 6 | Voice run: the model said it had no voice, narrated itself in the third person, was clipped to two sentences and ignored "how was that?" — instructions and reply clean-up fixed (§30) |
 | 11-05 | 6 | Kokoro made the default voice — Piper had been playing every reply while Kokoro sat loaded and unused; replies spoken a sentence at a time (§29) |
@@ -1666,6 +1668,47 @@ MAVIS asked "Shall I close Firefox?". The user said "close firefox mavis" (confi
 - Kitty was named as the focused window, and niri as the window manager.
 - Replies were up to three sentences ("history of Linux").
 - Whether "4 applications" (antigravity-ide, brave-browser, firefox, kitty) was right is for the user to say.
+
+---
+
+## 32. The 2026-11-06 run
+
+*2026-11-06.* "There are still lots of bugs that need fixing before moving forward."
+
+### Problem · The speech model setting never applied
+The log still said `Loading STT model: size=small` after `config/config.toml` was changed to `small.en`. The worker reads `~/.config/mavis/config/config.toml` only. That file doesn't exist, so it used built-in defaults. The repo's file was read by the core (listen mode) and never by the worker. §24's "configurable via `[stt]`" was never true in practice.
+**Fix:** when the user file doesn't exist, the worker reads the repo's `config/config.toml`. Its `[model]` section claimed a Llama 3.1 8B with full GPU offload, which isn't what ran and failed on 6 GB (see the n_gpu_layers note above). It now says Phi-3 with 20 layers, the settings that actually ran. The core's listen mode also finds the file when not started from `mavis_core/`. The built-in default is `small.en`.
+**Evidence:** **Measured**: loading the config in this repo gives `small.en`, 20 layers and the Phi-3 path.
+
+### Problem · "Open Thunar" opened Bulk Rename
+`thunar --bulk-rename` and `thunar` are two launcher entries with the same binary. The exact-binary rule took the first one alphabetically.
+**Fix:** among entries sharing the binary, the one whose name has the spoken word wins ("Thunar File Manager"), then the one with fewest arguments. No app names in code.
+**Evidence:** **Proven** (test).
+
+### Problem · "That's Mavis, close Bulk Rename" cancelled
+It was an answer to "Shall I close Bulk Rename?" ("Yes Mavis…", misheard). The repeat rule wanted the verb first, so the gate cancelled while the planner asked again, all in the same second.
+**Fix:** anything before the verb is allowed unless it holds a no ("no", "don't", "cancel", "wait"…). From the verb on, only the request's own words and fillers.
+**Evidence:** **Proven** (test).
+
+### Problem · "Close it" wasn't understood
+"Close it. Close the bulk rename." only worked because of the second sentence.
+**Fix:** "close it", "close this window" and similar, said outright, close the focused window, after asking. "How do I close it" is still a question. With no focused window known, MAVIS asks which app.
+**Evidence:** **Proven** (test).
+
+### Problem · The model made up the system's state
+"What's since recently on my system?" (changed → since) got "there hasn't been any significant updates". "How many updates do I have?" got an offer to "check for system updates in your settings".
+**Fix:**
+- A short what-question with "recently" or "lately" and "system" or "computer" now goes to the Sentinel whatever the middle word was heard as.
+- Rule 14 says the model knows nothing about updates, software, files or changes beyond the facts given.
+- A closing "Would you like to…?" is dropped like other offers.
+
+Pending updates ("how many updates do I have") are not something MAVIS can see yet.
+**Evidence:** **Proven** for the matching (test), **measured** for the clean-up, **reasoned** for the rule.
+
+### Seen, no change
+- "Mavis" alone got "Yes?"; "can you hear me" was heard right (0.79). The rest ran on `small`, so hearing should get better once `small.en` loads.
+- The window count said three (antigravity-ide, brave-browser, kitty), with no Thunar windows listed although Bulk Rename had been opened twice. Either they were closed by hand, or windows are missed; to be confirmed.
+- The orb took keyboard focus about ten times and gave it back each time. Whether that was the mouse passing over it or the compositor is unknown; the orb never asks for focus itself.
 
 ---
 

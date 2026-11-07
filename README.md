@@ -118,6 +118,8 @@ python -m mavis
 
 ### Listening
 
+Settings live in `config/config.toml`. A `~/.config/mavis/config/config.toml`, if you create one, replaces it for the Python worker (speech model, LLM).
+
 Set `listen_mode` under `[voice]` in `config/config.toml`:
 
 - **Always** (the default) — MAVIS hears everything you say.
@@ -157,6 +159,7 @@ Some phrases are handled directly by the planner without an LLM round trip, so t
 | "volume up", "louder", "mute" | Adjusts volume |
 | "pause", "resume", "next song" | Media control |
 | "close Firefox", "quit the file manager" | Asks first, then closes that app's windows (niri for now). Answer "yes", or say the request again |
+| "close it", "close this window" | Asks first, then closes the focused window |
 | "play lofi in Firefox", "open Firefox and play lofi" | Opens the video in that app — any installed app that handles web links |
 | "brighter", "dim the screen" | Adjusts brightness |
 

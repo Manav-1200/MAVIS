@@ -454,6 +454,16 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.13 — Run fixes (2026-11-06)
+
+Details in [`DECISIONS.md` §32](DECISIONS.md#32-the-2026-11-06-run).
+
+- [x] **The worker reads `config/config.toml`**, so `small.en` actually loads; the model settings in it now match what runs.
+- [x] **"Open Thunar" opens Thunar**, not another entry using the same binary.
+- [x] **"Yes Mavis, close it" style answers confirm**, and **"close it"** closes the focused window.
+- [x] **No made-up system state**; misheard "what changed recently" still reaches the Sentinel.
+- [ ] Hear these on hardware; confirm whether Thunar windows were missing from the count
+
 ### 6.12 — Full run (2026-11-05)
 
 Details in [`DECISIONS.md` §31](DECISIONS.md#31-the-2026-11-05-full-run).
@@ -981,4 +991,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-06*
+*Last updated: 2026-11-07*
