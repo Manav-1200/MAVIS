@@ -254,15 +254,24 @@ fn find_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
     if let Some(a) = apps.iter().find(|a| normalize(&a.name) == s) {
         return Some(a);
     }
-    // Exact binary name — "code-oss" as spoken.
-    if let Some(a) = apps.iter().find(|a| {
-        a.exec
-            .split_whitespace()
-            .next()
-            .and_then(|b| b.rsplit('/').next())
-            .map(|b| normalize(b) == s)
-            .unwrap_or(false)
-    }) {
+    // Exact binary name — "code-oss" as spoken. Several entries can share
+    // one binary ("thunar" is also Bulk Rename, `thunar --bulk-rename`):
+    // the one named after it wins, then the one with the fewest arguments.
+    if let Some(a) = apps
+        .iter()
+        .filter(|a| {
+            a.exec
+                .split_whitespace()
+                .next()
+                .and_then(|b| b.rsplit('/').next())
+                .is_some_and(|b| normalize(b) == s)
+        })
+        .min_by_key(|a| {
+            let named = normalize(&a.name).split_whitespace().any(|w| w == s);
+            let args = a.exec.split_whitespace().skip(1).filter(|x| !x.starts_with('%')).count();
+            (!named, args)
+        })
+    {
         return Some(a);
     }
     // Name begins with what was said — "code" finds "Code - OSS".
@@ -842,6 +851,8 @@ enum Close {
     NotOpen(String),
     /// It's open, but this desktop gives no way to close it.
     Unsupported,
+    /// "Close it", with no focused window known.
+    NoFocus,
 }
 
 /// "close firefox", "quit the file manager": matched against the windows
@@ -849,6 +860,9 @@ enum Close {
 /// model. Apps are matched by what their windows report, never by name lists.
 fn close_request(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Option<Close> {
     let t = normalize(text);
+    if let Some(close) = close_focused(&t, windows, apps) {
+        return Some(close);
+    }
     let target = ["close ", "quit ", "exit "].iter().find_map(|verb| {
         let at = find_verb(&t, verb)?;
         Some(t[at + verb.len()..].to_string())
@@ -891,6 +905,22 @@ fn close_request(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Optio
         return Some(Close::Unsupported);
     }
     Some(Close::Windows { app: name, ids })
+}
+
+/// "close it", "close this window": the focused window only. Asked
+/// outright, so "how do I close it" is still a question.
+fn close_focused(t: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Option<Close> {
+    let rest = request_body(t).strip_prefix("close ")?;
+    if !matches!(rest, "it" | "this" | "that" | "this window" | "that window" | "the window" | "this app") {
+        return None;
+    }
+    let Some(focused) = windows.iter().find(|w| w.is_focused) else {
+        return Some(Close::NoFocus);
+    };
+    let Some(id) = focused.id else { return Some(Close::Unsupported) };
+    let words = window_app_words(&focused.app_name);
+    let name = find_app(&words, apps).map(|a| a.name.clone()).unwrap_or(words);
+    Some(Close::Windows { app: name, ids: vec![id] })
 }
 
 /// "org.gnome.Nautilus" → "nautilus", "brave-browser" → "brave browser".
@@ -1275,6 +1305,10 @@ impl Planner {
                 Close::Unsupported => serde_json::json!({
                     "type": "say",
                     "text": "I can't close windows on this desktop yet."
+                }),
+                Close::NoFocus => serde_json::json!({
+                    "type": "say",
+                    "text": "I can't tell which window is focused. Which app should I close?"
                 }),
             };
             self.bus.publish(Event {
@@ -2337,6 +2371,27 @@ mod tests {
         let mut no_id = open.clone();
         no_id[2].id = None;
         assert_eq!(close_request("close files", &no_id, &apps), Some(Close::Unsupported));
+
+        // "Close it" is the focused window alone.
+        assert_eq!(close("Close it."), Some(Close::Windows { app: "Files".into(), ids: vec![13] }));
+        assert_eq!(close("can you close this window"), Some(Close::Windows { app: "Files".into(), ids: vec![13] }));
+        assert_eq!(close("how do I close it"), None);
+        let unfocused: Vec<WindowInfo> = open.iter().cloned().map(|mut w| { w.is_focused = false; w }).collect();
+        assert_eq!(close_request("close it", &unfocused, &apps), Some(Close::NoFocus));
+    }
+
+    /// 2026-11-06: "open Thunar" ran `thunar --bulk-rename`, the other
+    /// entry with the same binary.
+    #[test]
+    fn an_app_is_preferred_over_another_entry_sharing_its_binary() {
+        let apps = vec![
+            AppEntry { name: "Bulk Rename".into(), exec: "thunar --bulk-rename".into(), opens_links: false },
+            AppEntry { name: "Thunar File Manager".into(), exec: "thunar".into(), opens_links: false },
+        ];
+        assert_eq!(find_app("thunar", &apps).unwrap().name, "Thunar File Manager");
+        let plan = match_action_intent("Mavis, can you open Thunar for me?", &apps).unwrap();
+        assert_eq!(plan[0]["text"], "Opening Thunar File Manager.", "{}", plan);
+        assert!(plan[1]["args"].as_array().is_none_or(|a| a.is_empty()), "{}", plan);
     }
 
     #[tokio::test]

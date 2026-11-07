@@ -387,15 +387,22 @@ fn words_of(said: &str) -> Vec<String> {
         .collect()
 }
 
-/// The answer says the request again and nothing else: "close firefox,
-/// mavis" for "close Firefox". Its verb and at least one more of its words,
-/// and no word it doesn't have, apart from fillers.
+/// The answer says the request again: "close firefox, mavis" for "close
+/// Firefox". From its verb on, only the request's own words and fillers.
+/// Before the verb anything goes ("That's Mavis, close …" was "Yes Mavis")
+/// except a no.
 pub fn repeats_request(said: &str, what: &str) -> bool {
     const FILLER: &[&str] = &["mavis", "please", "just", "yes", "now", "the", "it", "i", "said"];
-    let said: Vec<String> = words_of(said).into_iter().filter(|w| !FILLER.contains(&w.as_str())).collect();
+    const NO: &[&str] = &["no", "not", "don", "dont", "never", "cancel", "stop", "wait"];
+    let said = words_of(said);
     let asked = words_of(what);
     let Some(verb) = asked.first() else { return false };
-    said.first() == Some(verb) && said.len() >= 2 && said.iter().all(|w| asked.contains(w))
+    let Some(at) = said.iter().position(|w| w == verb) else { return false };
+    if said[..at].iter().any(|w| NO.contains(&w.as_str())) {
+        return false;
+    }
+    let rest: Vec<&String> = said[at + 1..].iter().filter(|w| !FILLER.contains(&w.as_str())).collect();
+    !rest.is_empty() && rest.iter().all(|w| asked.contains(w))
 }
 
 /// Whether an utterance is a clear yes.
@@ -491,6 +498,8 @@ mod tests {
         assert!(!repeats_request("close brave", "close Firefox"));
         assert!(!repeats_request("don't close firefox", "close Firefox"));
         assert!(!repeats_request("firefox", "close Firefox"));
+        assert!(repeats_request("That's Mavis, close Bulk Rename.", "close Bulk Rename"));
+        assert!(!repeats_request("no, don't close bulk rename", "close Bulk Rename"));
     }
 
     #[test]

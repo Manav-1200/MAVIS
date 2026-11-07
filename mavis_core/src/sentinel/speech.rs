@@ -360,10 +360,18 @@ fn asks_for_recent_changes(w: &[String]) -> bool {
         "today", "lately", "recently", "this", "last", "past", "week",
     ];
     let has = |set: &[&str]| w.iter().any(|x| set.contains(&x.as_str()));
-    !w.is_empty()
-        && w.iter().all(|x| GRAMMAR.contains(&x.as_str()))
-        && has(&["changes", "updates"])
-        && has(&["recent", "latest", "new", "today", "lately", "recently", "week"])
+    // "What's changed recently on my system" heard as "what's since
+    // recently on my system": a short what-question about recently and the
+    // system is this question whatever the middle word became.
+    let misheard = w.len() <= 8
+        && matches!(w.first().map(String::as_str), Some("what" | "whats"))
+        && has(&["recently", "lately"])
+        && has(&["system", "computer", "machine", "laptop", "pc"]);
+    misheard
+        || (!w.is_empty()
+            && w.iter().all(|x| GRAMMAR.contains(&x.as_str()))
+            && has(&["changes", "updates"])
+            && has(&["recent", "latest", "new", "today", "lately", "recently", "week"]))
 }
 
 /// "What did that update do?" Every word must be in the grammar, so
@@ -450,6 +458,7 @@ mod tests {
             "Tell me all the recent changes on my system.",
             "Can you list the latest updates?",
             "any recent changes",
+            "Mavis, what's since recently on my system?",
         ] {
             assert!(is_change_question(q), "should match: {q}");
         }
@@ -469,6 +478,7 @@ mod tests {
             "what time is it",
             "what are the latest updates for firefox",
             "tell me about changes",
+            "what have you been doing on my computer recently and why",
             "",
         ] {
             assert!(!is_change_question(q), "should not match: {q}");

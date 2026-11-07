@@ -24,7 +24,9 @@ impl ListenMode {
     /// `config/config.toml`, else Always.
     pub fn configured() -> Self {
         let from_env = std::env::var("MAVIS_LISTEN_MODE").ok();
+        // Relative to mavis_core/ when run with cargo, else the source tree.
         let from_file = std::fs::read_to_string("../config/config.toml")
+            .or_else(|_| std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../config/config.toml")))
             .ok()
             .and_then(|text| read_setting(&text, "voice", "listen_mode"));
         Self::parse(from_env.or(from_file).as_deref())
