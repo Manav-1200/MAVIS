@@ -36,9 +36,11 @@ compute_type = "int8"    # "float16" with cuda
 provider = "local"
 
 [model]
-path = "~/.local/share/mavis/models/Llama-3.1-8B-Instruct-Q4_K_M.gguf"
+# What has actually been running. If the file is missing, the worker tries
+# the Phi-3 and TinyLlama files in the same folder.
+path = "~/.local/share/mavis/models/Phi-3-mini-4k-instruct-Q4_K_M.gguf"
 n_ctx = 4096
-n_gpu_layers = -1        # -1 = offload all layers to GPU
+n_gpu_layers = 20        # full offload (-1) failed on 6 GB
 verbose = false
 
 [worker]

@@ -42,7 +42,7 @@ class WorkerServer:
         # [stt] in config.toml. "small.en" hears English better than
         # "small" at the same speed.
         self.stt_engine = STTEngine(
-            model_size=self.config.get("stt.model", "small"),
+            model_size=self.config.get("stt.model", "small.en"),
             device=self.config.get("stt.device", "cpu"),
             compute_type=self.config.get("stt.compute_type", "int8"),
             confidence_threshold=0.45,

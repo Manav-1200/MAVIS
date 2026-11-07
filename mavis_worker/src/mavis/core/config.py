@@ -1,3 +1,4 @@
+# mavis_worker/src/mavis/core/config.py
 """
 MAVIS Configuration Manager
 
@@ -14,6 +15,17 @@ import tomllib
 from mavis.core.constants import DEFAULT_CONFIG_FILE
 from mavis.core.paths import CONFIG_DIR
 
+# The repository's config/config.toml, which the core reads too. The worker
+# only looked in ~/.config/mavis, so [stt] in the repo never applied.
+REPO_CONFIG = Path(__file__).resolve().parents[4] / "config" / DEFAULT_CONFIG_FILE
+
+
+def _default_path() -> Path:
+    user = CONFIG_DIR / DEFAULT_CONFIG_FILE
+    if user.exists() or not REPO_CONFIG.exists():
+        return user
+    return REPO_CONFIG
+
 
 class ConfigurationError(Exception):
     """Raised when the configuration is invalid."""
@@ -23,7 +35,7 @@ class AppConfig:
     """Loads and manages the MAVIS configuration."""
 
     def __init__(self, config_path: Path | None = None) -> None:
-        self._config_path = config_path or CONFIG_DIR / DEFAULT_CONFIG_FILE
+        self._config_path = config_path or _default_path()
         self._data: dict[str, Any] = {}
 
     @property

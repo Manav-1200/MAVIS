@@ -23,7 +23,8 @@ MAX_SENTENCES = 3
 MAX_CHARS = 320
 
 GENERIC_OFFER = re.compile(
-    r"\b(?:how|what(?: else)?) can i (?:help|assist|do for)\b|\banything else i can\b",
+    r"\b(?:how|what(?: else)?) can i (?:help|assist|do for)\b|\banything else i can\b"
+    r"|^would you like (?:me )?to\b",
     re.IGNORECASE,
 )
 
@@ -238,8 +239,8 @@ class LlamaEngine:
             text = narrated.group(1).strip()
 
         # 6. Truncate to the first few sentences, without a closing offer
-        # of help ("What else can I assist you with?"), which rule 5 bans
-        # and the model adds anyway.
+        # ("What else can I assist you with?", "Would you like to…?"),
+        # which rule 5 bans and the model adds anyway.
         sentences = re.split(r"(?<=[.!?])\s+", text)
         while len(sentences) > 1 and GENERIC_OFFER.search(sentences[-1]):
             sentences.pop()
