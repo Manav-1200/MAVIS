@@ -636,6 +636,7 @@ async fn main() -> Result<()> {
     let platform_for_poll = Arc::clone(&platform);
     let bus_for_poll = Arc::clone(&bus);
     let started_from_for_poll = started_from.clone();
+    let orb_opened_at = std::time::Instant::now();
     let ctx_poll_handle = supervise("ContextPoller", Arc::clone(&bus), move || {
         let platform_ctx = Arc::clone(&platform_for_poll);
         let bus_ctx = Arc::clone(&bus_for_poll);
@@ -644,7 +645,7 @@ async fn main() -> Result<()> {
         let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(2));
         // The user's last real window, used while the orb has focus.
         let mut last_user_window: Option<WindowInfo> = started_from;
-        // Focus was handed back for this spell of the orb having it.
+        // Focus is handed back at most once, when the orb opens.
         let mut handed_back = false;
         loop {
             ticker.tick().await;
@@ -716,19 +717,14 @@ async fn main() -> Result<()> {
 
                 if snapshot.active_window.is_none() && own_focused {
                     snapshot.active_window = last_user_window.clone();
-                    // The orb never needs the keyboard: give it back to
-                    // the window the user was in.
-                    if !handed_back {
+                    if hand_focus_back(handed_back, orb_opened_at.elapsed()) {
                         handed_back = true;
                         if let Some(id) = last_user_window.as_ref().and_then(|w| w.id) {
                             if tracker.focus_window(id).is_ok() {
-                                info!("Orb: gave keyboard focus back to the user's window");
+                                info!("Orb: gave keyboard focus back to the window MAVIS was started from");
                             }
                         }
                     }
-                }
-                if !own_focused {
-                    handed_back = false;
                 }
                 if let Some(w) = &snapshot.active_window {
                     last_user_window = Some(w.clone());
@@ -946,6 +942,14 @@ async fn main() -> Result<()> {
 /// Is this one of MAVIS's own windows (the orb)? By pid where the
 /// compositor reports one; by title for backends that don't (minifb sets
 /// no app_id, so it shows up as "unknown" with the title "MAVIS").
+/// Whether to move focus off the orb. Only once, as it opens: that focus
+/// was taken, not given. Later the user got there by switching window or
+/// workspace, and moving focus back dragged them to where they had been
+/// (2026-11-09).
+fn hand_focus_back(already: bool, since_open: std::time::Duration) -> bool {
+    !already && since_open <= std::time::Duration::from_secs(20)
+}
+
 fn is_own_window(w: &WindowInfo) -> bool {
     w.pid == Some(std::process::id())
         || (w.window_title == "MAVIS" && (w.app_name.is_empty() || w.app_name == "unknown"))
@@ -988,4 +992,18 @@ fn speech_hints(apps: &[context_snapshot::AppEntry]) -> String {
         out.push_str(name);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn focus_is_handed_back_only_as_the_orb_opens() {
+        assert!(hand_focus_back(false, Duration::from_secs(2)));
+        assert!(!hand_focus_back(true, Duration::from_secs(4)));
+        // Switching to the orb's workspace later is the user's own doing.
+        assert!(!hand_focus_back(false, Duration::from_secs(300)));
+    }
 }
