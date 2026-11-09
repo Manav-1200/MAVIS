@@ -454,6 +454,13 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.15 — No more dragging (2026-11-09)
+
+Details in [`DECISIONS.md` §34](DECISIONS.md#34-focus-is-handed-back-once).
+
+- [x] **Switching window or workspace no longer pulls you back**: focus is handed back from the orb only as it opens.
+- [ ] Check on hardware
+
 ### 6.14 — Playing in any app (2026-11-07)
 
 Details in [`DECISIONS.md` §33](DECISIONS.md#33-playing-in-any-app).
@@ -1001,4 +1008,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-08*
+*Last updated: 2026-11-09*

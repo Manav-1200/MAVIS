@@ -53,6 +53,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 31. [The 2026-11-05 full run](#31-the-2026-11-05-full-run)
 32. [The 2026-11-06 run](#32-the-2026-11-06-run)
 33. [Playing in any app](#33-playing-in-any-app)
+34. [Focus is handed back once](#34-focus-is-handed-back-once)
 
 ---
 
@@ -98,6 +99,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-09 | 6 | Switching window or workspace dragged the user back: focus is now handed back from the orb only as it opens (§34) |
 | 11-07 | 6 | "Play X" no longer hardcodes a site or browser: sites come from config, the app from what it registers for, and the last app is remembered (§33) |
 | 11-06 | 6 | Run: the worker never read `config/config.toml` (still `small`), "open Thunar" ran Bulk Rename, "That's Mavis, close …" cancelled, the model invented "no recent updates". Config read from the repo, binary-sharing entries ranked, "close it" added (§32) |
 | 11-05 | 6 | Full run: "play" only searched, "open tuner" (Thunar) got "I can't open applications", "close Firefox" repeated as the answer was dropped as unclear. Play picks the top video, near-miss app names match, commands skip the confidence gate (§31) |
@@ -1710,7 +1712,7 @@ Pending updates ("how many updates do I have") are not something MAVIS can see y
 ### Seen, no change
 - "Mavis" alone got "Yes?"; "can you hear me" was heard right (0.79). The rest ran on `small`, so hearing should get better once `small.en` loads.
 - The window count said three (antigravity-ide, brave-browser, kitty), with no Thunar windows listed although Bulk Rename had been opened twice. Either they were closed by hand, or windows are missed; to be confirmed.
-- The orb took keyboard focus about ten times and gave it back each time. Whether that was the mouse passing over it or the compositor is unknown; the orb never asks for focus itself.
+- The orb took keyboard focus about ten times and gave it back each time. Most likely each time was the user switching to it, and giving it back is what dragged them (§34).
 
 ---
 
@@ -1736,6 +1738,20 @@ Pending updates ("how many updates do I have") are not something MAVIS can see y
 - **The model deciding:** the user wants MAVIS to be intelligent, not phrase-matched. Requests are still recognised by phrases ("play", "open", "close"); this change removes hardcoded names, not the phrases. Letting the model choose the action from the installed apps and open windows is the next design question.
 
 **Evidence:** **Proven** for the matching, config reading, file search, link types and remembering (tests, with invented apps and sites). The shipped config is checked to parse.
+
+---
+
+## 34. Focus is handed back once
+
+*2026-11-09.* "It drags window to previous window when I switch window or workspace."
+
+### Problem
+The fix for the focus problem of 2026-11-01 (§28) moved focus back to the user's window every time the orb had it. The orb takes focus by itself only once, when it opens. Every later time, the user got there: switching to the orb's workspace, or moving across it. Moving focus back then sent them to the window they had just left, often on another workspace. The 11-06 log shows ten hand-backs in four minutes.
+
+### Fix
+Focus is handed back at most once, within 20 seconds of the orb opening. After that, the orb having focus is left alone. MAVIS keeps describing the user's last real window as the focused one, as before.
+
+**Evidence:** **Proven** for the rule (test). **Reasoned** from the log and the description that this is what dragged the window; to be checked on hardware.
 
 ---
 

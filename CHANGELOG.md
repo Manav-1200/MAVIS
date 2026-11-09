@@ -38,6 +38,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **"Play X" works with any app**, not just a browser: browsers get the site from `[media]` in `config/config.toml`, media players get a matching file from your Music or Videos folder, and apps with their own link type get a search. The app you last played in is used next time. "Search for X" uses `[web]`. No site or app names in code.
 
 ### Fixed
+- **Switching window or workspace pulled you back** to the window you'd left. MAVIS now moves focus off its orb only once, as it opens.
 - **The speech model setting in `config/config.toml` was ignored**: the worker only looked in `~/.config/mavis`. It now falls back to the repo's file, whose model settings now match what actually runs.
 - **"Open Thunar" opened Bulk Rename**, another launcher entry using the same program.
 - **Answering "Shall I close…?" with "Yes Mavis, close …" cancelled.** It confirms now; "close it" closes the focused window.
