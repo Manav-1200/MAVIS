@@ -54,6 +54,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 32. [The 2026-11-06 run](#32-the-2026-11-06-run)
 33. [Playing in any app](#33-playing-in-any-app)
 34. [Focus is handed back once](#34-focus-is-handed-back-once)
+35. [The speech model that couldn't download](#35-the-speech-model-that-couldnt-download)
 
 ---
 
@@ -99,6 +100,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-10 | 6 | MAVIS heard nothing: `small.en` couldn't download because Kokoro had switched the worker offline. Offline is now decided for all models at once, with a fallback to a model on disk (§35) |
 | 11-09 | 6 | Switching window or workspace dragged the user back: focus is now handed back from the orb only as it opens (§34) |
 | 11-07 | 6 | "Play X" no longer hardcodes a site or browser: sites come from config, the app from what it registers for, and the last app is remembered (§33) |
 | 11-06 | 6 | Run: the worker never read `config/config.toml` (still `small`), "open Thunar" ran Bulk Rename, "That's Mavis, close …" cancelled, the model invented "no recent updates". Config read from the repo, binary-sharing entries ranked, "close it" added (§32) |
@@ -888,7 +890,7 @@ Names stored by older builds carry no marker that they were learned this way, so
 The log ends at `^C` with none of the shutdown messages. Ctrl+C goes to every process in the foreground group, so `tee` dies first and the rest of the output has nowhere to go. Redirect instead of piping (`> ~/mavis-test.log 2>&1`) to see the shutdown sequence.
 
 ### Minor
-- Kokoro asked Hugging Face about its weights on every load. When the model is already in the cache, `HF_HUB_OFFLINE` is now set before the import, so a local-first assistant starts without the network.
+- Kokoro asked Hugging Face about its weights on every load. When the model is already in the cache, `HF_HUB_OFFLINE` is now set before the import, so a local-first assistant starts without the network. *(Moved to the worker in §35: set from Kokoro, it also stopped other models downloading.)*
 - The two `/dev/dsp` ALSA errors are cpal probing the legacy OSS device. Harmless.
 
 ### Still open after this run
@@ -1752,6 +1754,29 @@ The fix for the focus problem of 2026-11-01 (§28) moved focus back to the user'
 Focus is handed back at most once, within 20 seconds of the orb opening. After that, the orb having focus is left alone. MAVIS keeps describing the user's last real window as the focused one, as before.
 
 **Evidence:** **Proven** for the rule (test). **Reasoned** from the log and the description that this is what dragged the window; to be checked on hardware.
+
+---
+
+## 35. The speech model that couldn't download
+
+*2026-11-10.* The first run with `small.en` heard nothing at all.
+
+### Problem
+Every utterance failed: `STT: empty response (attempt 1/5)` … `5/5`, then "failed to get transcription". The worker's warm-up had died with `OfflineModeIsEnabled: Cannot reach …/faster-whisper-small.en`.
+**Cause:** Kokoro's loader set `HF_HUB_OFFLINE=1` for the whole process once its own weights were cached (see the 2026-09 note above). `small` had been downloaded long ago; `small.en` never had been, and with the process offline it never could be. The core then asked five times per utterance for an answer that couldn't change, and the failure was a bare "Future exception was never retrieved" traceback.
+
+### Fix
+- **Offline is decided once, by the worker, for every model:** the process goes offline only when Kokoro and the configured Whisper model are both cached. Otherwise it stays online and says which models it will fetch.
+- **A model already on disk is the fallback:** if the configured model can't be loaded, `small.en`, `small`, `base.en` and `base` are tried from disk only. The log says which one was used. With none, the error says to start once with the network on.
+- **The core stops at the worker's error.** It logs the worker's reason once instead of retrying five times.
+- The warm-up logs its failure in one line.
+
+**Evidence:** **Proven** from the log's traceback for the cause. **Measured** with stand-in models: offline stays off while `small.en` is missing and comes on once everything is cached; with only `small` on disk, `small` loads; with nothing, the error explains. Rust tests pass.
+
+### Also in the log
+- **Sentinel notifications** at startup: four, for 168 changes since the last scan (the weekend's update), peak severity critical for the sudo configuration change. The user liked them.
+- **Noise floor 0.15–0.18**, up from 0.013–0.046 on 11-05; speech peaked at 0.53, so it was still detected. Something in the room was louder, or the input gain went up.
+- Focus was handed back once at startup, as intended, and the window followed kitty → Brave → kitty.
 
 ---
 

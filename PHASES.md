@@ -454,6 +454,15 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.16 — Speech model download (2026-11-10)
+
+Details in [`DECISIONS.md` §35](DECISIONS.md#35-the-speech-model-that-couldnt-download).
+
+- [x] **A new speech model can download**: offline only once every model is on disk.
+- [x] **Falls back to a speech model already downloaded**, and says so.
+- [x] **No five-fold retry** of a request the worker has already refused.
+- [ ] Confirm `small.en` downloads and loads on hardware
+
 ### 6.15 — No more dragging (2026-11-09)
 
 Details in [`DECISIONS.md` §34](DECISIONS.md#34-focus-is-handed-back-once).
@@ -1008,4 +1017,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-09*
+*Last updated: 2026-11-10*
