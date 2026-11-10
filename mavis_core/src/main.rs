@@ -469,6 +469,9 @@ async fn main() -> Result<()> {
 
                     let resp_str = String::from_utf8_lossy(&resp_buf);
                     if let Ok(resp_json) = serde_json::from_str::<serde_json::Value>(&resp_str) {
+                        if let Some(error) = resp_json.pointer("/payload/error").and_then(|e| e.as_str()) {
+                            return Ok(Err(error.to_string()));
+                        }
                         if let Some(result) = resp_json
                             .get("payload")
                             .and_then(|p| p.get("result"))
@@ -478,22 +481,28 @@ async fn main() -> Result<()> {
                                     .get("confidence")
                                     .and_then(|c| c.as_f64())
                                     .unwrap_or(1.0) as f32;
-                                return Ok::<_, std::io::Error>(Some((
+                                return Ok::<_, std::io::Error>(Ok(Some((
                                     text.to_string(),
                                     confidence,
-                                )));
+                                ))));
                             }
                         }
                     }
-                    Ok(None)
+                    Ok(Ok(None))
                 }).await;
 
                 match result {
-                    Ok(Ok(Some(text))) => {
+                    Ok(Ok(Ok(Some(text)))) => {
                         response_text = Some(text);
                         break;
                     }
-                    Ok(Ok(None)) => {
+                    // The worker said why (a missing model, say): asking
+                    // again gives the same answer, five times over.
+                    Ok(Ok(Err(error))) => {
+                        warn!("STT: the worker couldn't transcribe — {}", error);
+                        break;
+                    }
+                    Ok(Ok(Ok(None))) => {
                         warn!("STT: empty response (attempt {}/5)", attempt);
                         sleep(Duration::from_millis(500)).await;
                     }

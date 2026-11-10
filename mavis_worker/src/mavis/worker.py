@@ -9,6 +9,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from pathlib import Path
 
 from mavis.core.config import load_config
 from mavis.core.logger import setup_logging
@@ -31,6 +32,35 @@ def _make_event(payload: dict, event_type: str = "WorkerResponse") -> dict:
     }
 
 
+def _cached(repo_id: str) -> bool:
+    """A Hugging Face model already in the local cache."""
+    hub = Path(os.environ.get("HF_HOME", Path.home() / ".cache" / "huggingface")) / "hub"
+    snapshots = hub / f"models--{repo_id.replace('/', '--')}" / "snapshots"
+    return snapshots.is_dir() and any(snapshots.iterdir())
+
+
+def _prefer_local_models(whisper_model: str) -> None:
+    """
+    Work offline only when every model is already downloaded.
+
+    Kokoro used to switch the whole process offline as soon as its own
+    weights were cached, which stopped a newly chosen speech model from
+    ever downloading (2026-11-10).
+    """
+    if os.environ.get("HF_HUB_OFFLINE") is not None:
+        return
+    needed = {"hexgrad/Kokoro-82M"}
+    if not Path(whisper_model).expanduser().exists():
+        needed.add(STTEngine.repo_for(whisper_model))
+    missing = sorted(r for r in needed if not _cached(r))
+    if missing:
+        print(
+            f"[worker] Not downloaded yet, fetching on first use: {', '.join(missing)}", flush=True
+        )
+    else:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+
+
 class WorkerServer:
     def __init__(self, socket_path: str = "/tmp/mavis_worker.sock"):
         self.socket_path = socket_path
@@ -41,8 +71,10 @@ class WorkerServer:
         )
         # [stt] in config.toml. "small.en" hears English better than
         # "small" at the same speed.
+        stt_model = self.config.get("stt.model", "small.en")
+        _prefer_local_models(stt_model)
         self.stt_engine = STTEngine(
-            model_size=self.config.get("stt.model", "small.en"),
+            model_size=stt_model,
             device=self.config.get("stt.device", "cpu"),
             compute_type=self.config.get("stt.compute_type", "int8"),
             confidence_threshold=0.45,

@@ -16,6 +16,9 @@ import numpy as np
 
 logger = logging.getLogger("mavis.stt")
 
+# Tried, from disk only, when the configured model can't be loaded.
+FALLBACK_MODELS = ("small.en", "small", "base.en", "base")
+
 # Speech detection — which parts of the audio are someone talking.
 #
 # Whisper always produces fluent text, even from a fan: that's where
@@ -91,17 +94,61 @@ class STTEngine:
             self.device,
             self.compute_type,
         )
-        self._model = WhisperModel(
-            self.model_size,
-            device=self.device,
-            compute_type=self.compute_type,
-        )
+        try:
+            self._model = WhisperModel(
+                self.model_size,
+                device=self.device,
+                compute_type=self.compute_type,
+            )
+        except (OSError, ValueError) as exc:
+            # Not downloaded and no network: a model already on disk hears
+            # worse, but hearing worse beats not hearing at all.
+            for other in FALLBACK_MODELS:
+                if other == self.model_size:
+                    continue
+                try:
+                    self._model = WhisperModel(
+                        other,
+                        device=self.device,
+                        compute_type=self.compute_type,
+                        local_files_only=True,
+                    )
+                except (OSError, ValueError):
+                    continue
+                logger.warning(
+                    "Speech model %s couldn't be loaded (%s); using %s, already downloaded",
+                    self.model_size,
+                    type(exc).__name__,
+                    other,
+                )
+                break
+            else:
+                raise RuntimeError(
+                    f"speech model {self.model_size} isn't downloaded and couldn't be "
+                    "fetched; start MAVIS once with the network on"
+                ) from exc
         logger.info("STT model loaded.")
+
+    @staticmethod
+    def repo_for(model_size: str) -> str:
+        """Where faster-whisper downloads a model name from."""
+        try:
+            from faster_whisper.utils import _MODELS
+
+            return _MODELS.get(model_size, model_size)
+        except ImportError:
+            return model_size if "/" in model_size else f"Systran/faster-whisper-{model_size}"
 
     def warm_up(self) -> None:
         """Pre-load the model so first request doesn't block on download."""
         print("[stt] Warming up model...", flush=True)
-        self._load()
+        try:
+            self._load()
+        except RuntimeError as exc:
+            # Ran in a thread nobody waits on: unlogged, it surfaced as a
+            # bare "Future exception was never retrieved" traceback.
+            print(f"[stt] Warm-up failed: {exc}", flush=True)
+            return
         print("[stt] Model warm-up complete.", flush=True)
 
     def unload(self) -> None:
