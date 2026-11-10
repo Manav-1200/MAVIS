@@ -410,6 +410,8 @@ async fn main() -> Result<()> {
 
     let tts_active_for_stt = tts_active.clone();
     let listen_for_stt = Arc::clone(&listen);
+    // When hearing failed and what MAVIS said about it, so it's said once.
+    let mut told_about_failure: Option<(&'static str, std::time::Instant)> = None;
     let stt_task = tokio::spawn(async move {
         use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -447,6 +449,7 @@ async fn main() -> Result<()> {
             let req_bytes = req_str.as_bytes();
 
             let mut response_text: Option<(String, f32)> = None;
+            let mut worker_error: Option<String> = None;
             for attempt in 1..=5 {
                 let attempt_timeout = if attempt == 1 {
                     Duration::from_secs(300)
@@ -500,6 +503,7 @@ async fn main() -> Result<()> {
                     // again gives the same answer, five times over.
                     Ok(Ok(Err(error))) => {
                         warn!("STT: the worker couldn't transcribe — {}", error);
+                        worker_error = Some(error);
                         break;
                     }
                     Ok(Ok(Ok(None))) => {
@@ -602,6 +606,21 @@ async fn main() -> Result<()> {
                     event_type: EventType::UiStateChange,
                     payload: serde_json::json!({ "state": "error" }),
                 });
+                // Said out loud: a red orb alone left the user wondering
+                // why MAVIS went quiet (2026-11-10).
+                let line = hearing_failure_line(worker_error.as_deref());
+                let repeat = told_about_failure
+                    .is_some_and(|(said, at)| said == line && at.elapsed() < Duration::from_secs(60));
+                if !repeat {
+                    told_about_failure = Some((line, std::time::Instant::now()));
+                    bus_for_stt.publish(Event {
+                        id: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now(),
+                        source: "stt".to_string(),
+                        event_type: EventType::PlanReady,
+                        payload: serde_json::json!({ "plan": {"type": "say", "text": line} }),
+                    });
+                }
             }
         }
         info!("STT pipeline shut down");
@@ -615,14 +634,30 @@ async fn main() -> Result<()> {
         let mut rx = bus_clone.subscribe();
         // True while the permission gate is waiting for a yes or no.
         let mut asking = false;
+        // Red only while something is wrong: back to idle after a moment.
+        let mut error_until: Option<tokio::time::Instant> = None;
         loop {
-            match rx.recv().await {
+            let received = match error_until {
+                Some(at) => match tokio::time::timeout_at(at, rx.recv()).await {
+                    Ok(received) => received,
+                    Err(_) => {
+                        error_until = None;
+                        orb.set_state(ui::OrbState::from_event("idle", &mut asking));
+                        continue;
+                    }
+                },
+                None => rx.recv().await,
+            };
+            match received {
                 Ok(event) => {
                     if let EventType::UiStateChange = event.event_type {
                         if let Some(state_str) =
                             event.payload.get("state").and_then(|v| v.as_str())
                         {
-                            orb.set_state(ui::OrbState::from_event(state_str, &mut asking));
+                            let state = ui::OrbState::from_event(state_str, &mut asking);
+                            error_until = (state == ui::OrbState::Error)
+                                .then(|| tokio::time::Instant::now() + tokio::time::Duration::from_secs(4));
+                            orb.set_state(state);
                         }
                     }
                 }
@@ -951,6 +986,20 @@ async fn main() -> Result<()> {
 /// Is this one of MAVIS's own windows (the orb)? By pid where the
 /// compositor reports one; by title for backends that don't (minifb sets
 /// no app_id, so it shows up as "unknown" with the title "MAVIS").
+/// What MAVIS says when it couldn't hear: the reason the worker gave, in
+/// plain words.
+fn hearing_failure_line(worker_error: Option<&str>) -> &'static str {
+    match worker_error {
+        Some(e) if e.contains("still loading") => {
+            "I can't hear you yet. My speech model is still loading; give me a minute."
+        }
+        Some(e) if e.contains("isn't downloaded") => {
+            "I can't hear you. My speech model isn't downloaded, and I couldn't fetch it."
+        }
+        _ => "Sorry, something went wrong with my hearing just then.",
+    }
+}
+
 /// Whether to move focus off the orb. Only once, as it opens: that focus
 /// was taken, not given. Later the user got there by switching window or
 /// workspace, and moving focus back dragged them to where they had been
@@ -1007,6 +1056,13 @@ fn speech_hints(apps: &[context_snapshot::AppEntry]) -> String {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn a_hearing_failure_is_explained() {
+        assert!(hearing_failure_line(Some("speech model is still loading")).contains("still loading"));
+        assert!(hearing_failure_line(Some("STT failed: speech model small.en isn't downloaded and couldn't be fetched")).contains("isn't downloaded"));
+        assert!(hearing_failure_line(None).starts_with("Sorry"));
+    }
 
     #[test]
     fn focus_is_handed_back_only_as_the_orb_opens() {

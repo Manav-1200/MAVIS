@@ -72,6 +72,8 @@ class STTEngine:
         self.confidence_threshold = confidence_threshold
         self._model: object | None = None
         self._last_activity = time.time()
+        # True while warm-up loads (or downloads) the model.
+        self.loading = False
 
     # ------------------------------------------------------------------ #
     # Lifecycle
@@ -142,6 +144,7 @@ class STTEngine:
     def warm_up(self) -> None:
         """Pre-load the model so first request doesn't block on download."""
         print("[stt] Warming up model...", flush=True)
+        self.loading = True
         try:
             self._load()
         except RuntimeError as exc:
@@ -149,6 +152,8 @@ class STTEngine:
             # bare "Future exception was never retrieved" traceback.
             print(f"[stt] Warm-up failed: {exc}", flush=True)
             return
+        finally:
+            self.loading = False
         print("[stt] Model warm-up complete.", flush=True)
 
     def unload(self) -> None:

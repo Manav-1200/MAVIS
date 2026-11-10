@@ -304,6 +304,11 @@ class WorkerServer:
                 }
             )
 
+        # While the model downloads, a request would wait minutes in the
+        # queue behind it, and MAVIS would sit there saying nothing.
+        if self.stt_engine.loading and not self.stt_engine.is_loaded():
+            return _make_event({"type": "error", "error": "speech model is still loading"})
+
         try:
             audio_bytes = base64.b64decode(audio_b64)
             print(f"[worker] STT request: {len(audio_bytes)} bytes", flush=True)
