@@ -39,6 +39,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 
 ### Fixed
 - **MAVIS heard nothing after switching to `small.en`.** The voice engine had put the worker offline, so the new speech model couldn't download. The worker now stays online until every model is downloaded, falls back to a speech model already on disk, and the core no longer retries a refused request five times.
+- **MAVIS went quiet with a red orb when it couldn't hear.** It now says why ("my speech model is still loading"), and the red fades back after a few seconds.
 - **Switching window or workspace pulled you back** to the window you'd left. MAVIS now moves focus off its orb only once, as it opens.
 - **The speech model setting in `config/config.toml` was ignored**: the worker only looked in `~/.config/mavis`. It now falls back to the repo's file, whose model settings now match what actually runs.
 - **"Open Thunar" opened Bulk Rename**, another launcher entry using the same program.

@@ -461,6 +461,7 @@ Details in [`DECISIONS.md` §35](DECISIONS.md#35-the-speech-model-that-couldnt-d
 - [x] **A new speech model can download**: offline only once every model is on disk.
 - [x] **Falls back to a speech model already downloaded**, and says so.
 - [x] **No five-fold retry** of a request the worker has already refused.
+- [x] **Says why it can't hear** instead of going quiet; the red orb fades after four seconds.
 - [ ] Confirm `small.en` downloads and loads on hardware
 
 ### 6.15 — No more dragging (2026-11-09)

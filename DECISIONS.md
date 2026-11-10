@@ -1778,6 +1778,14 @@ Every utterance failed: `STT: empty response (attempt 1/5)` … `5/5`, then "fai
 - **Noise floor 0.15–0.18**, up from 0.013–0.046 on 11-05; speech peaked at 0.53, so it was still detected. Something in the room was louder, or the input gain went up.
 - Focus was handed back once at startup, as intended, and the window followed kitty → Brave → kitty.
 
+### Problem · It went quiet without saying why
+"Why did it not speak?" The voice worked; MAVIS only speaks to answer, and with no transcript there was nothing to answer. The only sign was a red orb, which stayed red until something else happened.
+**Fix:**
+- When hearing fails, MAVIS says so, in the worker's terms. "I can't hear you yet. My speech model is still loading" while it downloads; "isn't downloaded, and I couldn't fetch it" when offline with no model; otherwise a short apology. The same line isn't repeated within a minute.
+- While the model is loading, the worker answers a request at once instead of queueing it behind a download of several minutes.
+- The orb's red fades back to idle after four seconds.
+**Evidence:** **Proven** for the choice of line (test). **Measured** that the worker refuses at once while loading (stand-in model). The fade and the spoken line are **reasoned**; to be seen on hardware.
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
