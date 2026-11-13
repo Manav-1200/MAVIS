@@ -1040,8 +1040,9 @@ fn speech_hints(apps: &[context_snapshot::AppEntry]) -> String {
     let mut out = String::new();
     for name in names {
         // 300 cut the list off alphabetically, so Thunar never made it.
-        // Whisper's prompt holds about 220 tokens; this leaves room.
-        if out.len() + name.len() + 2 > 600 {
+        // Whisper's prompt holds about 220 tokens, with the phrases that
+        // teach it "Mavis" after the apps.
+        if out.len() + name.len() + 2 > 450 {
             break;
         }
         if !out.is_empty() {

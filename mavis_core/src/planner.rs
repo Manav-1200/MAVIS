@@ -320,7 +320,15 @@ fn misheard_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> 
     if spoken.contains(' ') || spoken.len() < 4 {
         return None;
     }
-    let mut best: Option<(usize, &AppEntry)> = None;
+    let near = |w: &str| {
+        // One letter off for short names, two for longer ones.
+        let allowed = if w.len().max(spoken.len()) >= 6 { 2 } else { 1 };
+        let d = edit_distance(spoken, w);
+        (w.len() >= 4 && d <= allowed).then_some(d)
+    };
+    // Ranked by distance, then a match on the name over one on the binary
+    // only: "Bulk Rename" shares Thunar's binary and would otherwise tie.
+    let mut best: Option<((usize, bool), &AppEntry)> = None;
     let mut tied = false;
     for app in apps {
         let binary = crate::util::split_command_line(&app.exec)
@@ -328,22 +336,13 @@ fn misheard_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> 
             .next()
             .map(|b| normalize(b.rsplit('/').next().unwrap_or(&b)))
             .unwrap_or_default();
-        let name = normalize(&app.name);
-        let distance = name
-            .split_whitespace()
-            .chain(std::iter::once(binary.as_str()))
-            .filter(|w| w.len() >= 4)
-            .map(|w| {
-                // One letter off for short names, two for longer ones.
-                let allowed = if w.len().max(spoken.len()) >= 6 { 2 } else { 1 };
-                let d = edit_distance(spoken, w);
-                if d <= allowed { d } else { usize::MAX }
-            })
-            .min()
-            .unwrap_or(usize::MAX);
-        if distance == usize::MAX {
-            continue;
-        }
+        let by_name = normalize(&app.name).split_whitespace().filter_map(near).min();
+        let distance = match (by_name, near(&binary)) {
+            (Some(n), Some(b)) if b < n => (b, true),
+            (Some(n), _) => (n, false),
+            (None, Some(b)) => (b, true),
+            (None, None) => continue,
+        };
         match best {
             Some((d, a)) if d == distance && a.name != app.name => tied = true,
             Some((d, _)) if d <= distance => {}
@@ -382,15 +381,15 @@ fn strip_address(text: &str) -> &str {
             .unwrap_or(false);
         if matches_prefix {
             // Safe: the `get` above proved prefix.len() is a boundary.
-            return t[prefix.len()..].trim_start_matches([',', ' ', '.']);
+            return t[prefix.len()..].trim_start_matches([',', ' ', '.', '?', '!']);
         }
     }
     // Whisper often mishears the name ("MOVIS, what changed?"). A first
     // word one letter away from it counts, when punctuation sets it off the
     // way Whisper writes someone being addressed.
-    if let Some(end) = t.find([',', '.', '!']) {
+    if let Some(end) = t.find([',', '.', '!', '?']) {
         if is_misheard_name(&t[..end]) {
-            return t[end..].trim_start_matches([',', ' ', '.', '!']);
+            return t[end..].trim_start_matches([',', ' ', '.', '!', '?']);
         }
     }
     t
@@ -675,6 +674,10 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
             if target.contains("://") {
                 return say_then_open(format!("Opening {}.", target), target.to_string());
             }
+            // "open youtube.com": a bare domain is a link too.
+            if looks_like_domain(target) {
+                return say_then_open(format!("Opening {}.", target), format!("https://{}", target));
+            }
             if let Some(app) = find_named_app(target, apps) {
                 // Exec may carry flags and quoted paths; the executor's
                 // app action takes a binary plus args.
@@ -690,7 +693,8 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
             // that name: say so. The model used to answer "I can't open
             // applications", which is wrong.
             if at == 0 && matches!(verb, "open " | "launch ") {
-                let name = target.strip_prefix("the ").unwrap_or(target);
+                let name = target.split(" and ").next().unwrap_or(target);
+                let name = name.strip_prefix("the ").unwrap_or(name);
                 return Some(serde_json::json!({
                     "type": "say",
                     "text": format!("I couldn't find an app called {}.", name)
@@ -715,6 +719,15 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
     }
 
     None
+}
+
+/// "youtube.com", "docs.rs/serde": one word, a dot, letters after it.
+fn looks_like_domain(target: &str) -> bool {
+    let host = target.split('/').next().unwrap_or("");
+    !target.contains(' ')
+        && host.rsplit_once('.').is_some_and(|(name, tld)| {
+            !name.is_empty() && tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
+        })
 }
 
 /// The request inside polite wrapping: "can you open thunar for me" is
@@ -831,6 +844,20 @@ fn close_focused(t: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Option<C
     let words = window_app_words(&focused.app_name);
     let name = find_app(&words, apps).map(|a| a.name.clone()).unwrap_or(words);
     Some(Close::Windows { app: name, ids: vec![id] })
+}
+
+/// The open windows with the user's window marked focused. While the orb
+/// has focus none is, and "close it" found nothing to close.
+fn with_focus(windows: &[WindowInfo], active: Option<&WindowInfo>) -> Vec<WindowInfo> {
+    let mut windows = windows.to_vec();
+    if !windows.iter().any(|w| w.is_focused) {
+        if let Some(id) = active.and_then(|a| a.id) {
+            for w in windows.iter_mut().filter(|w| w.id == Some(id)) {
+                w.is_focused = true;
+            }
+        }
+    }
+    windows
 }
 
 /// "org.gnome.Nautilus" → "nautilus", "brave-browser" → "brave browser".
@@ -1080,7 +1107,7 @@ impl Planner {
         // question, but is carried out rather than lost.
         let close = {
             let wm = self.working.read().await;
-            close_request(intent, &wm.open_windows, &self.apps)
+            close_request(intent, &with_focus(&wm.open_windows, wm.active_window.as_ref()), &self.apps)
         };
         let (answering, repeats) = {
             let awaiting = self.awaiting.lock().unwrap_or_else(|p| p.into_inner());
@@ -1828,8 +1855,14 @@ fn plays_files(app: &AppEntry) -> bool {
     app.opens.iter().any(|m| m.starts_with("audio/") || m.starts_with("video/"))
 }
 
-/// A link type of the app's own ("x-scheme-handler/<name>"), not the web's.
+/// A link type of the app's own ("x-scheme-handler/<name>"), not the web's,
+/// for an app that registers nothing else. Editors and terminals register
+/// their own link types too, beside files; handing them a search ran
+/// `<terminal> <name>:search:…`.
 fn own_scheme(app: &AppEntry) -> Option<&str> {
+    if app.opens.iter().any(|m| !m.starts_with("x-scheme-handler/")) {
+        return None;
+    }
     app.opens
         .iter()
         .filter_map(|m| m.strip_prefix("x-scheme-handler/"))
@@ -1857,17 +1890,29 @@ pub async fn resolve_media(plan: &mut serde_json::Value, apps: &[AppEntry], medi
         // "search spotify for X": a site or an app, whichever it names.
         let on = step["on"].as_str();
         let on_app = on.and_then(|o| find_app(o, apps)).filter(|a| can_play(a));
+        let stripped = media.play_site.as_ref().map_or(query, |s| s.strip_from(query));
+        // The site named ("on youtube", "search youtube for"): a browser.
+        let site_named = stripped != query || on.is_some();
         let (target, used_last) = match (named.or(on_app), on) {
             (Some(app), _) => (Some(app), false),
+            // "search the web for X", "search google for X": not the play
+            // site and not an app, so a web search.
             (None, Some(o)) if !media.play_site.as_ref().is_some_and(|s| s.named(o)) => {
-                return splice(actions, at, spoken(&format!("I don't know how to search {}.", o)));
+                let found = match &media.web_site {
+                    Some(site) => in_browser(site.search(query), format!("Searching for {}", query), None),
+                    None => spoken(&format!("I don't know how to search {}.", o)),
+                };
+                return splice(actions, at, found);
             }
             _ => {
-                let last = media.last_app().and_then(|n| find(&n));
+                let last = media
+                    .last_app()
+                    .and_then(|n| find(&n))
+                    .filter(|a| !site_named || a.opens_links);
                 (last, last.is_some())
             }
         };
-        let query = media.play_site.as_ref().map_or(query, |s| s.strip_from(query));
+        let query = stripped;
         let (actions_out, worked) = play_in(query, target, search_only, media).await;
         if worked && !used_last {
             if let Some(app) = target {
@@ -1993,12 +2038,12 @@ fn find_media_file(query: &str, dirs: &[std::path::PathBuf]) -> Option<std::path
     let mut stack: Vec<(std::path::PathBuf, u8)> = dirs.iter().map(|d| (d.clone(), 0)).collect();
     let mut seen = 0;
     let mut found: Vec<std::path::PathBuf> = Vec::new();
-    while let Some((dir, depth)) = stack.pop() {
+    'walk: while let Some((dir, depth)) = stack.pop() {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             seen += 1;
             if seen > 20_000 {
-                break;
+                break 'walk;
             }
             let path = entry.path();
             if path.is_dir() {
@@ -2443,6 +2488,44 @@ mod tests {
         assert!(misheard_app("nopes", &twins).is_none());
     }
 
+    /// Bulk Rename shares Thunar's binary; "tuner" tied between them and
+    /// opened nothing.
+    #[test]
+    fn a_misheard_name_prefers_the_app_named_so() {
+        let apps = vec![
+            AppEntry { name: "Bulk Rename".into(), exec: "thunar --bulk-rename".into(), ..Default::default() },
+            AppEntry { name: "Thunar File Manager".into(), exec: "thunar".into(), ..Default::default() },
+        ];
+        assert_eq!(misheard_app("tuner", &apps).unwrap().name, "Thunar File Manager");
+    }
+
+    #[test]
+    fn a_bare_domain_opens_as_a_link() {
+        let apps = test_apps();
+        let plan = match_action_intent("open youtube.com", &apps).unwrap();
+        assert_eq!(plan[1]["target"], "https://youtube.com");
+        assert!(!looks_like_domain("my notes.txt file"));
+        let plan = match_action_intent("open gimp and play lofi", &apps).unwrap();
+        assert_eq!(plan["text"], "I couldn't find an app called gimp.");
+    }
+
+    #[test]
+    fn just_the_name_with_a_question_mark_is_still_just_the_name() {
+        assert_eq!(strip_address("Mavis?"), "");
+        assert_eq!(strip_address("Mavis? what time is it"), "what time is it");
+    }
+
+    #[test]
+    fn close_it_finds_the_window_while_the_orb_has_focus() {
+        let apps = test_apps();
+        let mut open = vec![window("files", "Home", 1, false)];
+        open[0].id = Some(7);
+        let active = open[0].clone();
+        assert_eq!(close_request("close it", &open, &apps), Some(Close::NoFocus));
+        let marked = with_focus(&open, Some(&active));
+        assert!(matches!(close_request("close it", &marked, &apps), Some(Close::Windows { ids, .. }) if ids == vec![7]));
+    }
+
     #[test]
     fn asking_for_an_app_that_is_not_installed_says_so() {
         let apps = test_apps();
@@ -2781,6 +2864,29 @@ mod tests {
             assert_eq!(plan[1]["target"], "tunes");
             let plan = resolved(serde_json::json!([{"type": "play", "query": "daylight", "on": "elsewhere", "search_only": true}]), &media).await;
             assert_eq!(plan[0]["text"], "I don't know how to search elsewhere.");
+        }
+
+        #[tokio::test]
+        async fn naming_the_site_or_the_web_uses_a_browser() {
+            let dir = std::env::temp_dir().join(format!("mavis-site-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let (video, web) = sites();
+            let media = Media::with_sites(Some(video), Some(web), Some(dir.join("media_app")));
+            resolved(serde_json::json!([{"type": "play", "query": "daylight", "app": "Tunes"}]), &media).await;
+            // Tunes is remembered, but "on tube" means the site, in a browser.
+            let plan = resolved(serde_json::json!([{"type": "play", "query": "sunrise on tube"}]), &media).await;
+            assert_eq!(plan[1]["target"], "https://tube.test/results?q=sunrise", "{}", plan);
+            // "search the web for X": a web search, not "I don't know how".
+            let plan = resolved(serde_json::json!([{"type": "play", "query": "cats", "on": "the web", "search_only": true}]), &media).await;
+            assert_eq!(plan[1]["target"], "https://find.test/?q=cats");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        #[test]
+        fn only_link_only_apps_get_a_search_link() {
+            let term = app("Term", "term", &["text/plain", "inode/directory", "x-scheme-handler/term"]);
+            assert!(own_scheme(&term).is_none());
+            assert_eq!(own_scheme(&apps()[1]), Some("tunes"));
         }
 
         #[tokio::test]

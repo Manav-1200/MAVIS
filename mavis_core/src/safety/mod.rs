@@ -388,11 +388,12 @@ fn words_of(said: &str) -> Vec<String> {
 }
 
 /// The answer says the request again: "close firefox, mavis" for "close
-/// Firefox". From its verb on, only the request's own words and fillers.
-/// Before the verb anything goes ("That's Mavis, close …" was "Yes Mavis")
-/// except a no.
+/// Firefox", or "close it". From its verb on, only the request's own words,
+/// a pronoun for it, and fillers. Before the verb anything goes ("That's
+/// Mavis, close …" was "Yes Mavis") except a no.
 pub fn repeats_request(said: &str, what: &str) -> bool {
-    const FILLER: &[&str] = &["mavis", "please", "just", "yes", "now", "the", "it", "i", "said"];
+    const FILLER: &[&str] = &["mavis", "please", "just", "yes", "now", "the", "i", "said"];
+    const PRONOUN: &[&str] = &["it", "that", "this", "them"];
     const NO: &[&str] = &["no", "not", "don", "dont", "never", "cancel", "stop", "wait"];
     let said = words_of(said);
     let asked = words_of(what);
@@ -402,7 +403,7 @@ pub fn repeats_request(said: &str, what: &str) -> bool {
         return false;
     }
     let rest: Vec<&String> = said[at + 1..].iter().filter(|w| !FILLER.contains(&w.as_str())).collect();
-    !rest.is_empty() && rest.iter().all(|w| asked.contains(w))
+    !rest.is_empty() && rest.iter().all(|w| asked.contains(w) || PRONOUN.contains(&w.as_str()))
 }
 
 /// Whether an utterance is a clear yes.
@@ -500,6 +501,10 @@ mod tests {
         assert!(!repeats_request("firefox", "close Firefox"));
         assert!(repeats_request("That's Mavis, close Bulk Rename.", "close Bulk Rename"));
         assert!(!repeats_request("no, don't close bulk rename", "close Bulk Rename"));
+        // A pronoun stands for what was asked; the bare verb still doesn't.
+        assert!(repeats_request("Yes Mavis, close it.", "close Thunar"));
+        assert!(repeats_request("close that", "close Thunar"));
+        assert!(!repeats_request("don't close it", "close Thunar"));
     }
 
     #[test]
