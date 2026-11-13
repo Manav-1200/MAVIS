@@ -160,7 +160,8 @@ Some phrases are handled directly by the planner without an LLM round trip, so t
 | "volume up", "louder", "mute" | Adjusts volume |
 | "pause", "resume", "next song" | Media control |
 | "close Firefox", "quit the file manager" | Asks first, then closes that app's windows (niri for now). Answer "yes", or say the request again |
-| "close it", "close this window" | Asks first, then closes the focused window |
+| "close it", "close this window" | Asks first, then closes the focused window. "Yes", "close it" or the request again confirms |
+| "open youtube.com" | Opens that site in your default browser |
 | "open Firefox and play lofi" | Plays it in the app just opened, if that app can play anything |
 | "brighter", "dim the screen" | Adjusts brightness |
 

@@ -454,6 +454,13 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.17 — Review before testing (2026-11-13)
+
+Details in [`DECISIONS.md` §36](DECISIONS.md#36-review-of-611616).
+
+- [x] Thirteen bugs found by reading the code since 6.11, each fixed and most with a test: "open tuner" with Bulk Rename installed, "yes, close it", "close it" from the orb, offline start, Whisper's prompt, web search, the site after a music app, link types, "Mavis?", download errors, narration, the not-found message, the folder search
+- [ ] Hardware run
+
 ### 6.16 — Speech model download (2026-11-10)
 
 Details in [`DECISIONS.md` §35](DECISIONS.md#35-the-speech-model-that-couldnt-download).
@@ -1018,4 +1025,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-12*
+*Last updated: 2026-11-13*

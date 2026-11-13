@@ -55,6 +55,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 33. [Playing in any app](#33-playing-in-any-app)
 34. [Focus is handed back once](#34-focus-is-handed-back-once)
 35. [The speech model that couldn't download](#35-the-speech-model-that-couldnt-download)
+36. [Review of 6.11–6.16](#36-review-of-611616)
 
 ---
 
@@ -100,6 +101,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-13 | 6 | Review of everything since 6.11 before the next hardware run: 13 bugs found and fixed, none yet seen on hardware (§36) |
 | 11-10 | 6 | MAVIS heard nothing: `small.en` couldn't download because Kokoro had switched the worker offline. Offline is now decided for all models at once, with a fallback to a model on disk (§35) |
 | 11-09 | 6 | Switching window or workspace dragged the user back: focus is now handed back from the orb only as it opens (§34) |
 | 11-07 | 6 | "Play X" no longer hardcodes a site or browser: sites come from config, the app from what it registers for, and the last app is remembered (§33) |
@@ -1785,6 +1787,32 @@ Every utterance failed: `STT: empty response (attempt 1/5)` … `5/5`, then "fai
 - While the model is loading, the worker answers a request at once instead of queueing it behind a download of several minutes.
 - The orb's red fades back to idle after four seconds.
 **Evidence:** **Proven** for the choice of line (test). **Measured** that the worker refuses at once while loading (stand-in model). The fade and the spoken line are **reasoned**; to be seen on hardware.
+
+---
+
+## 36. Review of 6.11–6.16
+
+*2026-11-13.* Asked to look over everything done since 6.11 before testing again. Each problem below was found by reading the code; none had shown up on hardware yet. Each has a test unless marked otherwise.
+
+### Would have failed the next test
+- **"Open tuner" would still open nothing on this machine.** Bulk Rename shares Thunar's binary, so the near-miss rule (§31) scored both the same and gave up. A match on an app's name now beats a match on its binary only.
+- **"Yes Mavis, close it" didn't confirm.** "Close" isn't a yes word, and the repeat rule (§32) wanted a word from the question after the verb. A pronoun ("it", "that", "this", "them") now stands for what was asked; "close" alone still doesn't count.
+- **"Close it" while the orb had focus found no window.** None is marked focused then, though MAVIS knows the user's last window. That window is now the one closed.
+- **MAVIS would have stopped starting offline.** Working out the speech model's download name imported faster-whisper, which imports huggingface_hub, which reads `HF_HUB_OFFLINE` once at import. That was before the worker had set it, so the switch did nothing (§35). The name is now worked out without the import. If huggingface_hub is already loaded anyway, it's told directly. *Measured* with stand-in models.
+- **The name could fall out of Whisper's prompt.** Its prompt keeps only the last ~220 tokens. The app list (up to 600 characters) came after the "Mavis, …" phrases and could push them out. The apps now come first, capped at 450 characters. *Reasoned* from how faster-whisper trims the prompt.
+
+### Wrong but rarer
+- **"Search the web for X"** answered "I don't know how to search the web." Anything after "search" that isn't the play site or an app is now a web search.
+- **"Play X on YouTube" after playing in a music app** searched in the music app. Naming the site now means a browser: the last app if it's a browser, otherwise the default browser.
+- **Terminals and editors could be handed a search link.** They register link types of their own beside files, so "open kitty and play lofi" could have run `kitty kitty:search:lofi`. Only apps that register nothing but link types get one now.
+- **"Mavis?"** with a question mark wasn't the name alone and went to the model. It now gets "Yes?".
+- **A cut-off download** raised the HTTP library's own errors, which skipped the fallback to a model on disk. Any failure loading the configured model now tries the fallback. *Reasoned.*
+- **Narration clean-up** cut a reply down to a quote whenever "Mavis" came before it ("I'm Mavis, and the song is called "Daylight"" became "Daylight"). It now applies only when the reply opens with the name. *Measured.*
+- **"Open gimp and play lofi"** (not installed) said "I couldn't find an app called gimp and play lofi." It now names only the app.
+- **The music-folder search** stopped reading files after 20,000 entries but kept opening folders. It now stops.
+
+### Added while there
+- **"Open youtube.com"**: a bare domain opens as a link instead of "couldn't find an app".
 
 ---
 

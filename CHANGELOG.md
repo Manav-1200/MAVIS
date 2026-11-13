@@ -38,6 +38,13 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **"Play X" works with any app**, not just a browser: browsers get the site from `[media]` in `config/config.toml`, media players get a matching file from your Music or Videos folder, and apps with their own link type get a search. The app you last played in is used next time. "Search for X" uses `[web]`. No site or app names in code.
 
 ### Fixed
+- **Found in review before testing** (DECISIONS §36):
+  - "Open tuner" now finds Thunar even with Bulk Rename installed.
+  - "Yes Mavis, close it" confirms, and "close it" works while the orb has focus.
+  - MAVIS starts offline again once its models are downloaded.
+  - "Mavis" stays in the speech prompt even with many apps installed.
+  - "Search the web for X" searches; "play X on YouTube" after a music app uses a browser.
+  - Terminals and editors are never handed a search link; "Mavis?" gets "Yes?".
 - **MAVIS heard nothing after switching to `small.en`.** The voice engine had put the worker offline, so the new speech model couldn't download. The worker now stays online until every model is downloaded, falls back to a speech model already on disk, and the core no longer retries a refused request five times.
 - **MAVIS went quiet with a red orb when it couldn't hear.** It now says why ("my speech model is still loading"), and the red fades back after a few seconds.
 - **Switching window or workspace pulled you back** to the window you'd left. MAVIS now moves focus off its orb only once, as it opens.
