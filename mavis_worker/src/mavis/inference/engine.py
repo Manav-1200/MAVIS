@@ -234,7 +234,9 @@ class LlamaEngine:
 
         # 5. Narration about MAVIS keeps only what she says:
         # 'Mavis responds without violating the rules: "..."' → '...'
-        narrated = re.match(r"[^\"“]*\bmavis\b[^\"“]*[\"“](.+?)[\"”]", text, flags=re.IGNORECASE)
+        # Only when the reply opens with her name, so "I'm Mavis, and the
+        # song is "Daylight"" keeps all of it.
+        narrated = re.match(r"mavis\b[^\"“]*[\"“](.+?)[\"”]", text, flags=re.IGNORECASE)
         if narrated:
             text = narrated.group(1).strip()
 

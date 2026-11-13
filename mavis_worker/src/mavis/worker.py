@@ -5,6 +5,7 @@ import json
 import os
 import signal
 import struct
+import sys
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -57,8 +58,13 @@ def _prefer_local_models(whisper_model: str) -> None:
         print(
             f"[worker] Not downloaded yet, fetching on first use: {', '.join(missing)}", flush=True
         )
-    else:
-        os.environ["HF_HUB_OFFLINE"] = "1"
+        return
+    os.environ["HF_HUB_OFFLINE"] = "1"
+    # huggingface_hub reads the variable once, at import; if something
+    # imported it already, tell it directly.
+    hub = sys.modules.get("huggingface_hub.constants")
+    if hub is not None:
+        hub.HF_HUB_OFFLINE = True
 
 
 class WorkerServer:

@@ -102,7 +102,9 @@ class STTEngine:
                 device=self.device,
                 compute_type=self.compute_type,
             )
-        except (OSError, ValueError) as exc:
+        # Any failure, not only the offline ones: a download cut off midway
+        # raises the HTTP library's own errors.
+        except Exception as exc:
             # Not downloaded and no network: a model already on disk hears
             # worse, but hearing worse beats not hearing at all.
             for other in FALLBACK_MODELS:
@@ -133,13 +135,20 @@ class STTEngine:
 
     @staticmethod
     def repo_for(model_size: str) -> str:
-        """Where faster-whisper downloads a model name from."""
-        try:
-            from faster_whisper.utils import _MODELS
+        """
+        Where faster-whisper downloads a model name from.
 
-            return _MODELS.get(model_size, model_size)
-        except ImportError:
-            return model_size if "/" in model_size else f"Systran/faster-whisper-{model_size}"
+        Not looked up in faster_whisper itself: importing it imports
+        huggingface_hub, which reads HF_HUB_OFFLINE once at import, before
+        the worker has decided it.
+        """
+        if "/" in model_size:
+            return model_size
+        if model_size in ("turbo", "large-v3-turbo"):
+            return "mobiuslabsgmbh/faster-whisper-large-v3-turbo"
+        if model_size.startswith("distil-"):
+            return f"Systran/faster-distil-whisper-{model_size.removeprefix('distil-')}"
+        return f"Systran/faster-whisper-{model_size}"
 
     def warm_up(self) -> None:
         """Pre-load the model so first request doesn't block on download."""
@@ -287,12 +296,14 @@ class STTEngine:
             # "clipboard" rather than "clayboard", and "MAVIS" rather than
             # "Ladies". App names come from this machine, not from here.
             # Written as things said to her: a bare "MAVIS." still came out
-            # as "Movies", "Maybe" and "Babys" on 2026-11-05.
+            # as "Movies", "Maybe" and "Babys" on 2026-11-05. App names go
+            # first: a prompt over ~220 tokens loses its beginning, and the
+            # name matters more than the last few apps.
             initial_prompt=(
-                "Mavis, can you hear me? Mavis, open the terminal. Mavis, what's "
+                (f"Apps: {hints}. " if hints else "")
+                + "Mavis, can you hear me? Mavis, open the terminal. Mavis, what's "
                 "on my clipboard? Mavis, close the browser window. Mavis, which "
                 "workspace and project am I on? Volume up, brightness down."
-                + (f" Apps: {hints}." if hints else "")
             ),
         )
 
