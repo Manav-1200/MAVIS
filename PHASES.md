@@ -454,6 +454,13 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.18 — The name, once (2026-11-14)
+
+Details in [`DECISIONS.md` §37](DECISIONS.md#37-the-name-once).
+
+- [x] **The user's name only in the first reply of a run**; later replies drop it where it only addresses them.
+- [ ] Hear it on hardware
+
 ### 6.17 — Review before testing (2026-11-13)
 
 Details in [`DECISIONS.md` §36](DECISIONS.md#36-review-of-611616).
@@ -1025,4 +1032,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-13*
+*Last updated: 2026-11-14*

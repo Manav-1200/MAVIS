@@ -56,6 +56,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 34. [Focus is handed back once](#34-focus-is-handed-back-once)
 35. [The speech model that couldn't download](#35-the-speech-model-that-couldnt-download)
 36. [Review of 6.11–6.16](#36-review-of-611616)
+37. [The name, once](#37-the-name-once)
 
 ---
 
@@ -101,6 +102,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-14 | 6 | The user's name only in the first reply of a run (§37) |
 | 11-13 | 6 | Review of everything since 6.11 before the next hardware run: 13 bugs found and fixed, none yet seen on hardware (§36) |
 | 11-10 | 6 | MAVIS heard nothing: `small.en` couldn't download because Kokoro had switched the worker offline. Offline is now decided for all models at once, with a fallback to a model on disk (§35) |
 | 11-09 | 6 | Switching window or workspace dragged the user back: focus is now handed back from the orb only as it opens (§34) |
@@ -1813,6 +1815,21 @@ Every utterance failed: `STT: empty response (attempt 1/5)` … `5/5`, then "fai
 
 ### Added while there
 - **"Open youtube.com"**: a bare domain opens as a link instead of "couldn't find an app".
+
+---
+
+## 37. The name, once
+
+*2026-11-14.* "I don't like how it says the user's name every time it responds. Once per session seems good, at the very start."
+
+### Problem
+Nearly every reply had the name in it: "Absolutely, Manav!", "Could be improved, Manav.", "I'm here, Manav". The fact "The user's name is Manav." sits in every prompt, and the model kept reaching for it.
+
+### Fix
+- Rule 11 tells the model not to address the user by name.
+- From the second reply of a run on, the worker takes the name out wherever it only addresses the user: ", Manav" before punctuation, "Manav, …" opening a sentence, "Hi Manav". Where the name is the answer ("Your name is Manav.") it stays. A run is one worker process, so one start of MAVIS.
+
+**Evidence:** **Measured** on nine replies of the kinds in the logs: all addresses removed, the answer to "what's my name" kept. The rule's effect on the model is **reasoned**.
 
 ---
 

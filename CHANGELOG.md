@@ -38,6 +38,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **"Play X" works with any app**, not just a browser: browsers get the site from `[media]` in `config/config.toml`, media players get a matching file from your Music or Videos folder, and apps with their own link type get a search. The app you last played in is used next time. "Search for X" uses `[web]`. No site or app names in code.
 
 ### Fixed
+- **MAVIS said your name in almost every reply.** Now only the first reply after starting may use it.
 - **Found in review before testing** (DECISIONS §36):
   - "Open tuner" now finds Thunar even with Bulk Rename installed.
   - "Yes Mavis, close it" confirms, and "close it" works while the orb has focus.
