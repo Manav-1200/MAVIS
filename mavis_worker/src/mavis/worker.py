@@ -14,7 +14,13 @@ from pathlib import Path
 
 from mavis.core.config import load_config
 from mavis.core.logger import setup_logging
-from mavis.inference import SYSTEM_PROMPT, LlamaEngine, build_chat_messages
+from mavis.inference import (
+    SYSTEM_PROMPT,
+    LlamaEngine,
+    build_chat_messages,
+    drop_name,
+    user_name,
+)
 from mavis.stt.engine import STTEngine
 from mavis.tts.engine import TTSEngine
 
@@ -94,6 +100,8 @@ class WorkerServer:
 
         self.last_activity = time.time()
         self.idle_timeout = self.config.get("worker", {}).get("idle_timeout", 300)
+        # The user's name is said in the first reply of a run at most.
+        self.replied_once = False
         # Requests being worked on. The idle monitor never unloads a model
         # while this is above zero, so an inference can't lose its model
         # halfway through.
@@ -233,6 +241,9 @@ class WorkerServer:
             )
 
             content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            if self.replied_once:
+                content = drop_name(content, user_name(working_memory)) or content
+            self.replied_once = True
             finish_reason = result.get("choices", [{}])[0].get("finish_reason", "")
             usage = result.get("usage", {})
 
