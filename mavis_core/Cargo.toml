@@ -1,3 +1,4 @@
+# mavis_core/Cargo.toml
 [package]
 name = "mavis_core"
 version = "0.1.0"
@@ -27,3 +28,8 @@ base64 = "0.22"
 [profile.release]
 opt-level = 3
 lto = true
+
+# The orb as a Wayland overlay (layer shell): floats on every workspace and
+# never takes focus. Falls back to the minifb window where unavailable.
+[target.'cfg(target_os = "linux")'.dependencies]
+smithay-client-toolkit = { version = "0.21", default-features = false }

@@ -2,6 +2,10 @@
 // Living Orb UI. Small (80×80), borderless, transparent, draggable.
 // Renders a soft pulsing circle that reacts to OrbState.
 // Phase 5: Voice activity LED — brightness modulates with real-time VAD energy.
+//
+// On Wayland compositors with the layer shell (niri, Hyprland, Sway, KDE…)
+// the orb is an overlay: above every window, on every workspace, never
+// focused. Elsewhere (GNOME, X11) it's a borderless window.
 
 use minifb::{Key, MouseButton, MouseMode, Window, WindowOptions};
 use std::sync::mpsc::{channel, Sender};
@@ -55,6 +59,22 @@ impl Orb {
         }
 
         thread::spawn(move || {
+            // MAVIS_ORB=window keeps the plain window even where an overlay
+            // is possible.
+            let want_overlay = !matches!(std::env::var("MAVIS_ORB").as_deref(), Ok("window"));
+            #[cfg(target_os = "linux")]
+            if want_overlay {
+                if let Some(overlay) = overlay::connect() {
+                    log::info!("Orb: floating as an overlay");
+                    overlay::run(overlay, state_rx, energy_rx, shutdown_rx, Box::new(on_tap));
+                    log::info!("Orb: render thread exiting");
+                    return;
+                }
+                log::info!("Orb: no overlay support here — using a window");
+            }
+            #[cfg(not(target_os = "linux"))]
+            let _ = want_overlay;
+
             let mut window = match Window::new(
                 "MAVIS",
                 ORB_SIZE,
@@ -280,9 +300,366 @@ fn render_orb(buffer: &mut [u32], time: f32, state: OrbState, energy: f32) {
     }
 }
 
+/// 0xAARRGGBB with straight alpha → premultiplied, which Wayland expects.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn premultiplied(p: u32) -> u32 {
+    let a = p >> 24;
+    let scale = |c: u32| (c * a + 127) / 255;
+    (a << 24) | (scale((p >> 16) & 0xff) << 16) | (scale((p >> 8) & 0xff) << 8) | scale(p & 0xff)
+}
+
+// ---------------------------------------------------------------------------
+// The orb as a Wayland layer-shell overlay
+// ---------------------------------------------------------------------------
+
+#[cfg(target_os = "linux")]
+mod overlay {
+    use super::{is_tap, premultiplied, render_orb, OrbState, BUFFER_LEN, ORB_SIZE};
+    use smithay_client_toolkit::{
+        compositor::{CompositorHandler, CompositorState, FrameCallbackData},
+        delegate_registry,
+        output::{OutputHandler, OutputState},
+        reexports::client::{
+            globals::{registry_queue_init, GlobalList},
+            protocol::{wl_output, wl_pointer, wl_seat, wl_shm, wl_surface},
+            Connection, EventQueue, QueueHandle,
+        },
+        registry::{ProvidesRegistryState, RegistryState},
+        registry_handlers,
+        seat::{
+            pointer::{PointerEvent, PointerEventKind, PointerHandler},
+            Capability, SeatHandler, SeatState,
+        },
+        shell::{
+            wlr_layer::{
+                Anchor, KeyboardInteractivity, Layer, LayerShell, LayerShellHandler, LayerSurface,
+                LayerSurfaceConfigure,
+            },
+            WaylandSurface,
+        },
+        shm::{slot::SlotPool, Shm, ShmHandler},
+    };
+    use std::sync::mpsc::Receiver;
+    use std::time::Instant;
+
+    const BTN_LEFT: u32 = 0x110;
+    const SIZE: i32 = ORB_SIZE as i32;
+
+    /// A Wayland connection that has everything an overlay needs.
+    pub struct Connected {
+        conn: Connection,
+        globals: GlobalList,
+        queue: EventQueue<OrbLayer>,
+        compositor: CompositorState,
+        layer_shell: LayerShell,
+        shm: Shm,
+    }
+
+    /// Some when this is a Wayland session whose compositor has the layer
+    /// shell; None sends the caller to the window.
+    pub fn connect() -> Option<Connected> {
+        std::env::var_os("WAYLAND_DISPLAY")?;
+        let conn = Connection::connect_to_env().ok()?;
+        let (globals, queue) = registry_queue_init::<OrbLayer>(&conn).ok()?;
+        let qh = queue.handle();
+        Some(Connected {
+            compositor: CompositorState::bind(&globals, &qh).ok()?,
+            layer_shell: LayerShell::bind(&globals, &qh).ok()?,
+            shm: Shm::bind(&globals, &qh).ok()?,
+            conn,
+            globals,
+            queue,
+        })
+    }
+
+    /// Where the orb sits: MAVIS_ORB_POS=x,y from the top left, else near
+    /// the top right corner.
+    fn placement() -> (Anchor, i32, i32) {
+        let from_env = std::env::var("MAVIS_ORB_POS").ok().and_then(|p| {
+            let (x, y) = p.split_once(',')?;
+            Some((x.trim().parse::<i32>().ok()?, y.trim().parse::<i32>().ok()?))
+        });
+        match from_env {
+            Some((x, y)) => (Anchor::TOP | Anchor::LEFT, y.max(0), x.max(0)),
+            None => (Anchor::TOP | Anchor::RIGHT, 60, 20),
+        }
+    }
+
+    struct Press {
+        anchor: (f64, f64),
+        at: Instant,
+        travel: f32,
+        // Where the pointer is now, in the orb's coordinates at the press.
+        to: (f64, f64),
+    }
+
+    pub struct OrbLayer {
+        registry_state: RegistryState,
+        seat_state: SeatState,
+        output_state: OutputState,
+        shm: Shm,
+        pool: SlotPool,
+        layer: LayerSurface,
+        pointer: Option<wl_pointer::WlPointer>,
+        output: Option<wl_output::WlOutput>,
+        configured: bool,
+        exit: bool,
+        // Distance from the top, and from the anchored side.
+        top: i32,
+        side: i32,
+        from_left: bool,
+        press: Option<Press>,
+        on_tap: Box<dyn Fn() + Send>,
+        state_rx: Receiver<OrbState>,
+        energy_rx: Receiver<f32>,
+        shutdown_rx: Receiver<()>,
+        state: OrbState,
+        energy: f32,
+        start: Instant,
+        pixels: Vec<u32>,
+    }
+
+    pub fn run(
+        connected: Connected,
+        state_rx: Receiver<OrbState>,
+        energy_rx: Receiver<f32>,
+        shutdown_rx: Receiver<()>,
+        on_tap: Box<dyn Fn() + Send>,
+    ) {
+        let Connected { conn, globals, mut queue, compositor, layer_shell, shm } = connected;
+        let qh = queue.handle();
+        let surface = compositor.create_surface(&qh);
+        let layer = layer_shell.create_layer_surface(&qh, surface, Layer::Overlay, Some("mavis-orb"), None);
+        let (anchor, top, side) = placement();
+        let from_left = anchor.contains(Anchor::LEFT);
+        layer.set_anchor(anchor);
+        layer.set_size(SIZE as u32, SIZE as u32);
+        // Never the keyboard's: typing stays in the user's window.
+        layer.set_keyboard_interactivity(KeyboardInteractivity::None);
+        let mut orb = OrbLayer {
+            registry_state: RegistryState::new(&globals),
+            seat_state: SeatState::new(&globals, &qh),
+            output_state: OutputState::new(&globals, &qh),
+            pool: match SlotPool::new(BUFFER_LEN * 4 * 2, &shm) {
+                Ok(pool) => pool,
+                Err(e) => {
+                    log::error!("Orb: no shared memory for the overlay: {}", e);
+                    return;
+                }
+            },
+            shm,
+            layer,
+            pointer: None,
+            output: None,
+            configured: false,
+            exit: false,
+            top,
+            side,
+            from_left,
+            press: None,
+            on_tap,
+            state_rx,
+            energy_rx,
+            shutdown_rx,
+            state: OrbState::Idle,
+            energy: 0.0,
+            start: Instant::now(),
+            pixels: vec![0; BUFFER_LEN],
+        };
+        orb.apply_margins();
+        orb.layer.commit();
+
+        while !orb.exit {
+            if let Err(e) = queue.blocking_dispatch(&mut orb) {
+                log::error!("Orb: overlay connection lost: {}", e);
+                break;
+            }
+        }
+        drop(conn);
+    }
+
+    impl OrbLayer {
+        /// The logical size of the screen the orb is on, so it can't be
+        /// dragged off it.
+        fn screen(&self) -> (i32, i32) {
+            self.output
+                .as_ref()
+                .and_then(|o| self.output_state.info(o))
+                .and_then(|info| info.logical_size)
+                .unwrap_or((i32::MAX, i32::MAX))
+        }
+
+        fn apply_margins(&self) {
+            if self.from_left {
+                self.layer.set_margin(self.top, 0, 0, self.side);
+            } else {
+                self.layer.set_margin(self.top, self.side, 0, 0);
+            }
+        }
+
+        fn draw(&mut self, qh: &QueueHandle<Self>) {
+            while let Ok(s) = self.state_rx.try_recv() {
+                self.state = s;
+            }
+            while let Ok(e) = self.energy_rx.try_recv() {
+                self.energy = self.energy.max(e);
+            }
+            self.energy *= 0.92;
+            if self.shutdown_rx.try_recv().is_ok() {
+                self.exit = true;
+                return;
+            }
+
+            render_orb(&mut self.pixels, self.start.elapsed().as_secs_f32(), self.state, self.energy);
+            let Ok((buffer, canvas)) = self.pool.create_buffer(SIZE, SIZE, SIZE * 4, wl_shm::Format::Argb8888)
+            else {
+                return;
+            };
+            for (chunk, p) in canvas.chunks_exact_mut(4).zip(&self.pixels) {
+                chunk.copy_from_slice(&premultiplied(*p).to_le_bytes());
+            }
+            let surface = self.layer.wl_surface();
+            surface.damage_buffer(0, 0, SIZE, SIZE);
+            surface.frame(qh, FrameCallbackData(surface.clone()));
+            if buffer.attach_to(surface).is_ok() {
+                self.layer.commit();
+            }
+        }
+
+        fn pointer(&mut self, event: &PointerEvent) {
+            match event.kind {
+                PointerEventKind::Press { button: BTN_LEFT, .. } => {
+                    self.press = Some(Press {
+                        anchor: event.position,
+                        at: Instant::now(),
+                        travel: 0.0,
+                        to: event.position,
+                    });
+                }
+                PointerEventKind::Motion { .. } => {
+                    if let Some(press) = self.press.as_mut() {
+                        press.to = event.position;
+                        let (dx, dy) = (press.to.0 - press.anchor.0, press.to.1 - press.anchor.1);
+                        press.travel = press.travel.max(dx.abs().max(dy.abs()) as f32);
+                    }
+                }
+                PointerEventKind::Release { button: BTN_LEFT, .. } => {
+                    let Some(press) = self.press.take() else { return };
+                    if is_tap(press.at.elapsed(), press.travel) {
+                        (self.on_tap)();
+                        return;
+                    }
+                    // Moved once, on release. Compositors differ on when a
+                    // new margin takes effect, so pointer positions during a
+                    // drag can't be trusted against a moving orb; against
+                    // the orb where the press began they can.
+                    let dx = (press.to.0 - press.anchor.0).round() as i32;
+                    let dy = (press.to.1 - press.anchor.1).round() as i32;
+                    let (width, height) = self.screen();
+                    self.top = (self.top + dy).clamp(0, (height - SIZE).max(0));
+                    let side = self.side + if self.from_left { dx } else { -dx };
+                    self.side = side.clamp(0, (width - SIZE).max(0));
+                    self.apply_margins();
+                    self.layer.commit();
+                }
+                _ => {}
+            }
+        }
+    }
+
+    impl CompositorHandler for OrbLayer {
+        fn scale_factor_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: i32) {}
+        fn transform_changed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: wl_output::Transform) {}
+        fn frame(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: u32) {
+            self.draw(qh);
+        }
+        fn surface_enter(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, output: &wl_output::WlOutput) {
+            self.output = Some(output.clone());
+        }
+        fn surface_leave(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_surface::WlSurface, _: &wl_output::WlOutput) {}
+    }
+
+    impl OutputHandler for OrbLayer {
+        fn output_state(&mut self) -> &mut OutputState {
+            &mut self.output_state
+        }
+        fn new_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+        fn update_output(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+        fn output_destroyed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_output::WlOutput) {}
+    }
+
+    impl LayerShellHandler for OrbLayer {
+        fn closed(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &LayerSurface) {
+            self.exit = true;
+        }
+        fn configure(&mut self, _: &Connection, qh: &QueueHandle<Self>, _: &LayerSurface, _: LayerSurfaceConfigure, _: u32) {
+            // Drawing once starts the frame callbacks that keep it animated.
+            if !self.configured {
+                self.configured = true;
+                self.draw(qh);
+            }
+        }
+    }
+
+    impl SeatHandler for OrbLayer {
+        fn seat_state(&mut self) -> &mut SeatState {
+            &mut self.seat_state
+        }
+        fn new_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+        fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
+            if capability == Capability::Pointer && self.pointer.is_none() {
+                self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
+            }
+        }
+        fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, capability: Capability) {
+            if capability == Capability::Pointer {
+                if let Some(pointer) = self.pointer.take() {
+                    pointer.release();
+                }
+            }
+        }
+        fn remove_seat(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat) {}
+    }
+
+    impl PointerHandler for OrbLayer {
+        fn pointer_frame(&mut self, _: &Connection, _: &QueueHandle<Self>, _: &wl_pointer::WlPointer, events: &[PointerEvent]) {
+            for event in events {
+                if &event.surface == self.layer.wl_surface() {
+                    self.pointer(event);
+                }
+            }
+        }
+    }
+
+    impl ShmHandler for OrbLayer {
+        fn shm_state(&mut self) -> &mut Shm {
+            &mut self.shm
+        }
+    }
+
+    delegate_registry!(OrbLayer);
+
+    impl ProvidesRegistryState for OrbLayer {
+        fn registry(&mut self) -> &mut RegistryState {
+            &mut self.registry_state
+        }
+        registry_handlers![OutputState, SeatState];
+    }
+
+    smithay_client_toolkit::delegate_dispatch2!(OrbLayer);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn colours_are_premultiplied_for_wayland() {
+        assert_eq!(premultiplied(0xff10_2030), 0xff10_2030);
+        assert_eq!(premultiplied(0x0000_00ff) >> 24, 0);
+        assert_eq!(premultiplied(0x0000_00ff) & 0xff, 0);
+        assert_eq!(premultiplied(0x80ff_ffff), 0x8080_8080);
+    }
 
     #[test]
     fn a_quick_still_click_is_a_tap() {
