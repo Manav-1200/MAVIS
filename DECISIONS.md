@@ -57,6 +57,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 35. [The speech model that couldn't download](#35-the-speech-model-that-couldnt-download)
 36. [Review of 6.11–6.16](#36-review-of-611616)
 37. [The name, once](#37-the-name-once)
+38. [The orb floats](#38-the-orb-floats)
 
 ---
 
@@ -102,6 +103,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-14 | 6 | The orb is a layer-shell overlay: floats on every workspace, never focused, draggable on Wayland (§38) |
 | 11-14 | 6 | The user's name only in the first reply of a run (§37) |
 | 11-13 | 6 | Review of everything since 6.11 before the next hardware run: 13 bugs found and fixed, none yet seen on hardware (§36) |
 | 11-10 | 6 | MAVIS heard nothing: `small.en` couldn't download because Kokoro had switched the worker offline. Offline is now decided for all models at once, with a fallback to a model on disk (§35) |
@@ -1830,6 +1832,27 @@ Nearly every reply had the name in it: "Absolutely, Manav!", "Could be improved,
 - From the second reply of a run on, the worker takes the name out wherever it only addresses the user: ", Manav" before punctuation, "Manav, …" opening a sentence, "Hi Manav". Where the name is the answer ("Your name is Manav.") it stays. A run is one worker process, so one start of MAVIS.
 
 **Evidence:** **Measured** on nine replies of the kinds in the logs: all addresses removed, the answer to "what's my name" kept. The rule's effect on the model is **reasoned**.
+
+---
+
+## 38. The orb floats
+
+*2026-11-14.* "Can we make the orb free floating? It's not exactly free floating."
+
+### Problem
+The orb was a minifb window. On niri, a window gets tiled into a column like any app: it sat on one workspace and couldn't be dragged, since Wayland doesn't let a window move itself. Switching windows could land focus on it, which is where the dragging of 11-09 (§34) started.
+
+### Options
+- **Ask the compositor to float it** (`niri msg action move-window-to-floating`, `hyprctl dispatch setfloating`, …): one command per compositor, and it would still be a window, on one workspace, able to take focus. Rejected.
+- **A layer-shell overlay**, the surface bars and notifications use: above every window, on every output's workspaces, and asks for no keyboard (`KeyboardInteractivity::None`). One protocol for niri, Hyprland, Sway, KDE and the other wlroots compositors. Chosen.
+
+### Decision
+- On Wayland with the layer shell, the orb is an overlay (`smithay-client-toolkit`, its pure-Rust backend: no new system libraries). Otherwise, on GNOME or X11, it's the minifb window as before. `MAVIS_ORB=window` forces the window.
+- **Placement:** near the top right by default. `MAVIS_ORB_POS=x,y` places it from the top left, now on Wayland too.
+- **Dragging moves it when the button is let go.** While dragging, the pointer positions a compositor reports depend on when it applies a new position: sway reported them against where the orb started, so moving it on every step sent it off screen. Measured against the orb where the press began, the drop point is exact. It's clamped to the screen.
+- Taps still count as taps; colours are premultiplied, as Wayland expects.
+
+**Evidence:** **Measured** on Sway, headless, with a virtual mouse (wlr virtual pointer): it's no window in the tree, shows on workspace 2 after switching, a tap fires, and a drag from (740,100) to (380,340) drops the orb centred on (380,340). Transparency and the red error state rendered correctly. Not yet seen on niri.
 
 ---
 

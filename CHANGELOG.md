@@ -35,6 +35,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Changed
+- **The orb floats.** On Wayland desktops with the layer shell (niri, Hyprland, Sway, KDE) it's an overlay above every window, on every workspace, never taking keyboard focus, and you can drag it anywhere. GNOME and X11 keep the window.
 - **"Play X" works with any app**, not just a browser: browsers get the site from `[media]` in `config/config.toml`, media players get a matching file from your Music or Videos folder, and apps with their own link type get a search. The app you last played in is used next time. "Search for X" uses `[web]`. No site or app names in code.
 
 ### Fixed

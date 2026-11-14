@@ -454,6 +454,14 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.19 — The orb floats (2026-11-14)
+
+Details in [`DECISIONS.md` §38](DECISIONS.md#38-the-orb-floats).
+
+- [x] **Overlay on Wayland** (layer shell): above every window, on every workspace, never takes focus; a window on GNOME and X11
+- [x] **Drag anywhere**, moved on release and kept on screen; `MAVIS_ORB_POS` works on Wayland
+- [ ] See it on niri
+
 ### 6.18 — The name, once (2026-11-14)
 
 Details in [`DECISIONS.md` §37](DECISIONS.md#37-the-name-once).

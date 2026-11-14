@@ -270,8 +270,8 @@ Current date and time is always injected — it isn't private, and without it th
 | `MAVIS_AUDIO_DEVICE` | auto | Exact microphone name as cpal reports it |
 | `MAVIS_AUDIO_OUTPUT` | system default | Playback device for speech, passed to `pw-play`/`paplay`/`aplay` |
 | `MAVIS_PYTHON_PATH` | `python3` | Interpreter for the worker, e.g. your venv's |
-| `MAVIS_ORB` | on | `off` runs without the orb — headless use only; the orb is how you see what MAVIS is doing |
-| `MAVIS_ORB_POS` | — | `x,y` start position. Honoured on X11/XWayland; native Wayland ignores it |
+| `MAVIS_ORB` | on | `off` runs without the orb — headless use only; the orb is how you see what MAVIS is doing. `window` keeps it a normal window even where it could float |
+| `MAVIS_ORB_POS` | top right | `x,y` start position from the top-left corner |
 | `MAVIS_VAD_DEBUG` | off | Logs microphone level and the current start/end thresholds, every ~3 s |
 | `MAVIS_SPEECH_GATE` | on | `0` sends audio to Whisper even when no speech was detected in it — for diagnosing dropped speech only; it lets hallucinations back in |
 | `MAVIS_LISTEN_MODE` | from `config/config.toml`, else `always` | `push` listens only after a hotkey press or an orb tap |
@@ -303,7 +303,7 @@ MAVIS_VAD_DEBUG=1 cargo run               # logs levels every ~3 s
 
 **A subsystem stops working mid-session.** Look for `PANICKED — restarting` in the log. The panic message just above it is the bug worth reporting.
 
-**The orb won't move on Wayland.** Native Wayland doesn't let applications position their own windows. Use XWayland, or drag it.
+**Where the orb floats.** On Wayland desktops with the layer shell (niri, Hyprland, Sway, KDE and others) the orb floats above every window, on every workspace, and never takes keyboard focus. Drag it anywhere; it moves when you let go. On GNOME and X11 it's a small borderless window instead.
 
 ## Requirements
 
