@@ -1040,4 +1040,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-15*
+*Last updated: 2026-11-16*
