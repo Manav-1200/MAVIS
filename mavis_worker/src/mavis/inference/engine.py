@@ -23,10 +23,36 @@ MAX_SENTENCES = 3
 MAX_CHARS = 320
 
 GENERIC_OFFER = re.compile(
-    r"\b(?:how|what(?: else)?) can i (?:help|assist|do for)\b|\banything else i can\b"
-    r"|^would you like (?:me )?to\b",
+    r"\b(?:how|what(?: else)?) can i (?:help|assist|do for)\b|\banything else (?:i can|you need)\b"
+    r"|^would you like (?:me )?to\b|^what would you like (?:to do|me to)\b|^what'?s next\b"
+    r"|^is there anything else\b",
     re.IGNORECASE,
 )
+
+# The model can't act: actions are carried out before it's asked. A reply
+# that says one is happening was made up ("Sure, closing the terminal now",
+# "Thunar is now full screen" on 2026-11-17).
+_DOING = (
+    r"closing|opening|launching|starting|switching|turning|setting|moving|muting|"
+    r"unmuting|locking|logging|shutting|restarting|rebooting|suspending|enabling|"
+    r"disabling|connecting|disconnecting|maximi[sz]ing|minimi[sz]ing|playing"
+)
+_DONE = (
+    r"closed|opened|launched|started|switched|turned|set|moved|muted|unmuted|locked|"
+    r"logged|shut|restarted|rebooted|suspended|enabled|disabled|connected|disconnected"
+)
+_STATE = r"open|opened|closed|full ?screen|on|off|muted|unmuted|locked|playing|paused"
+ACTION_CLAIM = re.compile(
+    # "Sure, closing the terminal now." — short, opening with the verb.
+    rf"^(?:(?:sure|okay|ok|alright|all right|understood|got it|right|done)[,.!]?\s+)?"
+    rf"(?:i'?m |i am |i'?ll |i will |let me |now )?(?:{_DOING})\b(?:\s+\S+){{0,5}}[.!]?$"
+    # "I've closed it."
+    rf"|\bi(?:'ve| have| just)\s+(?:just\s+)?(?:{_DONE})\b"
+    # "Thunar is now full screen.", "It's open now."
+    rf"|\b(?:is|are|'s)\s+now\s+(?:{_STATE})\b|\b(?:is|are|'s)\s+(?:{_STATE})\s+now\b",
+    re.IGNORECASE,
+)
+CANT_DO = "I can't do that yet."
 
 
 class LlamaEngine:
@@ -240,12 +266,17 @@ class LlamaEngine:
         if narrated:
             text = narrated.group(1).strip()
 
+        # Working-memory labels the model copied: "[mavis] You are looking at…"
+        text = re.sub(r"^\[(?:mavis|user|[a-z_]+)\]\s*", "", text, flags=re.IGNORECASE)
+
         # 6. Truncate to the first few sentences, without a closing offer
         # ("What else can I assist you with?", "Would you like to…?"),
         # which rule 5 bans and the model adds anyway.
         sentences = re.split(r"(?<=[.!?])\s+", text)
         while len(sentences) > 1 and GENERIC_OFFER.search(sentences[-1]):
             sentences.pop()
+        if any(ACTION_CLAIM.search(s.strip()) for s in sentences):
+            return CANT_DO
         text = " ".join(sentences)
         if len(sentences) > MAX_SENTENCES:
             text = " ".join(sentences[:MAX_SENTENCES])
