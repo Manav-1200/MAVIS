@@ -317,6 +317,19 @@ fn words(text: &str) -> Vec<String> {
 /// installed?" is an inventory question.
 #[rustfmt::skip]
 pub fn is_change_question(text: &str) -> bool {
+    if asks_about_changes(&words(text)) {
+        return true;
+    }
+    // "Well, I want to know what changed on my system recently": the
+    // question after the lead-in (2026-11-17, it went to the model).
+    let w = words(text);
+    match w.iter().position(|x| x == "what" || x == "whats") {
+        Some(at) if at > 0 => asks_about_changes(&w[at..]),
+        _ => false,
+    }
+}
+
+fn asks_about_changes(w: &[String]) -> bool {
     const OPENERS: &[&str] = &["what", "whats", "anything", "has", "have", "did", "was", "were", "any"];
     const CHANGED: &[&str] = &["changed", "updated", "upgraded"];
     const STATE: &[&str] = &["installed", "removed", "uninstalled"];
@@ -333,8 +346,7 @@ pub fn is_change_question(text: &str) -> bool {
         "laptop", "pc", "since", "so", "far", "there", "packages", "package", "software",
     ];
 
-    let w = words(text);
-    if asks_for_recent_changes(&w) {
+    if asks_for_recent_changes(w) {
         return true;
     }
     let Some(first) = w.first() else { return false };
@@ -459,6 +471,7 @@ mod tests {
             "Can you list the latest updates?",
             "any recent changes",
             "Mavis, what's since recently on my system?",
+            "Well, I want to know what changed on my system recently.",
         ] {
             assert!(is_change_question(q), "should match: {q}");
         }
