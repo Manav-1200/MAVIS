@@ -1,6 +1,7 @@
 // mavis_core/src/system/dbus.rs
-// DBus integration: handles SystemAction events for notifications,
-// media control (MPRIS), brightness, and volume.
+// System controls: notifications, media (MPRIS), volume, brightness,
+// Bluetooth, Wi-Fi, and the session (lock, log out, suspend, power off).
+// Each control tries the usual tools in turn; none is required.
 
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
@@ -38,130 +39,102 @@ impl DbusIntegration {
     }
 
     async fn handle_event(&self, event: Event) -> Result<()> {
-        if event.event_type == EventType::SystemAction {
-            if let Err(e) = self.execute_system_action(&event.payload).await {
+        // The executor runs its own actions and marks them done, so it can
+        // say when one fails; this handles the rest (e.g. notifications).
+        if event.event_type == EventType::SystemAction && event.payload.get("done").is_none() {
+            if let Err(e) = run_system_op(&event.payload).await {
                 warn!("DBusIntegration: system action failed: {}", e);
             }
         }
         Ok(())
     }
+}
 
-    async fn execute_system_action(&self, payload: &serde_json::Value) -> Result<String> {
-        let op = payload.get("op").and_then(|v| v.as_str()).unwrap_or("unknown");
+/// Carry out one system action. The error says what went wrong in words
+/// fit to be spoken ("brightnessctl isn't installed").
+pub async fn run_system_op(payload: &serde_json::Value) -> Result<String> {
+    let op = payload.get("op").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let level = payload.get("value").and_then(|v| v.as_u64()).map(|v| v.min(150));
+    let session = std::env::var("XDG_SESSION_ID").unwrap_or_else(|_| "self".into());
 
-        match op {
-            "notify" => {
-                let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("MAVIS");
-                let message = payload.get("message").and_then(|v| v.as_str()).unwrap_or("");
-                self.send_notification(title, message).await
+    match op {
+        "notify" => {
+            let title = payload.get("title").and_then(|v| v.as_str()).unwrap_or("MAVIS");
+            let message = payload.get("message").and_then(|v| v.as_str()).unwrap_or("");
+            send_notification(title, message).await
+        }
+        "media_play_pause" => media_control("play-pause").await,
+        "media_pause" => media_control("pause").await,
+        "media_play" => media_control("play").await,
+        "media_next" => media_control("next").await,
+        "media_previous" => media_control("previous").await,
+        "volume_up" => first_of(&[&["pactl", "set-sink-volume", "@DEFAULT_SINK@", "+5%"], &["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%+"]]).await,
+        "volume_down" => first_of(&[&["pactl", "set-sink-volume", "@DEFAULT_SINK@", "-5%"], &["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"]]).await,
+        "volume_mute" => first_of(&[&["pactl", "set-sink-mute", "@DEFAULT_SINK@", "toggle"], &["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]]).await,
+        "volume_set" => {
+            let pct = format!("{}%", level.ok_or_else(|| anyhow::anyhow!("no volume level given"))?);
+            first_of(&[&["pactl", "set-sink-volume", "@DEFAULT_SINK@", &pct], &["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", &pct]]).await
+        }
+        "brightness_up" => first_of(&[&["brightnessctl", "set", "+10%"]]).await,
+        "brightness_down" => first_of(&[&["brightnessctl", "set", "10%-"]]).await,
+        "brightness_set" => {
+            let pct = format!("{}%", level.ok_or_else(|| anyhow::anyhow!("no brightness level given"))?.min(100));
+            first_of(&[&["brightnessctl", "set", &pct]]).await
+        }
+        "bluetooth_on" => first_of(&[&["bluetoothctl", "power", "on"], &["rfkill", "unblock", "bluetooth"]]).await,
+        "bluetooth_off" => first_of(&[&["bluetoothctl", "power", "off"], &["rfkill", "block", "bluetooth"]]).await,
+        "wifi_on" => first_of(&[&["nmcli", "radio", "wifi", "on"], &["rfkill", "unblock", "wifi"]]).await,
+        "wifi_off" => first_of(&[&["nmcli", "radio", "wifi", "off"], &["rfkill", "block", "wifi"]]).await,
+        "lock" => first_of(&[&["loginctl", "lock-session"]]).await,
+        "logout" => first_of(&[&["loginctl", "terminate-session", &session]]).await,
+        "suspend" => first_of(&[&["systemctl", "suspend"]]).await,
+        "poweroff" => first_of(&[&["systemctl", "poweroff"]]).await,
+        "reboot" => first_of(&[&["systemctl", "reboot"]]).await,
+        other => {
+            warn!("DBusIntegration: unknown system op '{}'", other);
+            Err(anyhow::anyhow!("I don't know how to do {} yet", other.replace('_', " ")))
+        }
+    }
+}
+
+/// Run the first of these commands that's installed. A missing tool moves
+/// on to the next; one that runs and fails is the answer.
+async fn first_of(commands: &[&[&str]]) -> Result<String> {
+    for command in commands {
+        let (program, args) = command.split_first().expect("a command");
+        match Command::new(program).args(args).output().await {
+            Ok(out) if out.status.success() => return Ok(format!("{} {}", program, args.join(" "))),
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let reason = stderr.lines().next().unwrap_or("").trim();
+                return Err(anyhow::anyhow!("{} failed{}", program, if reason.is_empty() { String::new() } else { format!(": {}", reason) }));
             }
-            "media_play_pause" => self.media_control("play-pause").await,
-            "media_pause" => self.media_control("pause").await,
-            "media_play" => self.media_control("play").await,
-            "media_next" => self.media_control("next").await,
-            "media_previous" => self.media_control("previous").await,
-            "brightness_up" => self.brightness_control("up").await,
-            "brightness_down" => self.brightness_control("down").await,
-            "volume_up" => self.volume_control("up").await,
-            "volume_down" => self.volume_control("down").await,
-            "volume_mute" => self.volume_control("mute").await,
-            other => {
-                warn!("DBusIntegration: unknown system op '{}'", other);
-                Err(anyhow::anyhow!("unknown system op: {}", other))
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(anyhow::anyhow!("{} couldn't start: {}", program, e)),
         }
     }
+    let names: Vec<&str> = commands.iter().map(|c| c[0]).collect();
+    Err(anyhow::anyhow!("{} isn't installed", names.join(" or ")))
+}
 
-    async fn send_notification(&self, title: &str, body: &str) -> Result<String> {
-        let output = Command::new("notify-send")
-            .arg(title)
-            .arg(body)
-            .output()
-            .await
-            .map_err(|e| anyhow::anyhow!("notify-send failed: {}", e))?;
+async fn send_notification(title: &str, body: &str) -> Result<String> {
+    first_of(&[&["notify-send", title, body]]).await
+}
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("notify-send error: {}", stderr.trim()));
+async fn media_control(action: &str) -> Result<String> {
+    match Command::new("playerctl").arg(action).output().await {
+        Ok(o) if o.status.success() => Ok(format!("Media {} via playerctl", action)),
+        _ => {
+            let method = match action {
+                "play-pause" => "PlayPause",
+                "next" => "Next",
+                "previous" => "Previous",
+                "pause" => "Pause",
+                "play" => "Play",
+                _ => action,
+            };
+            let member = format!("org.mpris.MediaPlayer2.Player.{}", method);
+            first_of(&[&["dbus-send", "--type=method_call", "--dest=org.mpris.MediaPlayer2", "/org/mpris/MediaPlayer2", &member]]).await
         }
-        Ok(format!("Notification: {} — {}", title, body))
-    }
-
-    async fn media_control(&self, action: &str) -> Result<String> {
-        let output = Command::new("playerctl")
-            .arg(action)
-            .output()
-            .await;
-
-        match output {
-            Ok(o) if o.status.success() => Ok(format!("Media {} via playerctl", action)),
-            _ => {
-                let method = match action {
-                    "play-pause" => "PlayPause",
-                    "next" => "Next",
-                    "previous" => "Previous",
-                    _ => action,
-                };
-                let output = Command::new("dbus-send")
-                    .args(&[
-                        "--type=method_call",
-                        "--dest=org.mpris.MediaPlayer2",
-                        "/org/mpris/MediaPlayer2",
-                        &format!("org.mpris.MediaPlayer2.Player.{}", method),
-                    ])
-                    .output()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("media control failed: {}", e))?;
-
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return Err(anyhow::anyhow!("dbus-send error: {}", stderr.trim()));
-                }
-                Ok(format!("Media {} via dbus-send", action))
-            }
-        }
-    }
-
-    async fn brightness_control(&self, direction: &str) -> Result<String> {
-        let cmd = match direction {
-            "up" => "brightnessctl set +10%",
-            "down" => "brightnessctl set 10%-",
-            _ => return Err(anyhow::anyhow!("invalid brightness direction: {}", direction)),
-        };
-
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()
-            .await
-            .map_err(|e| anyhow::anyhow!("brightnessctl failed: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("brightnessctl error: {}", stderr.trim()));
-        }
-        Ok(format!("Brightness {}", direction))
-    }
-
-    async fn volume_control(&self, action: &str) -> Result<String> {
-        let cmd = match action {
-            "up" => "pactl set-sink-volume @DEFAULT_SINK@ +5%",
-            "down" => "pactl set-sink-volume @DEFAULT_SINK@ -5%",
-            "mute" => "pactl set-sink-mute @DEFAULT_SINK@ toggle",
-            _ => return Err(anyhow::anyhow!("invalid volume action: {}", action)),
-        };
-
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
-            .output()
-            .await
-            .map_err(|e| anyhow::anyhow!("volume control failed: {}", e))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(anyhow::anyhow!("volume control error: {}", stderr.trim()));
-        }
-        Ok(format!("Volume {}", action))
     }
 }
