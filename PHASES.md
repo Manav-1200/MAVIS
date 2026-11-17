@@ -454,6 +454,19 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.20 — Honest, safe, and more capable (2026-11-17)
+
+Details in [`DECISIONS.md` §39](DECISIONS.md#39-the-2026-11-17-run).
+
+- [x] **No made-up actions**: claims are replaced with "I can't do that yet"; failed actions are said, with the reason
+- [x] **MAVIS never closes its own terminal**
+- [x] **Ignores its own voice** during playback
+- [x] **Apps by kind**: "the terminal", "the browser", asking which when several fit
+- [x] **New controls**: workspaces, full screen, volume and brightness levels, Bluetooth, Wi-Fi, lock, log out, suspend, shut down, restart (the session ones ask first)
+- [x] Window names from installed apps; "[mavis]" labels, lead-in change questions and follow-ups cleaned up
+- [x] **The orb follows the cursor while dragging**
+- [ ] Try on hardware; let the model choose actions for requests no rule recognises (next)
+
 ### 6.19 — The orb floats (2026-11-14)
 
 Details in [`DECISIONS.md` §38](DECISIONS.md#38-the-orb-floats).
@@ -1040,4 +1053,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-16*
+*Last updated: 2026-11-17*
