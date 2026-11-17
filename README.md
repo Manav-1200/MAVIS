@@ -153,19 +153,24 @@ Some phrases are handled directly by the planner without an LLM round trip, so t
 | Say | MAVIS does |
 |-----|------------|
 | "open firefox", "launch terminal", "can you open thunar for me" | Launches the app; a name misheard by a letter or two ("tuner") still finds it |
+| "open the terminal", "close the browser" | Finds the app by what it is (from its launcher's GenericName and Categories); asks "Which one?" when several fit |
 | "play lofi hip hop" | Plays it in the app you last played something in; the first time, your default browser. In a browser it plays the top result from the site under `[media]` in `config/config.toml` (YouTube as shipped; needs `curl`, else the search page opens) |
 | "play daylight on youtube using firefox", "play daylight in spotify" | Plays it in that app, and remembers the app for next time. What happens depends on what the app registers for: a browser gets the site; a media player gets a matching file from your Music or Videos folder; an app with its own link type gets a search inside it; any other app is just opened |
 | "search youtube for lofi", "search spotify for lofi" | That site's or app's search, without playing |
 | "google rust async traits", "look up …" | A web search on the site under `[web]` in `config/config.toml` |
 | "volume up", "louder", "mute" | Adjusts volume |
+| "volume to 50%", "brightness to 30 percent" | Sets that level |
+| "turn off bluetooth", "turn on Wi-Fi" | Switches the radio (`bluetoothctl` or `rfkill`; `nmcli` or `rfkill`) |
+| "lock the screen", "log out", "suspend", "shut down", "restart the computer" | Locks at once; the others ask first. Only as the whole request: "how do I log out of my mail" is a question |
+| "switch to workspace 2", "full screen Thunar", "make it full screen" | Window-manager actions (niri; workspaces also on Sway and Hyprland) |
 | "pause", "resume", "next song" | Media control |
 | "close Firefox", "quit the file manager" | Asks first, then closes that app's windows (niri for now). Answer "yes", or say the request again |
-| "close it", "close this window" | Asks first, then closes the focused window. "Yes", "close it" or the request again confirms |
+| "close it", "close this window" | Asks first, then closes the focused window. "Yes", "close it" or the request again confirms. The terminal MAVIS runs in is never closed |
 | "open youtube.com" | Opens that site in your default browser |
 | "open Firefox and play lofi" | Plays it in the app just opened, if that app can play anything |
 | "brighter", "dim the screen" | Adjusts brightness |
 
-Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. Anything else goes to the local model with context attached.
+Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. Anything else goes to the local model with context attached. The model can't act, and a reply that claims an action ("closing the terminal now") is replaced with "I can't do that yet." If an action fails, MAVIS says so and why.
 
 An utterance that starts with an explicit action is never treated as system control — "google how to mute a tab" searches rather than muting your machine.
 
