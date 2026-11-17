@@ -140,8 +140,10 @@ pub fn assess(action: &serde_json::Value) -> Assessment {
         // Speech and notifications change nothing.
         "say" | "notify" => allow(0, "no side effects"),
 
-        // Volume, brightness, media transport — trivially reversible.
-        "system" => allow(1, "reversible system control"),
+        "system" => assess_system(action),
+
+        // Switching workspace or going full screen: undone the same way.
+        "workspace" | "fullscreen" => allow(1, "changes only what's on screen"),
 
         // Puts back files MAVIS itself saved; the user asked for it.
         "undo" => allow(2, "restores files MAVIS backed up"),
@@ -170,6 +172,25 @@ pub fn assess(action: &serde_json::Value) -> Assessment {
             reason: "is an unrecognised kind of action".into(),
             what: format!("do a '{}' action", other),
         },
+    }
+}
+
+/// Volume, brightness, media, radios, locking: reversible. Ending the
+/// session or powering off loses everything unsaved, so it's asked first.
+fn assess_system(action: &serde_json::Value) -> Assessment {
+    let op = action.get("op").and_then(|v| v.as_str()).unwrap_or("");
+    let ask = |score: u8, what: &str, reason: &str| Assessment {
+        score,
+        verdict: Verdict::Confirm,
+        reason: reason.into(),
+        what: what.into(),
+    };
+    match op {
+        "logout" => ask(6, "log you out", "closes every app, and anything unsaved is lost"),
+        "poweroff" => ask(6, "shut the computer down", "closes every app, and anything unsaved is lost"),
+        "reboot" => ask(6, "restart the computer", "closes every app, and anything unsaved is lost"),
+        "suspend" => ask(4, "put the computer to sleep", "pauses everything, including me"),
+        _ => allow(1, "reversible system control"),
     }
 }
 
@@ -324,6 +345,13 @@ mod tests {
         assert_eq!(app("sh", &["-c", "echo hi"]).verdict, Verdict::Confirm);
         assert_eq!(app("sh", &["-c", "rm -rf ~/x"]).score, 6);
         assert!(app("sudo", &["rm", "-rf", "/etc"]).score >= 8);
+        let system = |op: &str| assess(&serde_json::json!({"type": "system", "op": op}));
+        assert_eq!(system("volume_set").verdict, Verdict::Allow);
+        assert_eq!(system("bluetooth_off").verdict, Verdict::Allow);
+        for op in ["logout", "poweroff", "reboot", "suspend"] {
+            assert_eq!(system(op).verdict, Verdict::Confirm, "{op}");
+            assert!(system(op).score < 8, "a clear yes is enough for {op}");
+        }
         assert!(app("/usr/bin/sudo", &["ls"]).score >= 8);
         assert!(app("sudo ls", &[]).score >= 8, "flags packed into the target");
         assert_eq!(app("rm", &["-rf", "notes"]).score, 6);
