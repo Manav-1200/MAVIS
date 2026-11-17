@@ -45,6 +45,12 @@ impl Executor {
         Self { bus, tts_queue, rollback, platform: None }
     }
 
+    /// Share what MAVIS says, for the echo check in the STT task.
+    pub fn with_spoken_log(mut self, log: SpokenLog) -> Self {
+        self.tts_queue.spoken = log;
+        self
+    }
+
     pub fn with_platform(mut self, platform: Arc<Box<dyn crate::platform::PlatformProvider>>) -> Self {
         self.platform = Some(platform);
         self
@@ -164,6 +170,11 @@ impl Executor {
             if !success {
                 self.emit_ui_state("error").await;
                 self.tts_queue.interrupt().await;
+                // Whatever was announced before it ("Volume down.") didn't
+                // happen; say so, and why.
+                if action_type != "say" {
+                    let _ = self.run_say_text(&failure_line(&error_msg)).await;
+                }
                 return Ok(());
             }
         }
@@ -230,21 +241,48 @@ impl Executor {
                 if op.starts_with("media_") {
                     self.tts_queue.release_media();
                 }
-                let system_event = Event {
+                // Run here and waited for, so a failure is said out loud
+                // instead of MAVIS having announced something that didn't
+                // happen. Published after, marked done, for observers.
+                let result = crate::system::dbus::run_system_op(action).await;
+                let mut payload = action.clone();
+                payload["done"] = serde_json::json!(result.is_ok());
+                self.bus.publish(Event {
                     id: uuid::Uuid::new_v4(),
                     timestamp: chrono::Utc::now(),
                     source: "executor".to_string(),
                     event_type: EventType::SystemAction,
-                    payload: action.clone(),
-                };
-                self.bus.publish(system_event);
-                Ok(format!("Delegated system action '{}' to DBus subsystem", op))
+                    payload,
+                });
+                result
+            }
+            "workspace" => {
+                let index = action.get("index").and_then(|v| v.as_u64()).unwrap_or(0);
+                self.window_action(move |t| t.focus_workspace(index)).await
+            }
+            "fullscreen" => {
+                let id = action.get("window").and_then(|v| v.as_u64()).unwrap_or(0);
+                self.window_action(move |t| t.fullscreen_window(id)).await
             }
             other => {
                 warn!("Executor: unknown action type '{}'", other);
                 Err(anyhow::anyhow!("unknown action type: {}", other))
             }
         }
+    }
+
+    /// One window-manager action, off the async threads.
+    async fn window_action<F>(&self, act: F) -> Result<String>
+    where
+        F: FnOnce(&dyn crate::platform::WindowTracker) -> Result<(), crate::platform::PlatformError> + Send + 'static,
+    {
+        let platform = self.platform.clone().ok_or_else(|| anyhow::anyhow!("there's no desktop to do that on"))?;
+        tokio::task::spawn_blocking(move || {
+            let tracker = platform.windows().ok_or_else(|| anyhow::anyhow!("window tracking is off"))?;
+            act(tracker).map_err(|e| anyhow::anyhow!("{}", e.0))?;
+            Ok("done".to_string())
+        })
+        .await?
     }
 
     async fn close_windows(&self, ids: Vec<u64>) -> Result<String> {
@@ -410,7 +448,36 @@ impl Executor {
 // TTS Queue — sequential playback with interruption support
 // ---------------------------------------------------------------------
 
+/// What MAVIS said lately, and when: lets the STT task tell its own voice,
+/// picked up by the mic, from the user's.
+pub type SpokenLog = Arc<std::sync::Mutex<std::collections::VecDeque<(String, std::time::Instant)>>>;
+
+/// Whether a transcript heard during playback is MAVIS's own words. On
+/// 2026-11-17 "…Ask me what changed to hear about them" came back as the
+/// transcript "Ask me what change...", and MAVIS answered itself.
+pub fn is_echo(transcript: &str, spoken: &SpokenLog) -> bool {
+    let words = |s: &str| -> String {
+        s.to_lowercase()
+            .chars()
+            .map(|c| if c.is_alphanumeric() || c == '\'' { c } else { ' ' })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let heard = words(transcript);
+    if heard.split(' ').count() < 2 {
+        return false;
+    }
+    let recent = spoken.lock().unwrap_or_else(|p| p.into_inner());
+    recent
+        .iter()
+        .filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(20))
+        .any(|(text, _)| words(text).contains(&heard))
+}
+
 struct TtsQueue {
+    spoken: SpokenLog,
     queue_tx: mpsc::UnboundedSender<String>,
     kill_tx: mpsc::Sender<()>,
     current_pid: Arc<AtomicU32>,
@@ -503,6 +570,7 @@ impl TtsQueue {
         });
 
         Self {
+            spoken: SpokenLog::default(),
             queue_tx,
             kill_tx,
             current_pid,
@@ -523,6 +591,13 @@ impl TtsQueue {
     }
 
     fn say(&self, text: &str) {
+        {
+            let mut spoken = self.spoken.lock().unwrap_or_else(|p| p.into_inner());
+            spoken.push_back((text.to_string(), std::time::Instant::now()));
+            while spoken.len() > 8 {
+                spoken.pop_front();
+            }
+        }
         self.queue_depth.fetch_add(1, Ordering::SeqCst);
         let _ = self.queue_tx.send(text.to_string());
     }
@@ -969,9 +1044,35 @@ async fn synthesize_via_worker(text: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("failed to decode TTS audio: {}", e))
 }
 
+/// "Sorry, that didn't work: brightnessctl isn't installed." The reason
+/// is the error's first line, kept short enough to say.
+fn failure_line(error: &str) -> String {
+    let reason = error.lines().next().unwrap_or("").trim().trim_end_matches('.');
+    if reason.is_empty() || reason.len() > 90 {
+        "Sorry, that didn't work.".to_string()
+    } else {
+        format!("Sorry, that didn't work: {}.", reason)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn its_own_voice_is_recognised_only_from_what_it_said() {
+        let log = SpokenLog::default();
+        log.lock().unwrap().push_back(("There were also 14 earlier changes. Ask me what changed to hear about them.".into(), std::time::Instant::now()));
+        assert!(is_echo("Ask me what change...", &log));
+        assert!(!is_echo("What changed on my system?", &log));
+        assert!(!is_echo("Ask", &log), "one word says too little");
+    }
+
+    #[test]
+    fn a_failure_is_said_in_short() {
+        assert_eq!(failure_line("brightnessctl isn't installed"), "Sorry, that didn't work: brightnessctl isn't installed.");
+        assert_eq!(failure_line(&"x".repeat(200)), "Sorry, that didn't work.");
+    }
 
     #[test]
     fn replies_are_spoken_a_sentence_at_a_time() {
