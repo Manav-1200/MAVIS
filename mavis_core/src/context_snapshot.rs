@@ -43,6 +43,10 @@ pub struct AppEntry {
     /// "x-scheme-handler/<its own link type>". What "play X in <it>" can do.
     #[serde(default)]
     pub opens: Vec<String>,
+    /// What kind of app it is, as words: GenericName and Categories
+    /// ("terminal", "emulator", "web", "browser"). "The terminal" finds it.
+    #[serde(default)]
+    pub kinds: Vec<String>,
 }
 
 /// Next upcoming calendar event, read from Evolution's local .ics.
