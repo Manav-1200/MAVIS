@@ -326,8 +326,10 @@ mod overlay {
         },
         registry::{ProvidesRegistryState, RegistryState},
         registry_handlers,
+        reexports::protocols::wp::relative_pointer::zv1::client::zwp_relative_pointer_v1::ZwpRelativePointerV1,
         seat::{
             pointer::{PointerEvent, PointerEventKind, PointerHandler},
+            relative_pointer::{RelativeMotionEvent, RelativePointerHandler, RelativePointerState},
             Capability, SeatHandler, SeatState,
         },
         shell::{
@@ -391,6 +393,9 @@ mod overlay {
         travel: f32,
         // Where the pointer is now, in the orb's coordinates at the press.
         to: (f64, f64),
+        // Followed live from relative motion: the drag so far, unrounded.
+        moved: (f64, f64),
+        start: (i32, i32),
     }
 
     pub struct OrbLayer {
@@ -401,6 +406,8 @@ mod overlay {
         pool: SlotPool,
         layer: LayerSurface,
         pointer: Option<wl_pointer::WlPointer>,
+        relative: RelativePointerState,
+        relative_pointer: Option<ZwpRelativePointerV1>,
         output: Option<wl_output::WlOutput>,
         configured: bool,
         exit: bool,
@@ -450,6 +457,8 @@ mod overlay {
             shm,
             layer,
             pointer: None,
+            relative: RelativePointerState::bind(&globals, &qh),
+            relative_pointer: None,
             output: None,
             configured: false,
             exit: false,
@@ -487,6 +496,16 @@ mod overlay {
                 .and_then(|o| self.output_state.info(o))
                 .and_then(|info| info.logical_size)
                 .unwrap_or((i32::MAX, i32::MAX))
+        }
+
+        /// Put the orb at `start` moved by (dx, dy), kept on screen.
+        fn place(&mut self, start: (i32, i32), dx: i32, dy: i32) {
+            let (width, height) = self.screen();
+            self.top = (start.0 + dy).clamp(0, (height - SIZE).max(0));
+            let side = start.1 + if self.from_left { dx } else { -dx };
+            self.side = side.clamp(0, (width - SIZE).max(0));
+            self.apply_margins();
+            self.layer.commit();
         }
 
         fn apply_margins(&self) {
@@ -534,33 +553,39 @@ mod overlay {
                         at: Instant::now(),
                         travel: 0.0,
                         to: event.position,
+                        moved: (0.0, 0.0),
+                        start: (self.top, self.side),
                     });
                 }
                 PointerEventKind::Motion { .. } => {
                     if let Some(press) = self.press.as_mut() {
                         press.to = event.position;
-                        let (dx, dy) = (press.to.0 - press.anchor.0, press.to.1 - press.anchor.1);
-                        press.travel = press.travel.max(dx.abs().max(dy.abs()) as f32);
+                        if self.relative_pointer.is_none() {
+                            let (dx, dy) = (press.to.0 - press.anchor.0, press.to.1 - press.anchor.1);
+                            press.travel = press.travel.max(dx.abs().max(dy.abs()) as f32);
+                        }
                     }
                 }
                 PointerEventKind::Release { button: BTN_LEFT, .. } => {
                     let Some(press) = self.press.take() else { return };
                     if is_tap(press.at.elapsed(), press.travel) {
+                        // A tap that wobbled a pixel or two goes back.
+                        (self.top, self.side) = press.start;
+                        self.apply_margins();
                         (self.on_tap)();
                         return;
                     }
-                    // Moved once, on release. Compositors differ on when a
-                    // new margin takes effect, so pointer positions during a
-                    // drag can't be trusted against a moving orb; against
-                    // the orb where the press began they can.
+                    if self.relative_pointer.is_some() {
+                        return; // already where it was dragged
+                    }
+                    // No relative motion here: moved once, on release.
+                    // Compositors differ on when a new margin takes effect,
+                    // so positions during a drag can't be trusted against a
+                    // moving orb; against the orb where the press began
+                    // they can.
                     let dx = (press.to.0 - press.anchor.0).round() as i32;
                     let dy = (press.to.1 - press.anchor.1).round() as i32;
-                    let (width, height) = self.screen();
-                    self.top = (self.top + dy).clamp(0, (height - SIZE).max(0));
-                    let side = self.side + if self.from_left { dx } else { -dx };
-                    self.side = side.clamp(0, (width - SIZE).max(0));
-                    self.apply_margins();
-                    self.layer.commit();
+                    self.place(press.start, dx, dy);
                 }
                 _ => {}
             }
@@ -609,6 +634,10 @@ mod overlay {
         fn new_capability(&mut self, _: &Connection, qh: &QueueHandle<Self>, seat: wl_seat::WlSeat, capability: Capability) {
             if capability == Capability::Pointer && self.pointer.is_none() {
                 self.pointer = self.seat_state.get_pointer(qh, &seat).ok();
+                // Relative motion moves the orb with the cursor while
+                // dragging, whatever the compositor does with positions.
+                self.relative_pointer =
+                    self.pointer.as_ref().and_then(|p| self.relative.get_relative_pointer(p, qh).ok());
             }
         }
         fn remove_capability(&mut self, _: &Connection, _: &QueueHandle<Self>, _: wl_seat::WlSeat, capability: Capability) {
@@ -628,6 +657,24 @@ mod overlay {
                     self.pointer(event);
                 }
             }
+        }
+    }
+
+    impl RelativePointerHandler for OrbLayer {
+        fn relative_pointer_motion(
+            &mut self,
+            _: &Connection,
+            _: &QueueHandle<Self>,
+            _: &ZwpRelativePointerV1,
+            _: &wl_pointer::WlPointer,
+            event: RelativeMotionEvent,
+        ) {
+            let Some(press) = self.press.as_mut() else { return };
+            press.moved.0 += event.delta.0;
+            press.moved.1 += event.delta.1;
+            press.travel = press.travel.max(press.moved.0.abs().max(press.moved.1.abs()) as f32);
+            let (start, dx, dy) = (press.start, press.moved.0.round() as i32, press.moved.1.round() as i32);
+            self.place(start, dx, dy);
         }
     }
 
