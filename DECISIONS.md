@@ -58,6 +58,7 @@ The **Evidence** line matters most. It records whether a fix was *measured* on r
 36. [Review of 6.11–6.16](#36-review-of-611616)
 37. [The name, once](#37-the-name-once)
 38. [The orb floats](#38-the-orb-floats)
+39. [The 2026-11-17 run](#39-the-2026-11-17-run)
 
 ---
 
@@ -103,6 +104,7 @@ These are the rules every decision below was measured against. When two entries 
 | 09-26 | — | Second live run: 2 s replies, no hallucinations. Actions never fired and the model narrated them instead; barge-in built (§16) |
 | 09-27 | — | Barge-in's first real run: MAVIS cut itself off on every reply. Echo measurement rebuilt, interruption made reversible (§17) |
 | 09-30 | — | A fresh run answered "can you hear me" with last week's clipboard: conversation no longer survives a restart, old questions purged from recall (§18) |
+| 11-17 | 6 | Run: the model claimed actions it never did, a misheard "close Thunar" nearly closed MAVIS's own terminal, it answered its own voice. Honesty guard, own-window protection, echo filter, app kinds, workspace/full screen, levels, radios and the session, live orb drag (§39) |
 | 11-14 | 6 | The orb is a layer-shell overlay: floats on every workspace, never focused, draggable on Wayland (§38) |
 | 11-14 | 6 | The user's name only in the first reply of a run (§37) |
 | 11-13 | 6 | Review of everything since 6.11 before the next hardware run: 13 bugs found and fixed, none yet seen on hardware (§36) |
@@ -1853,6 +1855,65 @@ The orb was a minifb window. On niri, a window gets tiled into a column like any
 - Taps still count as taps; colours are premultiplied, as Wayland expects.
 
 **Evidence:** **Measured** on Sway, headless, with a virtual mouse (wlr virtual pointer): it's no window in the tree, shows on workspace 2 after switching, a tap fires, and a drag from (740,100) to (380,340) drops the orb centred on (380,340). Transparency and the red error state rendered correctly. Not yet seen on niri.
+
+---
+
+## 39. The 2026-11-17 run
+
+*2026-11-17.* The first full run with everything to 6.19. Hearing was much better: "Mavis" was heard right every time, and `small.en` loaded after a 30-second download, saying "still loading" once while it did. The rest of this section is what went wrong, and the fixes.
+
+### Problem · It said it did things it didn't
+"Sure, closing the terminal now." "Thunar is now full screen." "Switching to workspace 2." "Understood, closing the terminal", three times, after "No, not terminal". None of these was a command MAVIS knew, so each went to the model, which made the action up. Rule 14 already forbade it.
+**Fix:**
+- The reply clean-up recognises a claimed action and replaces the whole reply with "I can't do that yet." Three forms are recognised: a short sentence opening with a doing-verb ("closing…", "switching…"), "I've closed…", and "X is now full screen / open / on". A long how-to answer ("Opening the terminal in Linux is done with…") is left alone.
+- Rule 14 says why: nothing happens unless it was carried out before the model's turn.
+- **Failures are said.** A failed action stops what was being said and says "Sorry, that didn't work: <reason>". System controls now run in the executor and are waited for, instead of being handed to another task whose errors only reached the log. Before, "Volume down." was spoken even when nothing changed.
+
+**Evidence:** **Measured**: all seven claims from the log are replaced; eight ordinary replies, including a how-to, come through. **Proven** for the failure line (test).
+
+### Problem · "Close Thunar" was heard as "close the terminal"
+Had it worked, MAVIS would have closed the terminal it runs in, and with it the session and its log.
+**Fix:**
+- **MAVIS never closes its own window.** At start it reads its own process tree from `/proc` (itself, its parent, theirs). A window owned by one of those processes is left out of any close: by name, by kind, or "close it". If that's the only window named, MAVIS says "That kitty window is the one I'm running in, so I won't close it."
+- Closing still asks first, so a mishearing of anything else is caught at the question.
+
+**Evidence:** **Proven** (test, including "close it" and "close kitty").
+
+### Problem · "The terminal", "the browser"
+Kitty's launcher name is just "kitty", so "the terminal" matched nothing.
+**Fix:** launcher files' `GenericName` and `Categories` are kept as words ("TerminalEmulator" → "terminal emulator"; toolkit names like GTK and Qt are left out). "Open the terminal" and "close the browser" find apps by kind. With several matches, MAVIS asks "Which one: Brave or Firefox?"; for closing, only apps with open windows count.
+**Evidence:** **Proven** (tests).
+
+### Problem · It answered its own voice
+It said "…Ask me what changed to hear about them." The mic picked that up, and the transcript "Ask me what change..." interrupted its next reply, which was then answered.
+**Fix:** the executor keeps what MAVIS said in the last 20 seconds. A transcript heard during playback that is part of one of those sentences is ignored, and playback carries on. After playback ends nothing is filtered, so "close Thunar" in answer to "Shall I close Thunar…?" still counts.
+**Evidence:** **Proven** (test with the log's sentence).
+
+### New · Window and system controls
+- **Workspaces:** "switch to workspace 2" or "go to workspace two" (niri, Sway, Hyprland). "Move this window to workspace 3" says it can't do that yet.
+- **Full screen:** "full screen Thunar" or "make it full screen" (niri). The window is focused first, then the compositor's own toggle is used.
+- **Levels:** "volume to 50%", "brightness to 30 percent". "Up by 20%" stays a step.
+- **Radios:** Bluetooth (`bluetoothctl`, else `rfkill`) and Wi-Fi (`nmcli`, else `rfkill`).
+- **The session:**
+  - **Lock** (`loginctl lock-session`) runs at once.
+  - **Log out** (`loginctl terminate-session`), **suspend**, **shut down** and **restart** (`systemctl`) ask first.
+  - These are recognised only as the whole request, so "how do I log out of my mail" stays a question.
+  - The spoken line comes before the action, since nothing is heard after.
+- Each control tries the usual tools in turn and says which one is missing if none is installed.
+**Evidence:** **Proven** for recognising and scoring (tests). **Not run here:** the tools themselves.
+
+### Smaller fixes
+- **Window IDs read out** ("org.kde.haruna, brave-browser"): windows are now named after their installed app (Haruna, Brave). Where two apps share a program, the one named like the window wins (Thunar File Manager, not Bulk Rename). **Proven** (test).
+- **"[mavis] You are looking at…"**: a working-memory label at the start of a reply is removed. **Measured.**
+- **"I want to know what changed on my system recently"** went to the model. Change questions are now also recognised after a lead-in, from the first "what". **Proven** (test).
+- **Follow-ups** like "What would you like to do next…?", "What's next?" and "Is there anything else you need?" are dropped from the end of a reply. **Measured.**
+
+### Orb · Dragging now follows the cursor
+In §38 the orb moved only on release, because pointer positions during a drag mean different things on different compositors. It now uses relative pointer motion (`zwp_relative_pointer_v1`). Those are the pointer's own deltas, independent of where the compositor thinks the orb is. The orb follows the cursor like a window does. Where the protocol is missing, it falls back to moving on release. A tap that wobbled a pixel puts the orb back.
+**Evidence:** **Measured** on headless Sway with a virtual mouse. Six steps into a drag from (740,100), the orb was centred at (559,219), with the cursor at (560,220). It ended at (380,340), exactly where the cursor ended. The tap still fired.
+
+### Mic
+The capture level clipped eight times ("Input at 1.18× full scale"). That's a setting on the user's side: `wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35`.
 
 ---
 
