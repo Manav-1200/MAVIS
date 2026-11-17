@@ -174,6 +174,9 @@ async fn main() -> Result<()> {
     let bus_for_exec = Arc::clone(&bus);
     let tts_active_for_exec = tts_active.clone();
     let platform_for_exec = Arc::clone(&platform);
+    let spoken = executor::SpokenLog::default();
+    let spoken_for_exec = spoken.clone();
+    let spoken_for_stt = spoken.clone();
     let backup_root = data_dir.join(".mavis-backup");
     let exec_handle = supervise("Executor", Arc::clone(&bus), move || {
         let mut executor = executor::Executor::new(
@@ -181,7 +184,8 @@ async fn main() -> Result<()> {
             tts_active_for_exec.clone(),
             backup_root.clone(),
         )
-        .with_platform(Arc::clone(&platform_for_exec));
+        .with_platform(Arc::clone(&platform_for_exec))
+        .with_spoken_log(spoken_for_exec.clone());
         async move {
             executor.run().await;
         }
@@ -546,7 +550,10 @@ async fn main() -> Result<()> {
                 let unclear = confidence < UNCLEAR_CONFIDENCE
                     && !answering
                     && !planner::heard_as_command(&text, &apps_for_stt);
-                if text.is_empty() && paused_playback {
+                if paused_playback && executor::is_echo(&text, &spoken_for_stt) {
+                    info!("STT: that was my own voice — ignored: {}", text);
+                    resume("my own voice");
+                } else if text.is_empty() && paused_playback {
                     resume("nothing but noise");
                 } else if text.is_empty() {
                     info!("STT: empty transcription (silence or no speech)");
