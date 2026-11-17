@@ -37,6 +37,14 @@ pub trait WindowTracker {
     fn focus_window(&self, _id: u64) -> Result<(), PlatformError> {
         Err(PlatformError("focusing windows isn't supported on this desktop yet".into()))
     }
+    /// Show workspace `index` (as numbered on screen). Default: not supported.
+    fn focus_workspace(&self, _index: u64) -> Result<(), PlatformError> {
+        Err(PlatformError("switching workspaces isn't supported on this desktop yet".into()))
+    }
+    /// Toggle full screen for a window. Default: not supported.
+    fn fullscreen_window(&self, _id: u64) -> Result<(), PlatformError> {
+        Err(PlatformError("full screen isn't supported on this desktop yet".into()))
+    }
 }
 
 pub trait ClipboardReader {
@@ -101,4 +109,3 @@ pub trait PlatformProvider: Send + Sync {
     fn windows(&self) -> Option<&dyn WindowTracker>;
     fn clipboard(&self) -> Option<&dyn ClipboardReader>;
 }
-
