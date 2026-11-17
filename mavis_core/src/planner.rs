@@ -313,6 +313,33 @@ fn find_named_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry
     find_app(spoken, apps).or_else(|| misheard_app(&normalize(spoken), apps))
 }
 
+/// Apps whose kind the words name: "terminal", "the browser", "video
+/// player". From GenericName and Categories, so no app names are needed.
+fn apps_of_kind<'a>(spoken: &str, apps: &'a [AppEntry]) -> Vec<&'a AppEntry> {
+    const FILLER: &[&str] = &["the", "a", "my", "app", "application", "program", "window"];
+    let words: Vec<String> = normalize(spoken)
+        .split_whitespace()
+        .filter(|w| !FILLER.contains(w))
+        .map(String::from)
+        .collect();
+    if words.is_empty() {
+        return Vec::new();
+    }
+    apps.iter()
+        .filter(|a| words.iter().all(|w| a.kinds.iter().any(|k| k == w)))
+        .collect()
+}
+
+/// "Which one: Brave, Firefox or Zen?"
+fn which_one(names: &[String]) -> String {
+    let names: Vec<&str> = names.iter().take(3).map(String::as_str).collect();
+    match names.as_slice() {
+        [] => "Which one?".to_string(),
+        [one] => format!("Which one: {}?", one),
+        [rest @ .., last] => format!("Which one: {} or {}?", rest.join(", "), last),
+    }
+}
+
 /// A one-word name Whisper got slightly wrong: "tuner" for Thunar. Matched
 /// against each word of the app's name and its binary; only a single
 /// closest app counts, so two near names give nothing rather than a guess.
@@ -622,6 +649,9 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
         }
     }
 
+    if let Some(plan) = whole_request(text).or_else(|| level_request(text)) {
+        return Some(plan);
+    }
     if let Some(plan) = match_system_intent(text) {
         return Some(plan);
     }
@@ -688,6 +718,20 @@ fn match_action_intent(text: &str, apps: &[AppEntry]) -> Option<serde_json::Valu
                     {"type": "say", "text": format!("Opening {}.", app.name)},
                     {"type": "app", "target": bin, "args": args},
                 ]));
+            }
+            // "Open the terminal": by kind, or ask which when there are several.
+            let of_kind = apps_of_kind(target, apps);
+            if at == 0 && matches!(verb, "open " | "launch ") && !of_kind.is_empty() {
+                if let [app] = of_kind.as_slice() {
+                    let mut parts = crate::util::split_command_line(&app.exec).into_iter();
+                    let bin = parts.next().unwrap_or_default();
+                    return Some(serde_json::json!([
+                        {"type": "say", "text": format!("Opening {}.", app.name)},
+                        {"type": "app", "target": bin, "args": parts.collect::<Vec<String>>()},
+                    ]));
+                }
+                let names: Vec<String> = of_kind.iter().map(|a| a.name.clone()).collect();
+                return Some(serde_json::json!({"type": "say", "text": which_one(&names)}));
             }
             // Asked outright ("open tuner") and nothing is installed by
             // that name: say so. The model used to answer "I can't open
@@ -763,6 +807,156 @@ pub fn heard_as_command(text: &str, apps: &[AppEntry]) -> bool {
         || is_undo_request(t)
         || match_action_intent(t, apps).is_some()
         || close_request(t, &[], apps).is_some()
+        || window_request(t, &[], apps).is_some()
+}
+
+/// "one" → 1 … "ten" → 10, or a number written as digits.
+fn number_word(w: &str) -> Option<u64> {
+    const WORDS: &[&str] = &["zero", "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten"];
+    w.trim_end_matches(['%', '.', ',', '?', '!'])
+        .parse()
+        .ok()
+        .or_else(|| WORDS.iter().position(|x| *x == w).map(|i| i as u64))
+}
+
+/// Window-manager requests: "switch to workspace 2", "full screen Thunar",
+/// "make it full screen". The window comes from what's open, the app from
+/// what's installed, as for closing.
+fn window_request(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Option<serde_json::Value> {
+    let t = normalize(&text.to_lowercase().replace("full-screen", "full screen").replace("fullscreen", "full screen"));
+    let t = request_body(strip_address(&t)).to_string();
+    let words: Vec<&str> = t.split_whitespace().collect();
+    let say = |text: String| serde_json::json!({"type": "say", "text": text});
+
+    if let Some(at) = words.iter().position(|w| *w == "workspace") {
+        // Moving a window there is a different request; not done yet.
+        let moving = words.iter().any(|w| matches!(*w, "move" | "send"));
+        if moving && words.iter().any(|w| matches!(*w, "window" | "this" | "it" | "that")) {
+            return Some(say("I can't move windows between workspaces yet.".into()));
+        }
+        let switching = words.len() <= 2
+            || moving
+            || words.iter().any(|w| matches!(*w, "switch" | "go" | "show" | "take" | "focus" | "change" | "jump"));
+        if switching {
+            let index = words[at + 1..].iter().find_map(|w| number_word(w))?;
+            return Some(serde_json::json!([
+                {"type": "workspace", "index": index},
+                {"type": "say", "text": format!("Workspace {}.", index)},
+            ]));
+        }
+    }
+
+    if t.contains("full screen") {
+        let rest: Vec<&str> = words
+            .iter()
+            .copied()
+            .filter(|w| !matches!(*w, "full" | "screen" | "make" | "put" | "go" | "in" | "into" | "mode" | "the" | "window" | "please"))
+            .collect();
+        let named = rest.join(" ");
+        let pronoun = named.is_empty() || matches!(named.as_str(), "it" | "this" | "that");
+        let window = if pronoun {
+            windows.iter().find(|w| w.is_focused)
+        } else {
+            let app = find_named_app(&named, apps).or_else(|| apps_of_kind(&named, apps).into_iter().next());
+            windows.iter().filter(|w| app_owns(app, &named, w)).max_by_key(|w| w.is_focused)
+        };
+        return Some(match window.and_then(|w| w.id.map(|id| (id, w))) {
+            Some((id, _)) => serde_json::json!([
+                {"type": "fullscreen", "window": id},
+                {"type": "say", "text": "Full screen."},
+            ]),
+            None if pronoun => say("I can't tell which window you mean.".into()),
+            None => say(format!("{} isn't open.", if named.is_empty() { "That" } else { &named })),
+        });
+    }
+    None
+}
+
+/// The window, named after its installed app where one owns it.
+fn with_app_name(w: &WindowInfo, apps: &[AppEntry]) -> WindowInfo {
+    let mut w = w.clone();
+    let words = window_app_words(&w.app_name);
+    // Thunar's binary is also Bulk Rename's: the one named like the window wins.
+    let owner = apps.iter().filter(|a| app_owns(Some(a), "", &w)).min_by_key(|a| {
+        let named = normalize(&a.name).split_whitespace().any(|n| words.split(' ').any(|x| x == n));
+        (!named, a.exec.split_whitespace().count())
+    });
+    if let Some(app) = owner {
+        w.app_name = app.name.clone();
+    }
+    w
+}
+
+/// Whether window `w` belongs to `app` (or, with no app, to the words).
+fn app_owns(app: Option<&AppEntry>, words: &str, w: &WindowInfo) -> bool {
+    let window_words = window_app_words(&w.app_name);
+    match app {
+        Some(a) => {
+            let binary = crate::util::split_command_line(&a.exec)
+                .into_iter()
+                .next()
+                .map(|b| normalize(b.rsplit('/').next().unwrap_or(&b)))
+                .unwrap_or_default();
+            !binary.is_empty()
+                && (window_words == binary
+                    || window_words == normalize(&a.name)
+                    || window_words.split(' ').any(|w| w == binary))
+        }
+        None => window_words == normalize(words),
+    }
+}
+
+/// "Volume to 50%", "set the brightness to 30 percent": a level, not a step.
+/// "Up by 20%" is a step and is left to the phrases.
+fn level_request(text: &str) -> Option<serde_json::Value> {
+    let t = normalize(&text.to_lowercase().replace('%', " percent"));
+    let words: Vec<&str> = t.split_whitespace().collect();
+    if words.contains(&"by") {
+        return None;
+    }
+    let (op, thing) = if words.iter().any(|w| matches!(*w, "volume" | "sound")) {
+        ("volume_set", "Volume")
+    } else if words.contains(&"brightness") {
+        ("brightness_set", "Brightness")
+    } else {
+        return None;
+    };
+    let level = words.iter().find_map(|w| number_word(w)).filter(|n| *n <= 100)?;
+    Some(serde_json::json!([
+        {"type": "say", "text": format!("{} {} percent.", thing, level)},
+        {"type": "system", "op": op, "value": level},
+    ]))
+}
+
+/// Radios and the session. Only as the whole request: "how do I log out of
+/// my mail" mustn't log anyone out. The session ones ask first (risk.rs).
+const WHOLE_REQUESTS: &[(&[&str], &str, &str)] = &[
+    (&["turn on bluetooth", "turn bluetooth on", "bluetooth on", "enable bluetooth", "switch on bluetooth"], "bluetooth_on", "Bluetooth on."),
+    (&["turn off bluetooth", "turn bluetooth off", "bluetooth off", "disable bluetooth", "switch off bluetooth"], "bluetooth_off", "Bluetooth off."),
+    (&["turn on wifi", "turn wifi on", "wifi on", "enable wifi", "switch on wifi"], "wifi_on", "Wi-Fi on."),
+    (&["turn off wifi", "turn wifi off", "wifi off", "disable wifi", "switch off wifi"], "wifi_off", "Wi-Fi off."),
+    (&["lock the screen", "lock my screen", "lock screen", "lock the computer", "lock my computer"], "lock", "Locking."),
+    (&["log out", "log me out", "logout", "sign out", "sign me out"], "logout", "Logging out."),
+    (&["suspend", "suspend the computer", "go to sleep", "put the computer to sleep", "sleep mode"], "suspend", "Going to sleep."),
+    (&["shut down", "shutdown", "shut down the computer", "power off", "turn off the computer", "shut the computer down"], "poweroff", "Shutting down."),
+    (&["restart the computer", "reboot", "restart my computer", "reboot the computer"], "reboot", "Restarting."),
+];
+
+fn whole_request(text: &str) -> Option<serde_json::Value> {
+    let lower = text.to_lowercase().replace("wi-fi", "wifi").replace("wi fi", "wifi");
+    let t = normalize(strip_address(&lower));
+    let t = request_body(&t);
+    let t = t.strip_suffix(" now").unwrap_or(t);
+    WHOLE_REQUESTS.iter().find(|(phrases, _, _)| phrases.contains(&t)).map(|(_, op, spoken)| {
+        let act = serde_json::json!({"type": "system", "op": op});
+        let say = serde_json::json!({"type": "say", "text": spoken});
+        // Ending the session: said first, since nothing is heard after.
+        if matches!(*op, "lock" | "logout" | "suspend" | "poweroff" | "reboot") {
+            serde_json::json!([say, act])
+        } else {
+            serde_json::json!([act, say])
+        }
+    })
 }
 
 /// What "close <app>" turned out to mean.
@@ -776,12 +970,43 @@ enum Close {
     Unsupported,
     /// "Close it", with no focused window known.
     NoFocus,
+    /// Every window it named is MAVIS's own terminal.
+    Mine(String),
+    /// Several apps of the kind named are open.
+    Which(Vec<String>),
 }
 
 /// "close firefox", "quit the file manager": matched against the windows
 /// actually open, so "how do I close a tab" names nothing and goes to the
 /// model. Apps are matched by what their windows report, never by name lists.
 fn close_request(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Option<Close> {
+    close_request_sparing(text, windows, apps, &std::collections::HashSet::new())
+}
+
+/// `close_request`, never touching windows of the processes in `spared`:
+/// MAVIS's own terminal. On 2026-11-17 "close Thunar" was heard as "close
+/// the terminal"; closing that would have ended MAVIS and its log.
+fn close_request_sparing(
+    text: &str,
+    windows: &[WindowInfo],
+    apps: &[AppEntry],
+    spared: &std::collections::HashSet<u32>,
+) -> Option<Close> {
+    let close = close_request_unguarded(text, windows, apps)?;
+    let Close::Windows { app, ids } = close else { return Some(close) };
+    let mine = |id: &u64| {
+        windows
+            .iter()
+            .any(|w| w.id == Some(*id) && w.pid.is_some_and(|p| spared.contains(&p)))
+    };
+    let kept: Vec<u64> = ids.iter().copied().filter(|id| !mine(id)).collect();
+    if kept.is_empty() {
+        return Some(Close::Mine(app));
+    }
+    Some(Close::Windows { app, ids: kept })
+}
+
+fn close_request_unguarded(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Option<Close> {
     let t = normalize(text);
     if let Some(close) = close_focused(&t, windows, apps) {
         return Some(close);
@@ -821,6 +1046,9 @@ fn close_request(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Optio
 
     let name = app.map(|a| a.name.clone()).unwrap_or_else(|| target.to_string());
     if matching.is_empty() {
+        if app.is_none() {
+            return close_by_kind(target, windows, apps);
+        }
         return app.map(|a| Close::NotOpen(a.name.clone()));
     }
     let ids: Vec<u64> = matching.iter().filter_map(|w| w.id).collect();
@@ -828,6 +1056,55 @@ fn close_request(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Optio
         return Some(Close::Unsupported);
     }
     Some(Close::Windows { app: name, ids })
+}
+
+/// "Close the terminal": the open windows of apps of that kind. One app
+/// is closed (after asking); several are asked about by name.
+fn close_by_kind(target: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Option<Close> {
+    let of_kind = apps_of_kind(target, apps);
+    if of_kind.is_empty() {
+        return None;
+    }
+    let windows_of = |a: &AppEntry| -> Vec<u64> {
+        let binary = crate::util::split_command_line(&a.exec)
+            .into_iter()
+            .next()
+            .map(|b| normalize(b.rsplit('/').next().unwrap_or(&b)))
+            .unwrap_or_default();
+        windows
+            .iter()
+            .filter(|w| {
+                let words = window_app_words(&w.app_name);
+                words == binary || words == normalize(&a.name)
+            })
+            .filter_map(|w| w.id)
+            .collect()
+    };
+    let open: Vec<(&AppEntry, Vec<u64>)> =
+        of_kind.into_iter().map(|a| (a, windows_of(a))).filter(|(_, ids)| !ids.is_empty()).collect();
+    match open.as_slice() {
+        [] => Some(Close::NotOpen(format!("The {}", target))),
+        [(app, ids)] => Some(Close::Windows { app: app.name.clone(), ids: ids.clone() }),
+        many => Some(Close::Which(many.iter().map(|(a, _)| a.name.clone()).collect())),
+    }
+}
+
+/// The processes MAVIS runs inside: itself, its parent, theirs, up to
+/// init. A window belonging to one of these is the terminal it was
+/// started from.
+pub fn own_process_tree() -> std::collections::HashSet<u32> {
+    let mut pids = std::collections::HashSet::new();
+    let mut pid = std::process::id();
+    while pid > 1 && pids.insert(pid) {
+        let stat = std::fs::read_to_string(format!("/proc/{}/stat", pid)).unwrap_or_default();
+        // "pid (comm) state ppid …"; comm may hold spaces, so read after ')'.
+        pid = stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+            .and_then(|p| p.parse().ok())
+            .unwrap_or(0);
+    }
+    pids
 }
 
 /// "close it", "close this window": the focused window only. Asked
@@ -993,6 +1270,8 @@ pub struct Planner {
     speaking: Option<Arc<std::sync::atomic::AtomicBool>>,
     /// Sites for "play" and "search", and the app last played in.
     media: Media,
+    /// MAVIS's own process tree, whose windows are never closed.
+    spared: std::collections::HashSet<u32>,
 }
 
 impl Planner {
@@ -1020,6 +1299,7 @@ impl Planner {
             last_told: std::sync::Mutex::new(None),
             speaking: None,
             media: Media::default(),
+            spared: own_process_tree(),
         }
     }
 
@@ -1105,9 +1385,13 @@ impl Planner {
         // it as well made MAVIS reply to "yes" as if it were a question.
         // A request of its own ("play lofi hip hop") still cancels the
         // question, but is carried out rather than lost.
-        let close = {
+        let (close, window) = {
             let wm = self.working.read().await;
-            close_request(intent, &with_focus(&wm.open_windows, wm.active_window.as_ref()), &self.apps)
+            let windows = with_focus(&wm.open_windows, wm.active_window.as_ref());
+            (
+                close_request_sparing(intent, &windows, &self.apps, &self.spared),
+                window_request(intent, &windows, &self.apps),
+            )
         };
         let (answering, repeats) = {
             let awaiting = self.awaiting.lock().unwrap_or_else(|p| p.into_inner());
@@ -1118,6 +1402,7 @@ impl Planner {
             && (repeats
                 || (!is_undo_request(intent)
                     && close.is_none()
+                    && window.is_none()
                     && match_action_intent(intent, &self.apps).is_none()))
         {
             info!("Planner: that answers a confirmation — left to the permission gate");
@@ -1216,7 +1501,24 @@ impl Planner {
                     "type": "say",
                     "text": "I can't tell which window is focused. Which app should I close?"
                 }),
+                Close::Mine(app) => serde_json::json!({
+                    "type": "say",
+                    "text": format!("That {} window is the one I'm running in, so I won't close it.", app)
+                }),
+                Close::Which(names) => serde_json::json!({"type": "say", "text": which_one(&names)}),
             };
+            self.bus.publish(Event {
+                id: uuid::Uuid::new_v4(),
+                timestamp: chrono::Utc::now(),
+                source: "planner".to_string(),
+                event_type: EventType::PlanReady,
+                payload: serde_json::json!({ "plan": plan }),
+            });
+            return Ok(());
+        }
+
+        if let Some(plan) = window {
+            info!("Planner: window request — {}", plan);
             self.bus.publish(Event {
                 id: uuid::Uuid::new_v4(),
                 timestamp: chrono::Utc::now(),
@@ -1438,7 +1740,11 @@ impl Planner {
 
         // Phase 6 — active window and clipboard, both off by default.
         if context_source_enabled("MAVIS_CONTEXT_ACTIVE_WINDOW") {
-            match &snapshot.active_window {
+            // App names, not window ids: "Haruna", not "org.kde.haruna".
+            let active = snapshot.active_window.as_ref().map(|w| with_app_name(w, &self.apps));
+            let open_windows: Vec<WindowInfo> =
+                snapshot.open_windows.iter().map(|w| with_app_name(w, &self.apps)).collect();
+            match &active {
                 Some(window) => items.push(serde_json::json!({
                     "source": "active_window",
                     "content": describe_active_window(window),
@@ -1451,7 +1757,7 @@ impl Planner {
                 None => {}
             }
 
-            if let Some(content) = describe_open_windows(&snapshot.open_windows, snapshot.active_workspace) {
+            if let Some(content) = describe_open_windows(&open_windows, snapshot.active_workspace) {
                 items.push(serde_json::json!({ "source": "open_windows", "content": content }));
             }
             // The desktop names itself; nothing here assumes which one.
@@ -2466,6 +2772,104 @@ mod tests {
         assert_eq!(describe_active_window(&w), "The focused window is webby — \"News | Site\".");
     }
 
+    fn kinds(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    fn desktop_apps() -> Vec<AppEntry> {
+        vec![
+            AppEntry { name: "kitty".into(), exec: "kitty".into(), kinds: kinds(&["terminal", "emulator", "system"]), ..Default::default() },
+            AppEntry { name: "Thunar File Manager".into(), exec: "thunar".into(), kinds: kinds(&["file", "manager", "system"]), ..Default::default() },
+            AppEntry { name: "Brave".into(), exec: "brave".into(), opens_links: true, kinds: kinds(&["web", "browser", "network"]), ..Default::default() },
+            AppEntry { name: "Firefox".into(), exec: "firefox".into(), opens_links: true, kinds: kinds(&["web", "browser", "network"]), ..Default::default() },
+        ]
+    }
+
+    #[test]
+    fn apps_are_found_by_kind() {
+        let apps = desktop_apps();
+        let plan = match_action_intent("open the terminal", &apps).unwrap();
+        assert_eq!(plan[1]["target"], "kitty");
+        let plan = match_action_intent("open the browser", &apps).unwrap();
+        assert_eq!(plan["text"], "Which one: Brave or Firefox?");
+        let mut kitty = window("kitty", "zsh", 1, false);
+        kitty.id = Some(5);
+        assert_eq!(close_request("close the terminal", &[kitty], &apps), Some(Close::Windows { app: "kitty".into(), ids: vec![5] }));
+        assert_eq!(close_request("close the terminal", &[], &apps), Some(Close::NotOpen("The terminal".into())));
+        let both = vec![window("brave", "a", 1, false), window("firefox", "b", 2, false)];
+        assert_eq!(close_request("close the browser", &both, &apps), Some(Close::Which(vec!["Brave".into(), "Firefox".into()])));
+    }
+
+    /// "Close Thunar" heard as "close the terminal": MAVIS's own terminal
+    /// is never closed, by name, by kind, or as "close it".
+    #[test]
+    fn the_window_mavis_runs_in_is_never_closed() {
+        let apps = desktop_apps();
+        let mut mine = window("kitty", "cargo run", 1, true);
+        mine.id = Some(5);
+        mine.pid = Some(4242);
+        let mut other = window("kitty", "htop", 1, false);
+        other.id = Some(6);
+        other.pid = Some(777);
+        let spared: std::collections::HashSet<u32> = [4242].into();
+        let windows = vec![mine.clone(), other];
+        assert_eq!(close_request_sparing("close the terminal", &windows, &apps, &spared), Some(Close::Windows { app: "kitty".into(), ids: vec![6] }));
+        assert_eq!(close_request_sparing("close it", &windows, &apps, &spared), Some(Close::Mine("kitty".into())));
+        assert_eq!(close_request_sparing("close kitty", &[mine], &apps, &spared), Some(Close::Mine("kitty".into())));
+        assert!(own_process_tree().contains(&std::process::id()));
+    }
+
+    #[test]
+    fn workspaces_and_full_screen_are_window_requests() {
+        let apps = desktop_apps();
+        let plan = window_request("Mavis, can you switch to workspace 2 for me?", &[], &apps).unwrap();
+        assert_eq!(plan[0], serde_json::json!({"type": "workspace", "index": 2}));
+        let plan = window_request("go to workspace two", &[], &apps).unwrap();
+        assert_eq!(plan[0]["index"], 2);
+        let plan = window_request("move this window to workspace 3", &[], &apps).unwrap();
+        assert_eq!(plan["text"], "I can't move windows between workspaces yet.");
+        assert_eq!(window_request("move to workspace 4", &[], &apps).unwrap()[0]["index"], 4);
+        let mut thunar = window("thunar", "Home", 1, false);
+        thunar.id = Some(9);
+        let plan = window_request("Mavis, full screen, Thunar please.", std::slice::from_ref(&thunar), &apps).unwrap();
+        assert_eq!(plan[0], serde_json::json!({"type": "fullscreen", "window": 9}));
+        thunar.is_focused = true;
+        let plan = window_request("make it fullscreen", &[thunar], &apps).unwrap();
+        assert_eq!(plan[0]["window"], 9);
+        assert!(window_request("what's on my screen", &[], &apps).is_none());
+    }
+
+    #[test]
+    fn levels_radios_and_the_session() {
+        let apps = test_apps();
+        let plan = match_action_intent("Can you take my volume down to 50% please?", &apps).unwrap();
+        assert_eq!(plan[1], serde_json::json!({"type": "system", "op": "volume_set", "value": 50}));
+        let plan = match_action_intent("set the brightness to 30 percent", &apps).unwrap();
+        assert_eq!(plan[1]["op"], "brightness_set");
+        // A step, not a level.
+        assert_eq!(match_action_intent("turn the volume up by 20%", &apps).unwrap()[1]["op"], "volume_up");
+        assert_eq!(match_action_intent("turn off bluetooth", &apps).unwrap()[0]["op"], "bluetooth_off");
+        assert_eq!(match_action_intent("Mavis, turn on Wi-Fi.", &apps).unwrap()[0]["op"], "wifi_on");
+        let plan = match_action_intent("log me out", &apps).unwrap();
+        assert_eq!((plan[0]["type"].as_str(), plan[1]["op"].as_str()), (Some("say"), Some("logout")));
+        assert_eq!(match_action_intent("shut down the computer", &apps).unwrap()[1]["op"], "poweroff");
+        // Only as the whole request.
+        assert!(match_action_intent("how do I log out of my mail", &apps).is_none());
+        assert!(match_action_intent("what does bluetooth off do", &apps).is_none());
+    }
+
+    #[test]
+    fn windows_are_named_after_their_apps() {
+        let apps = vec![
+            AppEntry { name: "Bulk Rename".into(), exec: "thunar --bulk-rename".into(), ..Default::default() },
+            AppEntry { name: "Thunar File Manager".into(), exec: "thunar".into(), ..Default::default() },
+            AppEntry { name: "Haruna".into(), exec: "haruna".into(), ..Default::default() },
+        ];
+        assert_eq!(with_app_name(&window("org.kde.haruna", "film", 1, false), &apps).app_name, "Haruna");
+        assert_eq!(with_app_name(&window("thunar", "Home", 1, false), &apps).app_name, "Thunar File Manager");
+        assert_eq!(with_app_name(&window("unknownapp", "x", 1, false), &apps).app_name, "unknownapp");
+    }
+
     fn file_manager_apps() -> Vec<AppEntry> {
         let mut apps = test_apps();
         apps.push(AppEntry { name: "Thunar File Manager".into(), exec: "thunar %F".into(), opens_links: false, ..Default::default() });
@@ -2784,6 +3188,7 @@ mod tests {
                 exec: exec.into(),
                 opens_links: opens.iter().any(|m| m.ends_with("/https")),
                 opens: opens.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
             }
         }
 
