@@ -330,6 +330,30 @@ impl WindowTracker for LinuxWindowTracker {
         }
     }
 
+    fn focus_workspace(&self, index: u64) -> Result<(), PlatformError> {
+        let n = index.to_string();
+        let ran = match self.compositor {
+            Compositor::Niri => run_ok("niri", &["msg", "action", "focus-workspace", &n]),
+            Compositor::Sway => run_ok("swaymsg", &["workspace", "number", &n]),
+            Compositor::Hyprland => run_ok("hyprctl", &["dispatch", "workspace", &n]),
+            _ => return Err(PlatformError("switching workspaces isn't supported on this desktop yet".into())),
+        };
+        ran.then_some(()).ok_or_else(|| PlatformError(format!("couldn't switch to workspace {}", index)))
+    }
+
+    fn fullscreen_window(&self, id: u64) -> Result<(), PlatformError> {
+        // Focus it first, then the compositor's own full-screen toggle,
+        // which acts on the focused window everywhere.
+        let ran = match self.compositor {
+            Compositor::Niri => {
+                self.focus_window(id)?;
+                run_ok("niri", &["msg", "action", "fullscreen-window"])
+            }
+            _ => return Err(PlatformError("full screen isn't supported on this desktop yet".into())),
+        };
+        ran.then_some(()).ok_or_else(|| PlatformError("couldn't make it full screen".into()))
+    }
+
     /// Resolve the project for a window by walking its process tree.
     /// Verified against real /proc output: a GUI editor's own cwd is
     /// usually just $HOME, but its shell children sit in the real project
@@ -542,6 +566,7 @@ fn parse_desktop_file(content: &str) -> Option<AppEntry> {
     let mut name: Option<String> = None;
     let mut exec: Option<String> = None;
     let mut opens: Vec<String> = Vec::new();
+    let mut kinds: Vec<String> = Vec::new();
     let mut in_entry = false;
 
     for line in content.lines() {
@@ -563,6 +588,10 @@ fn parse_desktop_file(content: &str) -> Option<AppEntry> {
             }
         } else if let Some(v) = line.strip_prefix("MimeType=") {
             opens = v.split(';').filter(|m| !m.is_empty()).map(String::from).collect();
+        } else if let Some(v) = line.strip_prefix("GenericName=") {
+            kinds.extend(v.split_whitespace().map(str::to_lowercase));
+        } else if let Some(v) = line.strip_prefix("Categories=") {
+            kinds.extend(v.split(';').flat_map(category_words));
         } else if let Some(v) = line.strip_prefix("NoDisplay=") {
             if v.eq_ignore_ascii_case("true") {
                 return None;
@@ -584,6 +613,7 @@ fn parse_desktop_file(content: &str) -> Option<AppEntry> {
             exec: strip_field_codes(&e),
             opens_links: opens.iter().any(|m| m == "x-scheme-handler/http" || m == "x-scheme-handler/https"),
             opens,
+            kinds,
         }),
         _ => None,
     }
@@ -660,9 +690,46 @@ fn scan_linux_apps() -> Vec<AppEntry> {
     apps
 }
 
+/// "TerminalEmulator" → ["terminal", "emulator"]. Toolkit and desktop
+/// names say nothing about what an app is for, so they're left out.
+fn category_words(category: &str) -> Vec<String> {
+    if matches!(category, "" | "GTK" | "Qt" | "KDE" | "GNOME" | "XFCE" | "X-XFCE" | "LXQt" | "Application") {
+        return Vec::new();
+    }
+    let mut words = Vec::new();
+    let mut current = String::new();
+    for c in category.chars() {
+        if c.is_uppercase() && !current.is_empty() {
+            words.push(std::mem::take(&mut current));
+        }
+        if c.is_alphanumeric() {
+            current.extend(c.to_lowercase());
+        }
+    }
+    if !current.is_empty() {
+        words.push(current);
+    }
+    words
+}
+
+/// Run a command; true when it ran and succeeded.
+fn run_ok(program: &str, args: &[&str]) -> bool {
+    Command::new(program).args(args).status().is_ok_and(|s| s.success())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_categories_become_words() {
+        assert_eq!(category_words("TerminalEmulator"), vec!["terminal", "emulator"]);
+        assert_eq!(category_words("WebBrowser"), vec!["web", "browser"]);
+        assert!(category_words("GTK").is_empty());
+        let entry = "[Desktop Entry]\nType=Application\nName=kitty\nGenericName=Terminal emulator\nExec=kitty\nCategories=System;TerminalEmulator;\n";
+        let app = parse_desktop_file(entry).unwrap();
+        assert!(app.kinds.contains(&"terminal".to_string()));
+    }
 
     #[test]
     fn workspaces_are_numbered_as_the_user_sees_them() {
