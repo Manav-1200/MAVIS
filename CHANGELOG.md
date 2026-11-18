@@ -14,6 +14,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 192 commits since `v0.3.0-ai-worker`, covering Phases 4 through 8.5.
 
 ### Added
+- **"Close whatever you just opened"** closes the app MAVIS last opened. "Close the active window" works without the model.
 - **Requests in your own words:** when no rule knows a request ("it's way too loud", "kill the browser", "go to my third desktop"), the model picks one of MAVIS's commands, or none. The pick goes through the same rules and confirmations as a spoken command; with none, MAVIS replies as before. Questions go straight to the reply.
 - **Window and system controls by voice:** switch workspace, full screen, volume and brightness to a level, Bluetooth and Wi-Fi on or off, lock, log out, suspend, shut down and restart. The last four ask first.
 - **Apps by what they are:** "open the terminal", "close the browser". MAVIS asks which when several fit.
@@ -43,6 +44,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **"Play X" works with any app**, not just a browser: browsers get the site from `[media]` in `config/config.toml`, media players get a matching file from your Music or Videos folder, and apps with their own link type get a search. The app you last played in is used next time. "Search for X" uses `[web]`. No site or app names in code.
 
 ### Fixed
+- **Questions were acted on:** "No, what application is open on workspace one?" opened About Xfce, and "Can you explain the recent changes…?" opened a YouTube search. Questions now skip the command choice even after "No," or "OK", with a "?" at the end, or as "can you explain" or "I want to know". The model's pick is also ignored if it names an app or site nobody mentioned.
+- **"Close Timeshift" said it wasn't open:** a window named after an app (`timeshift-gtk`) now belongs to it, even when the launcher runs another program.
+- **"What are the vision changes on my system?"** (a mishearing of "recent") is answered by the Sentinel: one misheard word is let through.
 - **MAVIS claimed to do things it hadn't** ("closing the terminal now", "Thunar is now full screen"). Such replies become "I can't do that yet", and a failed action is said out loud with the reason.
 - **A misheard "close Thunar" could have closed the terminal MAVIS runs in.** It never closes its own window now.
 - **MAVIS answered its own voice** picked up by the mic. Its recent words are ignored while it speaks.
