@@ -379,7 +379,16 @@ fn asks_for_recent_changes(w: &[String]) -> bool {
         && matches!(w.first().map(String::as_str), Some("what" | "whats"))
         && has(&["recently", "lately"])
         && has(&["system", "computer", "machine", "laptop", "pc"]);
+    // "What are the recent changes on my system" heard as "…the vision
+    // changes…" (2026-11-18): one word outside the grammar is let through.
+    let unknown = w.iter().filter(|x| !GRAMMAR.contains(&x.as_str())).count();
+    let one_misheard = w.len() <= 9
+        && unknown == 1
+        && matches!(w.first().map(String::as_str), Some("what" | "whats"))
+        && has(&["changes", "updates"])
+        && has(&["system", "computer", "machine", "laptop", "pc"]);
     misheard
+        || one_misheard
         || (!w.is_empty()
             && w.iter().all(|x| GRAMMAR.contains(&x.as_str()))
             && has(&["changes", "updates"])
@@ -472,6 +481,7 @@ mod tests {
             "any recent changes",
             "Mavis, what's since recently on my system?",
             "Well, I want to know what changed on my system recently.",
+            "Mavis, what are the vision changes on my system?",
         ] {
             assert!(is_change_question(q), "should match: {q}");
         }
@@ -481,6 +491,7 @@ mod tests {
     fn other_questions_are_left_for_the_model() {
         for q in [
             "What changed in the Rust release?",
+            "What changes should I make to my system?",
             "what's installed",
             "what have you changed",
             "How do I see what changed in git?",
