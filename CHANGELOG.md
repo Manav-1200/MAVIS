@@ -14,6 +14,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 192 commits since `v0.3.0-ai-worker`, covering Phases 4 through 8.5.
 
 ### Added
+- **Requests in your own words:** when no rule knows a request ("it's way too loud", "kill the browser", "go to my third desktop"), the model picks one of MAVIS's commands, or none. The pick goes through the same rules and confirmations as a spoken command; with none, MAVIS replies as before. Questions go straight to the reply.
 - **Window and system controls by voice:** switch workspace, full screen, volume and brightness to a level, Bluetooth and Wi-Fi on or off, lock, log out, suspend, shut down and restart. The last four ask first.
 - **Apps by what they are:** "open the terminal", "close the browser". MAVIS asks which when several fit.
 - **`[stt]` in `config/config.toml`** — choose the Whisper model (e.g. the English-only `small.en`), device and compute type.
