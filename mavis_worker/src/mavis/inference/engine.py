@@ -349,6 +349,29 @@ class LlamaEngine:
                 break
         return text, finish_reason, tokens, first_token_at
 
+    def choose(self, messages: list[dict[str, str]], max_tokens: int = 24) -> str:
+        """A short, deterministic answer, without the reply clean-up chat() does."""
+        self.load_model()
+        started = time.perf_counter()
+        manual_prompt = self._format_chat_prompt(messages)
+        if manual_prompt is not None:
+            result = self._llm(
+                prompt=manual_prompt,
+                max_tokens=max_tokens,
+                temperature=0.0,
+                stop=[*self._get_stop_tokens(), "\n"],
+            )
+            text = result.get("choices", [{}])[0].get("text", "")
+        else:
+            result = self._llm.create_chat_completion(
+                messages=messages, max_tokens=max_tokens, temperature=0.0
+            )
+            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+        print(
+            f"[engine] Choice in {time.perf_counter() - started:.2f}s: {text.strip()!r}", flush=True
+        )
+        return text
+
     def chat(
         self,
         messages: list[dict[str, str]],
