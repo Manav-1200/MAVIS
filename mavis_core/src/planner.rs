@@ -959,6 +959,90 @@ fn whole_request(text: &str) -> Option<serde_json::Value> {
     })
 }
 
+/// The plan for a close request.
+fn close_plan(close: Close) -> serde_json::Value {
+    let say = |text: String| serde_json::json!({"type": "say", "text": text});
+    match close {
+        Close::Windows { app, ids } => {
+            info!("Planner: close request — {} ({} window(s))", app, ids.len());
+            serde_json::json!([
+                {"type": "close", "app": app, "windows": ids},
+                {"type": "say", "text": format!("Closed {}.", app)},
+            ])
+        }
+        Close::NotOpen(app) => say(format!("{} isn't open.", app)),
+        Close::Unsupported => say("I can't close windows on this desktop yet.".into()),
+        Close::NoFocus => say("I can't tell which window is focused. Which app should I close?".into()),
+        Close::Mine(app) => say(format!("That {} window is the one I'm running in, so I won't close it.", app)),
+        Close::Which(names) => say(which_one(&names)),
+    }
+}
+
+/// Every request the rules carry out, in words they match. The model picks
+/// one of these, and its pick goes back through the rules, so the two
+/// can't drift apart.
+fn command_menu() -> Vec<String> {
+    let mut menu: Vec<String> = [
+        "open <app>",
+        "close <app>",
+        "close this window",
+        "play <what>",
+        "play <what> on <site or app>",
+        "search <site> for <what>",
+        "volume to <number> percent",
+        "brightness to <number> percent",
+        "switch to workspace <number>",
+        "full screen <app>",
+    ]
+    .iter()
+    .map(|c| c.to_string())
+    .collect();
+    menu.extend(SYSTEM_INTENTS.iter().chain(WHOLE_REQUESTS).map(|(phrases, _, _)| phrases[0].to_string()));
+    menu
+}
+
+/// Worth asking the model which command was meant. Questions go straight
+/// to the reply; a request names something MAVIS acts on (a word from the
+/// rules' own phrases, or an installed app or kind of app) or is worded
+/// as one.
+fn sounds_like_request(text: &str, apps: &[AppEntry]) -> bool {
+    let t = normalize(strip_address(&text.to_lowercase()).replace("wi-fi", "wifi").as_str());
+    let words: Vec<&str> = t.split_whitespace().collect();
+    let Some(first) = words.first() else { return false };
+    const ASKING: &[&str] = &[
+        "what", "whats", "why", "who", "whos", "when", "where", "how", "hows", "which",
+        "is", "are", "was", "were", "do", "does", "did", "tell", "explain", "describe",
+    ];
+    if ASKING.contains(first) {
+        return false;
+    }
+    let has = |phrase: &str| {
+        let phrase = normalize(phrase);
+        !phrase.is_empty() && format!(" {} ", t).contains(&format!(" {} ", phrase))
+    };
+    // "make it louder", "can you…": worded as a request.
+    const ASKING_FOR: &[&str] = &[
+        "can you", "could you", "would you", "will you", "please", "i want", "i need", "id like",
+        "make", "let", "get", "turn", "set", "put", "kill", "quit", "exit", "start",
+    ];
+    if ASKING_FOR.iter().any(|p| has(p)) {
+        return true;
+    }
+    // The rules' own words, and their stems: "loud" for "louder".
+    const FILLER: &[&str] = &["the", "a", "to", "on", "my", "me", "this", "it", "for", "of", "up", "down", "out"];
+    let known = SYSTEM_INTENTS
+        .iter()
+        .chain(WHOLE_REQUESTS)
+        .flat_map(|(phrases, _, _)| phrases.iter())
+        .chain(["open", "close", "window", "play", "search", "workspace", "full screen", "volume", "brightness"].iter())
+        .flat_map(|p| p.split_whitespace())
+        .filter(|w| !FILLER.contains(w))
+        .collect::<std::collections::HashSet<_>>();
+    let knows = |w: &str| known.iter().any(|k| *k == w || (w.len() >= 4 && k.starts_with(w)));
+    words.iter().any(|w| knows(w))
+        || apps.iter().any(|a| has(&a.name) || a.kinds.iter().any(|k| has(k)))
+}
+
 /// What "close <app>" turned out to mean.
 #[derive(Debug, PartialEq)]
 enum Close {
@@ -1483,30 +1567,7 @@ impl Planner {
             return Ok(());
         }
 
-        if let Some(close) = close {
-            let plan = match close {
-                Close::Windows { app, ids } => {
-                    info!("Planner: close request — {} ({} window(s))", app, ids.len());
-                    serde_json::json!([
-                        {"type": "close", "app": app, "windows": ids},
-                        {"type": "say", "text": format!("Closed {}.", app)},
-                    ])
-                }
-                Close::NotOpen(app) => serde_json::json!({"type": "say", "text": format!("{} isn't open.", app)}),
-                Close::Unsupported => serde_json::json!({
-                    "type": "say",
-                    "text": "I can't close windows on this desktop yet."
-                }),
-                Close::NoFocus => serde_json::json!({
-                    "type": "say",
-                    "text": "I can't tell which window is focused. Which app should I close?"
-                }),
-                Close::Mine(app) => serde_json::json!({
-                    "type": "say",
-                    "text": format!("That {} window is the one I'm running in, so I won't close it.", app)
-                }),
-                Close::Which(names) => serde_json::json!({"type": "say", "text": which_one(&names)}),
-            };
+        if let Some(plan) = self.rule_plan(intent).await {
             self.bus.publish(Event {
                 id: uuid::Uuid::new_v4(),
                 timestamp: chrono::Utc::now(),
@@ -1514,72 +1575,81 @@ impl Planner {
                 event_type: EventType::PlanReady,
                 payload: serde_json::json!({ "plan": plan }),
             });
-            return Ok(());
-        }
-
-        if let Some(plan) = window {
-            info!("Planner: window request — {}", plan);
-            self.bus.publish(Event {
-                id: uuid::Uuid::new_v4(),
-                timestamp: chrono::Utc::now(),
-                source: "planner".to_string(),
-                event_type: EventType::PlanReady,
-                payload: serde_json::json!({ "plan": plan }),
-            });
-            return Ok(());
-        }
-
-        if is_undo_request(intent) {
-            info!("Planner: undo request");
-            self.bus.publish(Event {
-                id: uuid::Uuid::new_v4(),
-                timestamp: chrono::Utc::now(),
-                source: "planner".to_string(),
-                event_type: EventType::PlanReady,
-                payload: serde_json::json!({ "plan": { "type": "undo" } }),
-            });
-            return Ok(());
-        }
-
-        // Action intents — deterministic, no LLM round trip. Emitted as a
-        // say+action plan so the user gets spoken confirmation.
-        if let Some(mut plan) = match_action_intent(intent, &self.apps) {
-            resolve_media(&mut plan, &self.apps, &self.media).await;
-            info!("Planner: matched action intent — {}", plan);
-            let plan_event = Event {
-                id: uuid::Uuid::new_v4(),
-                timestamp: chrono::Utc::now(),
-                source: "planner".to_string(),
-                event_type: EventType::PlanReady,
-                payload: serde_json::json!({ "plan": plan }),
-            };
-            self.bus.publish(plan_event);
             return Ok(());
         }
 
         let working_memory = self.build_working_memory(intent, event.id).await;
 
         // Only send the user message — build_chat_messages() in Python owns the system prompt.
-        let worker_req = Event {
+        let chat = serde_json::json!({
+            "request_type": "chat",
+            "messages": [
+                {"role": "user", "content": user_message}
+            ],
+            // Replies are cut to three sentences / 320 characters
+            // after generation, about 80 tokens. The worker stops at
+            // that point itself; this is the backstop.
+            "max_tokens": 128,
+            "temperature": 0.7,
+            "working_memory": working_memory
+        });
+        // Said in words the rules don't know: the model picks one of the
+        // commands, or none, and the chat request rides along for "none".
+        let payload = if sounds_like_request(intent, &self.apps) {
+            info!("Planner: no rule matched — asking the model which command this is");
+            let windows: Vec<String> = {
+                let wm = self.working.read().await;
+                wm.open_windows.iter().map(|w| with_app_name(w, &self.apps).app_name).collect()
+            };
+            serde_json::json!({
+                "request_type": "choose_command",
+                "text": intent,
+                "commands": command_menu(),
+                "apps": self.apps.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+                "windows": windows,
+                "chat": chat,
+            })
+        } else {
+            chat
+        };
+        self.bus.publish(Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
             source: "planner".to_string(),
             event_type: EventType::WorkerRequest,
-            payload: serde_json::json!({
-                "request_type": "chat",
-                "messages": [
-                    {"role": "user", "content": user_message}
-                ],
-                // Replies are cut to three sentences / 320 characters
-                // after generation, about 80 tokens. The worker stops at
-                // that point itself; this is the backstop.
-                "max_tokens": 128,
-                "temperature": 0.7,
-                "working_memory": working_memory
-            }),
-        };
-        self.bus.publish(worker_req);
+            payload,
+        });
         Ok(())
+    }
+
+    /// What the rules make of `text`: closing, windows, undo, then actions.
+    /// None when no rule knows it. Also runs the model's chosen command.
+    async fn rule_plan(&self, text: &str) -> Option<serde_json::Value> {
+        let (close, window) = {
+            let wm = self.working.read().await;
+            let windows = with_focus(&wm.open_windows, wm.active_window.as_ref());
+            (
+                close_request_sparing(text, &windows, &self.apps, &self.spared),
+                window_request(text, &windows, &self.apps),
+            )
+        };
+        if let Some(close) = close {
+            return Some(close_plan(close));
+        }
+        if let Some(plan) = window {
+            info!("Planner: window request — {}", plan);
+            return Some(plan);
+        }
+        if is_undo_request(text) {
+            info!("Planner: undo request");
+            return Some(serde_json::json!({ "type": "undo" }));
+        }
+        // Action intents — deterministic, no LLM round trip. Emitted as a
+        // say+action plan so the user gets spoken confirmation.
+        let mut plan = match_action_intent(text, &self.apps)?;
+        resolve_media(&mut plan, &self.apps, &self.media).await;
+        info!("Planner: matched action intent — {}", plan);
+        Some(plan)
     }
 
     /// The Sentinel's part in this turn. Failures return None, so a broken
@@ -1991,6 +2061,42 @@ impl Planner {
                     }),
                 };
                 self.bus.publish(plan_event);
+            }
+            "command" => {
+                let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or_default();
+                let command = payload.get("command").and_then(|v| v.as_str()).unwrap_or_default().trim();
+                let chosen = if command.is_empty()
+                    || command.eq_ignore_ascii_case("none")
+                    || normalize(command) == normalize(text)
+                {
+                    None
+                } else {
+                    self.rule_plan(command).await
+                };
+                match chosen {
+                    Some(plan) => {
+                        info!("Planner: model chose \"{}\" for \"{}\"", command, text);
+                        self.bus.publish(Event {
+                            id: uuid::Uuid::new_v4(),
+                            timestamp: chrono::Utc::now(),
+                            source: "planner".to_string(),
+                            event_type: EventType::PlanReady,
+                            payload: serde_json::json!({ "plan": plan }),
+                        });
+                    }
+                    None => {
+                        info!("Planner: no command for \"{}\" (model said \"{}\") — replying", text, command);
+                        if let Some(chat) = payload.get("chat").filter(|c| c.is_object()) {
+                            self.bus.publish(Event {
+                                id: uuid::Uuid::new_v4(),
+                                timestamp: chrono::Utc::now(),
+                                source: "planner".to_string(),
+                                event_type: EventType::WorkerRequest,
+                                payload: chat.clone(),
+                            });
+                        }
+                    }
+                }
             }
             "error" => {
                 let error_msg = payload
@@ -3327,6 +3433,43 @@ mod tests {
             assert!(found.ends_with("Pop/Maroon 5 - Daylight.mp3"));
             assert!(find_media_file("sunrise", std::slice::from_ref(&dir)).is_none());
             let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Only requests the rules missed reach the model; questions don't.
+    #[test]
+    fn requests_in_other_words_go_to_the_model() {
+        let apps = desktop_apps();
+        for text in [
+            "it's way too loud", "kill the browser", "make it brighter", "can you silence everything",
+            "get rid of brave", "I need the internet off", "MAVIS, quit kitty",
+        ] {
+            assert!(sounds_like_request(text, &apps), "{}", text);
+        }
+        for text in [
+            "what's the capital of France", "how do I turn off bluetooth", "tell me a joke",
+            "I had a long day", "thanks", "", "is it going to rain",
+        ] {
+            assert!(!sounds_like_request(text, &apps), "{}", text);
+        }
+    }
+
+    /// Whatever the model picks from the menu, the rules carry out.
+    #[test]
+    fn every_command_on_the_menu_is_one_the_rules_know() {
+        let apps = desktop_apps();
+        let open = [window("firefox", "News", 1, true)];
+        for command in command_menu() {
+            let filled = command
+                .replace("<app>", "firefox")
+                .replace("<what>", "lofi")
+                .replace("<site or app>", "youtube")
+                .replace("<site>", "youtube")
+                .replace("<number>", "3");
+            let known = close_request(&filled, &open, &apps).is_some()
+                || window_request(&filled, &open, &apps).is_some()
+                || match_action_intent(&filled, &apps).is_some();
+            assert!(known, "{} (as \"{}\")", command, filled);
         }
     }
 }
