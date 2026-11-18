@@ -164,3 +164,51 @@ def build_chat_messages(
             messages.append({"role": role, "content": content})
 
     return messages
+
+
+# Picking a command for a request the rules didn't recognise. The commands,
+# apps and windows come from the core, so nothing here names any of them.
+CHOOSE_PROMPT = """You turn what the user said into one command for a desktop assistant.
+Answer with exactly one command from the list, with the <parts> filled in from what the user said, or with NONE.
+Answer NONE when the user is asking a question, chatting, or wants something no command does.
+Use only app names from the installed or open lists. Never explain.
+
+Commands:
+{commands}
+
+Installed apps: {apps}
+Open windows: {windows}
+
+Examples of the kind of mapping wanted:
+"it's way too loud" -> volume down
+"get rid of this window" -> close this window
+"go to my third desktop" -> switch to workspace 3
+"what's the capital of France" -> NONE
+"thanks, that's all" -> NONE"""
+
+
+def choose_messages(
+    text: str, commands: list[str], apps: list[str], windows: list[str]
+) -> list[dict[str, str]]:
+    def listed(names: list[str]) -> str:
+        return ", ".join(dict.fromkeys(n for n in names if n)) or "none"
+
+    system = CHOOSE_PROMPT.format(
+        commands="\n".join(f"- {c}" for c in commands),
+        apps=listed(apps),
+        windows=listed(windows),
+    )
+    return [
+        {"role": "system", "content": system},
+        {"role": "user", "content": f'"{text}" ->'},
+    ]
+
+
+def clean_command(raw: str) -> str:
+    """The command from the model's answer, or NONE."""
+    line = next((ln.strip() for ln in raw.strip().splitlines() if ln.strip()), "")
+    line = re.sub(r"^(?:->|-|command:|answer:)\s*", "", line, flags=re.IGNORECASE)
+    line = line.strip().strip("\"'`").strip().rstrip(".!")
+    if not line or "<" in line or len(line) > 80 or line.upper().startswith("NONE"):
+        return "NONE"
+    return line
