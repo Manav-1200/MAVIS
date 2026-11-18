@@ -1946,6 +1946,48 @@ The capture level clipped eight times ("Input at 1.18× full scale"). That's a s
   - How often Phi-3 picks right.
   - How long the extra call takes on the user's GPU.
 
+## 41. The 2026-11-18 run
+
+*2026-11-18.* A five-minute run, just after a system update. The command choice from §40 ran six times. Two picks were right: "close the active window" became "close this window", and closing Timeshift was asked first. One was right but stopped by the own-window guard. Three were wrong, and two of those acted. The orb followed the cursor while dragging on niri, as on Sway. The window and app count ("3 workspaces, 5 apps") was right.
+
+### Problem · Questions were acted on
+- "Can you explain in detail about the recent changes to permission and system upgrades?" The model picked "search Firefox for recent changes…", and a YouTube search opened.
+- "I want to know what is open on my workspace one." The model picked "switch to workspace 1".
+- "No, what application is open on Workspace ONE?" The model picked "open About Xfce", and the app opened. It was named nowhere in the question.
+
+There were two causes. The question check looked only at the first word, which was "No". It also took "can you…" and "I want…" as requests. And nothing checked the pick against what was said.
+
+**Fix:**
+- **Questions skip the choice:**
+  - The check now looks past openers ("no", "ok", "so", "well", …).
+  - "Can you tell / explain / describe" and "want to know" / "wonder" count as asking.
+  - A transcript ending in "?" counts as asking, unless it opens "can / could / would / will you".
+- **The pick must come from what was said:**
+  - Every word of it must be one the user said, a fixed word of the commands, or the name of an app the user named or described by kind ("the browser").
+  - A number counts only if a number or ordinal was said.
+  - A pick that fails is ignored, and MAVIS replies instead.
+- The model's prompt has examples that call for NONE: what's open on a workspace, and "can you explain".
+
+**Evidence:**
+- **Proven** (tests): all three transcripts now skip the choice, and both made-up picks are rejected. "Kill the browser" → "close firefox", "go to my second desktop" → "switch to workspace 2" and "shut time shift" → "close Timeshift" still pass.
+- **Measured:**
+  - A pick takes 0.75–1.15 s.
+  - The reply prompt has to be read again after a pick: 0.73–0.78 s instead of 0.05 s. This happens at speech start, while the user is talking, so it isn't heard.
+
+### Problem · "Close time shift": "Timeshift isn't open"
+It was open and focused. Its window is `timeshift-gtk`, but its launcher runs `timeshift-launcher`, so neither the program nor the name matched. **Fix:** a window whose ID begins with the app's name (spaces dropped) belongs to that app. Window names in replies use the same rule, which also fixes "timeshift-gtk" being read out. **Proven** (test). **Reasoned:** that Arch's launcher file is as described.
+
+### New · "Close whatever you just opened"
+The user asked this after About Xfce opened, but the log has no such sentence. The nearest is "Close the system status zone", two minutes earlier, before anything had been opened. Either way, it's a fair request. The planner now remembers the last app it opened, and the phrase becomes "close <that app>", with the usual question first. It's also on the model's list. "Close the active window / the focused window / the current window" now matches the rules directly. **Proven** (tests).
+
+### Problem · "What are the vision changes on my system?"
+The user said "recent". The exact wording already reached the Sentinel, but the mishearing didn't. The mic was clipping at the time (1.15×, then 1.00). **Fix:** a short what-question that has "changes" or "updates" and "my system" may contain one word outside the grammar. "What changes should I make to my system?" has three, and still goes to the model. **Proven** (test).
+
+### Open
+- **"A new program that runs as root appeared: libgtop_server2."** This came in the same summary as "libgtop_server2 is no longer setuid", so the update probably moved the file. That would be reported as one move, not as a critical new root program. Waiting on the file's location before changing anything.
+- **"Conf mural."** (confidence 0.55) interrupted a reply and got "I'm ready to assist." The user doesn't recall what was said.
+- **The mic still clips.** `wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35` doesn't seem to have held.
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
