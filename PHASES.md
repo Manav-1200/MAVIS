@@ -454,6 +454,17 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.22 — Questions stay questions (2026-11-18)
+
+Details in [`DECISIONS.md` §41](DECISIONS.md#41-the-2026-11-18-run).
+
+- [x] **Questions skip the command choice**: after "No," or "OK", ending in "?", "can you explain", "I want to know"
+- [x] **The model's pick must come from what was said**: no apps or sites nobody mentioned
+- [x] "Close whatever you just opened"; "close the active window" without the model
+- [x] Windows named after their app (`timeshift-gtk` is Timeshift)
+- [x] Change questions with one misheard word reach the Sentinel
+- [ ] Try on hardware; libgtop_server2 "new root program" alert (waiting on where the file lives now)
+
 ### 6.21 — Requests in your own words (2026-11-17)
 
 Details in [`DECISIONS.md` §40](DECISIONS.md#40-the-model-picks-the-command-the-rules-carry-it-out).
@@ -461,7 +472,7 @@ Details in [`DECISIONS.md` §40](DECISIONS.md#40-the-model-picks-the-command-the
 - [x] **The model picks a command** from the rules' own list when no rule matched, or none
 - [x] **The pick goes back through the rules**, with the same confirmations; none means the usual reply
 - [x] Questions skip it; the command list is built from the rules, so the two can't drift
-- [ ] Try on hardware: accuracy of the picks, and the added wait
+- [x] Tried on hardware (§41): picks take 0.75–1.15 s; questions were mistaken for requests, fixed in 6.22
 
 ### 6.20 — Honest, safe, and more capable (2026-11-17)
 
