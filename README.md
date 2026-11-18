@@ -170,7 +170,7 @@ Some phrases are handled directly by the planner without an LLM round trip, so t
 | "open Firefox and play lofi" | Plays it in the app just opened, if that app can play anything |
 | "brighter", "dim the screen" | Adjusts brightness |
 
-Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. A request said in other words ("it's way too loud", "get rid of this window") goes to the model with the list of commands MAVIS knows, and it picks one or none. Its pick then goes through the same rules and the same "Shall I…?" as a spoken command, so it can only choose what MAVIS can already do. Anything else goes to the local model with context attached. The model can't act, and a reply that claims an action ("closing the terminal now") is replaced with "I can't do that yet." If an action fails, MAVIS says so and why.
+Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. A request said in other words ("it's way too loud", "get rid of this window") goes to the model with the list of commands MAVIS knows, and it picks one or none. Its pick then goes through the same rules and the same "Shall I…?" as a spoken command, so it can only choose what MAVIS can already do. A pick that names an app or site you never mentioned is ignored, and questions never reach this step. Anything else goes to the local model with context attached. The model can't act, and a reply that claims an action ("closing the terminal now") is replaced with "I can't do that yet." If an action fails, MAVIS says so and why.
 
 An utterance that starts with an explicit action is never treated as system control — "google how to mute a tab" searches rather than muting your machine.
 
