@@ -171,7 +171,7 @@ def build_chat_messages(
 CHOOSE_PROMPT = """You turn what the user said into one command for a desktop assistant.
 Answer with exactly one command from the list, with the <parts> filled in from what the user said, or with NONE.
 Answer NONE when the user is asking a question, chatting, or wants something no command does.
-Use only app names from the installed or open lists. Never explain.
+Use only app names the user said, or that fit what the user described, from the installed or open lists. Never explain.
 
 Commands:
 {commands}
@@ -183,7 +183,10 @@ Examples of the kind of mapping wanted:
 "it's way too loud" -> volume down
 "get rid of this window" -> close this window
 "go to my third desktop" -> switch to workspace 3
+"close whatever you just opened" -> close what you just opened
 "what's the capital of France" -> NONE
+"what is open on my second workspace" -> NONE
+"can you explain the latest update" -> NONE
 "thanks, that's all" -> NONE"""
 
 
