@@ -18,6 +18,8 @@ from mavis.inference import (
     SYSTEM_PROMPT,
     LlamaEngine,
     build_chat_messages,
+    choose_messages,
+    clean_command,
     drop_name,
     user_name,
 )
@@ -177,6 +179,8 @@ class WorkerServer:
             return await self._health()
         elif req_type == "chat":
             return await self._chat(payload)
+        elif req_type == "choose_command":
+            return await self._choose_command(payload)
         elif req_type == "generate":
             return await self._generate(payload)
         elif req_type == "stt":
@@ -264,6 +268,36 @@ class WorkerServer:
                     "error": f"Inference failed: {e!s}",
                 }
             )
+
+    async def _choose_command(self, payload: dict) -> dict:
+        """Which of the core's commands the user meant, or NONE.
+
+        The chat request comes back too, so the core can reply instead.
+        """
+        text = payload.get("text", "")
+        messages = choose_messages(
+            text,
+            payload.get("commands", []) or [],
+            payload.get("apps", []) or [],
+            payload.get("windows", []) or [],
+        )
+        try:
+            loop = asyncio.get_event_loop()
+            raw = await loop.run_in_executor(
+                self.llm_executor, lambda: self.engine.choose(messages)
+            )
+            command = clean_command(raw)
+        except (RuntimeError, OSError, ValueError) as e:
+            print(f"[worker] Choosing a command failed: {e!s}", flush=True)
+            command = "NONE"
+        return _make_event(
+            {
+                "type": "command",
+                "text": text,
+                "command": command,
+                "chat": payload.get("chat"),
+            }
+        )
 
     async def _generate(self, payload: dict) -> dict:
         prompt = payload.get("prompt", "")
