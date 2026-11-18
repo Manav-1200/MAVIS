@@ -897,10 +897,11 @@ fn app_owns(app: Option<&AppEntry>, words: &str, w: &WindowInfo) -> bool {
                 .next()
                 .map(|b| normalize(b.rsplit('/').next().unwrap_or(&b)))
                 .unwrap_or_default();
-            !binary.is_empty()
-                && (window_words == binary
-                    || window_words == normalize(&a.name)
-                    || window_words.split(' ').any(|w| w == binary))
+            let compact_name: String = normalize(&a.name).split_whitespace().collect();
+            let first_word = window_words.split(' ').next().unwrap_or_default();
+            (!binary.is_empty() && (window_words == binary || window_words.split(' ').any(|w| w == binary)))
+                || window_words == normalize(&a.name)
+                || (!compact_name.is_empty() && first_word == compact_name)
         }
         None => window_words == normalize(words),
     }
@@ -978,6 +979,27 @@ fn close_plan(close: Close) -> serde_json::Value {
     }
 }
 
+/// "Close whatever you just opened", "close what you opened".
+fn closes_what_was_opened(text: &str) -> bool {
+    let t = normalize(&text.to_lowercase());
+    t.contains("close ") && ["you just opened", "you opened", "you just launched", "you launched", "you just started"]
+        .iter()
+        .any(|p| t.contains(p))
+}
+
+/// The installed app a plan launches, by its program.
+fn launched_app(plan: &serde_json::Value, apps: &[AppEntry]) -> Option<String> {
+    let actions = plan.as_array().cloned().unwrap_or_else(|| vec![plan.clone()]);
+    let target = actions
+        .iter()
+        .find(|a| a.get("type").and_then(|t| t.as_str()) == Some("app"))?
+        .get("target")?
+        .as_str()?
+        .to_string();
+    let program = |exec: &str| crate::util::split_command_line(exec).into_iter().next().unwrap_or_default();
+    apps.iter().find(|a| program(&a.exec) == target || program(&a.exec).rsplit('/').next() == target.rsplit('/').next()).map(|a| a.name.clone())
+}
+
 /// Every request the rules carry out, in words they match. The model picks
 /// one of these, and its pick goes back through the rules, so the two
 /// can't drift apart.
@@ -986,6 +1008,7 @@ fn command_menu() -> Vec<String> {
         "open <app>",
         "close <app>",
         "close this window",
+        "close what you just opened",
         "play <what>",
         "play <what> on <site or app>",
         "search <site> for <what>",
@@ -1001,13 +1024,54 @@ fn command_menu() -> Vec<String> {
     menu
 }
 
+/// Whether every word of the model's pick comes from what was said, from
+/// the commands' own words, or from an app the user named or described.
+/// A number counts if one was said. "Open About Xfce" for "what is open
+/// on workspace one" is rejected: the model made up the app.
+fn grounded(command: &str, text: &str, apps: &[AppEntry]) -> bool {
+    let clean = |s: &str| normalize(&s.to_lowercase().replace("wi-fi", "wifi").replace('%', " percent"));
+    let said = clean(text);
+    let said_words: std::collections::HashSet<&str> = said.split_whitespace().collect();
+    let compact: String = said.split_whitespace().collect();
+    const ORDINALS: &[&str] = &[
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
+    ];
+    let said_number = said_words.iter().any(|w| number_word(w).is_some() || ORDINALS.contains(w));
+    let mut allowed: std::collections::HashSet<String> = command_menu()
+        .iter()
+        .flat_map(|c| c.split_whitespace())
+        .filter(|w| !w.contains('<') && !w.contains('>'))
+        .map(str::to_string)
+        .collect();
+    for app in apps {
+        let name = clean(&app.name);
+        let named = !name.is_empty() && compact.contains(&name.split_whitespace().collect::<String>());
+        if named || app.kinds.iter().any(|k| said_words.contains(k.as_str())) {
+            allowed.extend(name.split_whitespace().map(str::to_string));
+        }
+    }
+    clean(command).split_whitespace().all(|w| {
+        said_words.contains(w)
+            || allowed.contains(w)
+            || (w.len() >= 3 && compact.contains(w))
+            || (said_number && w.parse::<u64>().is_ok())
+    })
+}
+
 /// Worth asking the model which command was meant. Questions go straight
 /// to the reply; a request names something MAVIS acts on (a word from the
 /// rules' own phrases, or an installed app or kind of app) or is worded
 /// as one.
 fn sounds_like_request(text: &str, apps: &[AppEntry]) -> bool {
     let t = normalize(strip_address(&text.to_lowercase()).replace("wi-fi", "wifi").as_str());
-    let words: Vec<&str> = t.split_whitespace().collect();
+    let mut words: Vec<&str> = t.split_whitespace().collect();
+    // "No, what…", "OK so…": the opener says nothing about the request.
+    const OPENERS: &[&str] = &[
+        "no", "ok", "okay", "so", "and", "but", "well", "hey", "yes", "yeah", "um", "uh", "right", "alright", "now",
+    ];
+    while words.first().is_some_and(|w| OPENERS.contains(w)) {
+        words.remove(0);
+    }
     let Some(first) = words.first() else { return false };
     const ASKING: &[&str] = &[
         "what", "whats", "why", "who", "whos", "when", "where", "how", "hows", "which",
@@ -1016,10 +1080,22 @@ fn sounds_like_request(text: &str, apps: &[AppEntry]) -> bool {
     if ASKING.contains(first) {
         return false;
     }
+    let t = words.join(" ");
     let has = |phrase: &str| {
         let phrase = normalize(phrase);
         !phrase.is_empty() && format!(" {} ", t).contains(&format!(" {} ", phrase))
     };
+    // "Can you explain…", "I want to know…": asking to be told.
+    let polite = matches!(words.as_slice(), ["can" | "could" | "would" | "will", "you", ..]);
+    if polite && words.get(2).is_some_and(|w| matches!(*w, "tell" | "explain" | "describe" | "say" | "remind")) {
+        return false;
+    }
+    if ["want to know", "like to know", "wonder", "wondering"].iter().any(|p| has(p)) {
+        return false;
+    }
+    if text.trim_end().ends_with('?') && !polite {
+        return false;
+    }
     // "make it louder", "can you…": worded as a request.
     const ASKING_FOR: &[&str] = &[
         "can you", "could you", "would you", "will you", "please", "i want", "i need", "id like",
@@ -1124,7 +1200,7 @@ fn close_request_unguarded(text: &str, windows: &[WindowInfo], apps: &[AppEntry]
             words == target
                 || words.starts_with(&format!("{} ", target))
                 || binary.as_deref().is_some_and(|b| normalize(b) == words || b == w.app_name.to_lowercase())
-                || app.is_some_and(|a| normalize(&a.name) == words)
+                || app.is_some_and(|a| normalize(&a.name) == words || app_owns(Some(a), "", w))
         })
         .collect();
 
@@ -1195,7 +1271,11 @@ pub fn own_process_tree() -> std::collections::HashSet<u32> {
 /// outright, so "how do I close it" is still a question.
 fn close_focused(t: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Option<Close> {
     let rest = request_body(t).strip_prefix("close ")?;
-    if !matches!(rest, "it" | "this" | "that" | "this window" | "that window" | "the window" | "this app") {
+    if !matches!(
+        rest,
+        "it" | "this" | "that" | "this window" | "that window" | "the window" | "this app"
+            | "the active window" | "the focused window" | "the current window" | "the active app"
+    ) {
         return None;
     }
     let Some(focused) = windows.iter().find(|w| w.is_focused) else {
@@ -1356,6 +1436,8 @@ pub struct Planner {
     media: Media,
     /// MAVIS's own process tree, whose windows are never closed.
     spared: std::collections::HashSet<u32>,
+    /// The app MAVIS last opened, for "close what you just opened".
+    last_opened: std::sync::Mutex<Option<String>>,
 }
 
 impl Planner {
@@ -1384,6 +1466,7 @@ impl Planner {
             speaking: None,
             media: Media::default(),
             spared: own_process_tree(),
+            last_opened: std::sync::Mutex::new(None),
         }
     }
 
@@ -1625,6 +1708,16 @@ impl Planner {
     /// What the rules make of `text`: closing, windows, undo, then actions.
     /// None when no rule knows it. Also runs the model's chosen command.
     async fn rule_plan(&self, text: &str) -> Option<serde_json::Value> {
+        let remembered;
+        let text = if closes_what_was_opened(text) {
+            let Some(name) = self.last_opened.lock().ok().and_then(|n| n.clone()) else {
+                return Some(serde_json::json!({"type": "say", "text": "I haven't opened anything yet."}));
+            };
+            remembered = format!("close {}", name);
+            remembered.as_str()
+        } else {
+            text
+        };
         let (close, window) = {
             let wm = self.working.read().await;
             let windows = with_focus(&wm.open_windows, wm.active_window.as_ref());
@@ -1649,6 +1742,11 @@ impl Planner {
         let mut plan = match_action_intent(text, &self.apps)?;
         resolve_media(&mut plan, &self.apps, &self.media).await;
         info!("Planner: matched action intent — {}", plan);
+        if let Some(name) = launched_app(&plan, &self.apps) {
+            if let Ok(mut last) = self.last_opened.lock() {
+                *last = Some(name);
+            }
+        }
         Some(plan)
     }
 
@@ -2069,6 +2167,9 @@ impl Planner {
                     || command.eq_ignore_ascii_case("none")
                     || normalize(command) == normalize(text)
                 {
+                    None
+                } else if !grounded(command, text, &self.apps) {
+                    info!("Planner: model chose \"{}\", which uses words never said — ignored", command);
                     None
                 } else {
                     self.rule_plan(command).await
@@ -3443,12 +3544,17 @@ mod tests {
         for text in [
             "it's way too loud", "kill the browser", "make it brighter", "can you silence everything",
             "get rid of brave", "I need the internet off", "MAVIS, quit kitty",
+            "Close the active window, Mavis.", "Can you turn off bluetooth?",
         ] {
             assert!(sounds_like_request(text, &apps), "{}", text);
         }
         for text in [
             "what's the capital of France", "how do I turn off bluetooth", "tell me a joke",
             "I had a long day", "thanks", "", "is it going to rain",
+            // From the 2026-11-18 run, all three acted on by mistake.
+            "Can you explain in detail about the recent changes to permission and system upgrades?",
+            "I want to know what is open on my workspace one.",
+            "No, what application is open on Workspace ONE?",
         ] {
             assert!(!sounds_like_request(text, &apps), "{}", text);
         }
@@ -3466,10 +3572,57 @@ mod tests {
                 .replace("<site or app>", "youtube")
                 .replace("<site>", "youtube")
                 .replace("<number>", "3");
-            let known = close_request(&filled, &open, &apps).is_some()
+            let known = closes_what_was_opened(&filled)
+                || close_request(&filled, &open, &apps).is_some()
                 || window_request(&filled, &open, &apps).is_some()
                 || match_action_intent(&filled, &apps).is_some();
             assert!(known, "{} (as \"{}\")", command, filled);
         }
+    }
+
+    /// The model may not bring in apps or sites nobody mentioned.
+    #[test]
+    fn the_models_pick_must_come_from_what_was_said() {
+        let mut apps = desktop_apps();
+        apps.push(AppEntry { name: "About Xfce".into(), exec: "xfce4-about".into(), ..Default::default() });
+        apps.push(AppEntry { name: "Timeshift".into(), exec: "timeshift-launcher".into(), ..Default::default() });
+        for (command, text) in [
+            ("volume down", "it's way too loud"),
+            ("close this window", "get rid of this window"),
+            ("switch to workspace 2", "go to my second desktop"),
+            ("turn off wifi", "I need the wi-fi off"),
+            ("close firefox", "kill the browser"),
+            ("close Timeshift", "shut time shift"),
+            ("close what you just opened", "close whatever you just opened"),
+        ] {
+            assert!(grounded(command, text, &apps), "{} for {}", command, text);
+        }
+        for (command, text) in [
+            ("open About Xfce", "No, what application is open on Workspace ONE?"),
+            ("search Firefox for recent changes", "Can you explain the recent changes?"),
+            ("switch to workspace 2", "go to the other desktop"),
+        ] {
+            assert!(!grounded(command, text, &apps), "{} for {}", command, text);
+        }
+    }
+
+    /// "timeshift-gtk" is Timeshift's window, though its launcher runs
+    /// timeshift-launcher.
+    #[test]
+    fn windows_named_after_the_app_belong_to_it() {
+        let apps = vec![AppEntry { name: "Timeshift".into(), exec: "timeshift-launcher".into(), ..Default::default() }];
+        let open = [window("timeshift-gtk", "Timeshift", 3, true)];
+        assert_eq!(with_app_name(&open[0], &apps).app_name, "Timeshift");
+        assert!(matches!(close_request("close time shift", &open, &apps), Some(Close::Windows { .. })));
+        assert!(matches!(close_request("close the active window", &open, &apps), Some(Close::Windows { .. })));
+    }
+
+    #[test]
+    fn what_mavis_opened_is_remembered() {
+        let apps = vec![AppEntry { name: "About Xfce".into(), exec: "xfce4-about".into(), ..Default::default() }];
+        let plan = match_action_intent("open about xfce", &apps).unwrap();
+        assert_eq!(launched_app(&plan, &apps).as_deref(), Some("About Xfce"));
+        assert!(closes_what_was_opened("Close whatever you just opened"));
+        assert!(!closes_what_was_opened("what did you just open"));
     }
 }
