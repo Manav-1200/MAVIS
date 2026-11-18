@@ -1915,6 +1915,37 @@ In §38 the orb moved only on release, because pointer positions during a drag m
 ### Mic
 The capture level clipped eight times ("Input at 1.18× full scale"). That's a setting on the user's side: `wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35`.
 
+## 40. The model picks the command, the rules carry it out
+
+*2026-11-17.* Rules only know the phrasings written into them. "It's way too loud", "kill the browser" and "go to my third desktop" are plain requests, but no rule matched them, so they went to the conversation model, which can't act. Since §39 that model says "I can't do that yet", which is honest, but MAVIS can do all three.
+
+### Considered
+- **More phrasings in the rules.** This never ends, and it's the scripted behaviour this project avoids.
+- **Let the model write the plan** (JSON actions). That gives it a way to run things the rules never vetted. A 3.8B model's JSON is also unreliable, and the checks would be a second copy of the rules.
+- **The model picks, the rules check (chosen).**
+
+### How it works
+1. The rules go first, as before. A request they know never reaches the model.
+2. Nothing matched, and it sounds like a request? Then MAVIS asks the model a different question: which of these commands did the user mean?
+   - **Questions skip this.** A request that opens with what, why, how, is, do, tell or explain goes straight to the reply. So does anything that isn't worded as a request ("can you", "make", "turn", "kill"…) and doesn't name something MAVIS acts on. "Something MAVIS acts on" means a word from the rules' own phrases, including stems ("loud" for "louder"), or an installed app or kind of app.
+   - **The list of commands comes from the rules.** It's the first phrase of each system and session phrase list, plus templates such as "open <app>", "volume to <number> percent" and "switch to workspace <number>". Installed apps and open windows are sent with it. No app, site or phrase is written into the prompt.
+   - **The model answers with one command or NONE.** It runs at temperature 0, stops at the first line, and is allowed about 24 tokens. An unfilled template ("open <app>") counts as NONE, and so does an answer that only repeats what was said.
+3. The chosen command goes back through the same rules: closing, windows, undo, then actions. So the model can only pick something MAVIS already does, and "Shall I close Firefox?" or "Shall I log you out?" is still asked. If no rule takes the pick, or the answer was NONE, the original reply request is sent, so nothing is lost. Each utterance asks the model at most once.
+
+### Costs
+- **An extra model call** for requests in other words. That's the price of understanding them. Prompt length grows with the number of installed apps.
+- **The reply's cached prompt is lost** whenever the chooser runs. llama.cpp reuses the prompt prefix of the previous call, and the chooser's prompt is different. A NONE answer is followed by a reply that has to read its whole system prompt again. That's why questions and small talk skip the chooser.
+
+**Evidence:**
+- **Proven** (tests):
+  - Every command on the list is taken by the rules once filled in.
+  - Requests in other words reach the chooser, and questions and small talk don't.
+  - Cleaning the model's answer: arrows, quotes and trailing full stops are removed; NONE and unfilled templates become NONE.
+  - The worker returns NONE (and the reply request) when the model fails.
+- **Not run here:**
+  - How often Phi-3 picks right.
+  - How long the extra call takes on the user's GPU.
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
