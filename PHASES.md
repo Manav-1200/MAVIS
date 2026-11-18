@@ -454,6 +454,15 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
 
+### 6.21 — Requests in your own words (2026-11-17)
+
+Details in [`DECISIONS.md` §40](DECISIONS.md#40-the-model-picks-the-command-the-rules-carry-it-out).
+
+- [x] **The model picks a command** from the rules' own list when no rule matched, or none
+- [x] **The pick goes back through the rules**, with the same confirmations; none means the usual reply
+- [x] Questions skip it; the command list is built from the rules, so the two can't drift
+- [ ] Try on hardware: accuracy of the picks, and the added wait
+
 ### 6.20 — Honest, safe, and more capable (2026-11-17)
 
 Details in [`DECISIONS.md` §39](DECISIONS.md#39-the-2026-11-17-run).
@@ -465,7 +474,8 @@ Details in [`DECISIONS.md` §39](DECISIONS.md#39-the-2026-11-17-run).
 - [x] **New controls**: workspaces, full screen, volume and brightness levels, Bluetooth, Wi-Fi, lock, log out, suspend, shut down, restart (the session ones ask first)
 - [x] Window names from installed apps; "[mavis]" labels, lead-in change questions and follow-ups cleaned up
 - [x] **The orb follows the cursor while dragging**
-- [ ] Try on hardware; let the model choose actions for requests no rule recognises (next)
+- [x] Let the model choose actions for requests no rule recognises (6.21)
+- [ ] Try on hardware
 
 ### 6.19 — The orb floats (2026-11-14)
 
@@ -1053,4 +1063,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-17*
+*Last updated: 2026-11-18*
