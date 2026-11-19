@@ -1988,6 +1988,18 @@ The user said "recent". The exact wording already reached the Sentinel, but the 
 - **"Conf mural."** (confidence 0.55) interrupted a reply and got "I'm ready to assist." The user doesn't recall what was said.
 - **The mic still clips.** `wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35` doesn't seem to have held.
 
+## 42. A setuid program that moved isn't a new one
+
+*2026-11-18.* After libgtop went from 2.41.3 to 2.41.4, MAVIS raised a critical desktop alert: "a new program that runs as root appeared: libgtop_server2". The same summary said "libgtop_server2 is no longer setuid". The Sentinel's own records show what happened. In one scan, `/usr/lib/libgtop/libgtop_server2` was gone and `/usr/lib/libgtop_server2` was new, both setuid and owned by root. `pacman -Ql libgtop` lists only the new path, so the package moved the file.
+
+**Fix:** when a setuid or setgid file disappears from one folder and a file of the same name, mode and owner appears in another in the same scan, it's one change: a move. A move is Notable, so it's said the next time the user speaks and not raised as a desktop alert. It reads "libgtop_server2, a program with special rights, moved to another folder."
+- A different name, or the same name with a different owner or mode, is still reported as new (Critical) plus gone.
+- The daily integrity check still compares packaged files with what their package installed. A moved program whose content was tampered with is caught there.
+
+**Evidence:**
+- **Proven** (tests): the libgtop paths give one Notable move. A different program, or a changed owner, still gives a Critical addition.
+- **Measured**: the user's `sentinel.db` rows and `pacman -Ql` output above.
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
