@@ -106,6 +106,8 @@ pub enum ChangeKind {
     UnitDisabled { unit: String, scope: String },
     SetuidAdded { path: String, setuid: bool, root_owned: bool },
     SetuidRemoved { path: String },
+    /// The same setuid/setgid program, gone from one folder and new in another.
+    SetuidMoved { from: String, to: String },
 
     // Step 4 — integrity and advisories.
     /// A packaged file differs from what its package installed.
@@ -196,6 +198,7 @@ fn identity(kind: &ChangeKind) -> (&'static str, String, String) {
         UnitDisabled { unit, scope } => ("disabled", unit.clone(), scope.clone()),
         SetuidAdded { path, .. } => ("setuid_added", path.clone(), String::new()),
         SetuidRemoved { path } => ("setuid_removed", path.clone(), String::new()),
+        SetuidMoved { from, to } => ("setuid_moved", to.clone(), from.clone()),
         FileAltered { path, what, .. } => ("file_altered", path.clone(), what.clone()),
         FileRestored { path } => ("file_restored", path.clone(), String::new()),
         AdvisoryAdded { package, ids, .. } => ("advisory", package.clone(), ids.clone()),
@@ -246,6 +249,9 @@ pub fn classify(kind: &ChangeKind) -> Severity {
         ChangeKind::SshKeyAdded { .. } => Severity::Critical,
         ChangeKind::SudoersChanged { .. } => Severity::Critical,
         ChangeKind::SetuidAdded { .. } => Severity::Critical,
+        // Said, but not a desktop alert: the integrity check catches a
+        // packaged program whose content changed.
+        ChangeKind::SetuidMoved { .. } => Severity::Notable,
         ChangeKind::UnitEnabled { .. } => Severity::Notable,
 
         // Integrity: an edited config file is ordinary. Changed content
@@ -343,6 +349,7 @@ pub fn describe(kind: &ChangeKind) -> String {
             format!("{} is new, {}{}.", path, mode, owner)
         }
         ChangeKind::SetuidRemoved { path } => format!("{} is no longer setuid or setgid.", path),
+        ChangeKind::SetuidMoved { from, to } => format!("{} moved to {}.", from, to),
         ChangeKind::FileAltered { path, package, what, .. } => {
             let from = if package.is_empty() { String::new() } else { format!(" (from {})", package) };
             match what.as_str() {
