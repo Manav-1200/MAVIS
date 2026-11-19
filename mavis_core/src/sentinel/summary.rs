@@ -187,6 +187,7 @@ fn privilege_sentence(group: &[Change], include_routine: bool) -> Option<String>
     let mut keys_removed = Vec::new();
     let mut disabled = Vec::new();
     let mut setuid_gone = Vec::new();
+    let mut setuid_moved = Vec::new();
 
     for c in &sorted {
         match &c.kind {
@@ -212,6 +213,7 @@ fn privilege_sentence(group: &[Change], include_routine: bool) -> Option<String>
             ChangeKind::SetuidAdded { path, setuid: true, root_owned: true } => setuid_root.push(file_name(path)),
             ChangeKind::SetuidAdded { path, .. } => setuid_other.push(file_name(path)),
             ChangeKind::SetuidRemoved { path } => setuid_gone.push(file_name(path)),
+            ChangeKind::SetuidMoved { to, .. } => setuid_moved.push(file_name(to)),
             _ => {}
         }
     }
@@ -249,6 +251,9 @@ fn privilege_sentence(group: &[Change], include_routine: bool) -> Option<String>
     }));
     clauses.extend(counted(&setuid_other, &|p| format!("a new setuid or setgid program appeared: {}", p), &|n| {
         format!("{} new setuid or setgid programs appeared", n)
+    }));
+    clauses.extend(counted(&setuid_moved, &|p| format!("{}, a program with special rights, moved to another folder", p), &|n| {
+        format!("{} programs with special rights moved to other folders", n)
     }));
     clauses.extend(counted(&system_accounts, &|n| format!("system account {} was created", n), &|n| {
         format!("{} system accounts were created", n)
@@ -632,6 +637,16 @@ mod tests {
         let kind = ChangeKind::SetuidAdded { path: "/usr/local/bin/helper".into(), setuid: true, root_owned: true };
         let line = summarize(&[privilege(kind, "setuid", 10)]).unwrap();
         assert_eq!(line, "Today, a new program that runs as root appeared: helper.");
+    }
+
+    #[test]
+    fn a_moved_setuid_program_is_said_as_a_move() {
+        let kind = ChangeKind::SetuidMoved {
+            from: "/usr/lib/libgtop/libgtop_server2".into(),
+            to: "/usr/lib/libgtop_server2".into(),
+        };
+        let line = summarize(&[privilege(kind, "setuid", 10)]).unwrap();
+        assert_eq!(line, "Today, libgtop_server2, a program with special rights, moved to another folder.");
     }
 
     /// Routine privilege changes are never volunteered, but are described when asked.
