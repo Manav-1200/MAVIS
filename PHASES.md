@@ -463,7 +463,8 @@ Details in [`DECISIONS.md` §41](DECISIONS.md#41-the-2026-11-18-run).
 - [x] "Close whatever you just opened"; "close the active window" without the model
 - [x] Windows named after their app (`timeshift-gtk` is Timeshift)
 - [x] Change questions with one misheard word reach the Sentinel
-- [ ] Try on hardware; libgtop_server2 "new root program" alert (waiting on where the file lives now)
+- [x] A setuid program that changes folder is one move, not a critical new one (§42)
+- [ ] Try on hardware
 
 ### 6.21 — Requests in your own words (2026-11-17)
 
@@ -1074,4 +1075,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-18*
+*Last updated: 2026-11-19*
