@@ -345,8 +345,16 @@ pub fn diff(source: &str, old: &Snapshot, new: &Snapshot, at: DateTime<Utc>) -> 
         }
         SETUID => {
             // A file that only switches setuid <-> setgid counts as new.
-            let fresh = added.chain(changed.map(|(k, _, v)| (k, v)));
+            let fresh: Vec<(&String, &String)> = added.chain(changed.map(|(k, _, v)| (k, v))).collect();
+            let mut gone: Vec<(&String, &String)> = removed.collect();
             for (path, v) in fresh {
+                // The same program, same mode and owner, gone from one folder
+                // and new in another: moved, as libgtop's update did (§42).
+                if let Some(at) = gone.iter().position(|(old, was)| file_name_of(old) == file_name_of(path) && *was == v) {
+                    let (from, _) = gone.remove(at);
+                    kinds.push(ChangeKind::SetuidMoved { from: from.clone(), to: path.clone() });
+                    continue;
+                }
                 let (kind, owner) = v.split_once(':').unwrap_or(("u", ""));
                 kinds.push(ChangeKind::SetuidAdded {
                     path: path.clone(),
@@ -354,13 +362,17 @@ pub fn diff(source: &str, old: &Snapshot, new: &Snapshot, at: DateTime<Utc>) -> 
                     root_owned: owner == "0",
                 });
             }
-            for (path, _) in removed {
+            for (path, _) in gone {
                 kinds.push(ChangeKind::SetuidRemoved { path: path.clone() });
             }
         }
         _ => {}
     }
     kinds.into_iter().map(|k| Change::new(k, source, at)).collect()
+}
+
+fn file_name_of(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
 }
 
 fn user_fields(v: &str) -> (u32, bool) {
@@ -474,6 +486,30 @@ garbage line
         assert!(changes
             .iter()
             .any(|c| matches!(&c.kind, ChangeKind::GroupAdded { name } if name == "newgroup")));
+    }
+
+    /// libgtop 2.41.4 moved libgtop_server2 from /usr/lib/libgtop to
+    /// /usr/lib (2026-11-18). That's one move, not a new root program.
+    #[test]
+    fn a_setuid_program_that_changed_folder_is_a_move() {
+        let snap = |pairs: &[(&str, &str)]| -> Snapshot {
+            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        };
+        let old = snap(&[("/usr/lib/libgtop/libgtop_server2", "u:0")]);
+        let new = snap(&[("/usr/lib/libgtop_server2", "u:0")]);
+        let changes = diff(SETUID, &old, &new, now());
+        assert_eq!(changes.len(), 1);
+        assert!(matches!(&changes[0].kind, ChangeKind::SetuidMoved { from, to }
+            if from == "/usr/lib/libgtop/libgtop_server2" && to == "/usr/lib/libgtop_server2"));
+        assert_eq!(changes[0].severity, Severity::Notable);
+
+        // A different program, or the same name now owned by someone else, is still new.
+        let other = snap(&[("/usr/lib/other_helper", "u:0")]);
+        assert!(matches!(diff(SETUID, &old, &other, now())[0].kind, ChangeKind::SetuidAdded { .. }));
+        let not_root = snap(&[("/usr/lib/libgtop_server2", "u:1000")]);
+        let changes = diff(SETUID, &old, &not_root, now());
+        assert!(changes.iter().any(|c| matches!(c.kind, ChangeKind::SetuidAdded { .. })));
+        assert!(changes.iter().any(|c| matches!(c.kind, ChangeKind::SetuidRemoved { .. })));
     }
 
     #[test]
