@@ -75,11 +75,11 @@ pub async fn run_system_op(payload: &serde_json::Value) -> Result<String> {
             let pct = format!("{}%", level.ok_or_else(|| anyhow::anyhow!("no volume level given"))?);
             first_of(&[&["pactl", "set-sink-volume", "@DEFAULT_SINK@", &pct], &["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", &pct]]).await
         }
-        "brightness_up" => first_of(&[&["brightnessctl", "set", "+10%"]]).await,
-        "brightness_down" => first_of(&[&["brightnessctl", "set", "10%-"]]).await,
+        "brightness_up" => brightness(&["+10%"], Step::Up).await,
+        "brightness_down" => brightness(&["10%-"], Step::Down).await,
         "brightness_set" => {
-            let pct = format!("{}%", level.ok_or_else(|| anyhow::anyhow!("no brightness level given"))?.min(100));
-            first_of(&[&["brightnessctl", "set", &pct]]).await
+            let pct = level.ok_or_else(|| anyhow::anyhow!("no brightness level given"))?.min(100);
+            brightness(&[&format!("{}%", pct)], Step::To(pct)).await
         }
         "bluetooth_on" => first_of(&[&["bluetoothctl", "power", "on"], &["rfkill", "unblock", "bluetooth"]]).await,
         "bluetooth_off" => first_of(&[&["bluetoothctl", "power", "off"], &["rfkill", "block", "bluetooth"]]).await,
@@ -95,6 +95,72 @@ pub async fn run_system_op(payload: &serde_json::Value) -> Result<String> {
             Err(anyhow::anyhow!("I don't know how to do {} yet", other.replace('_', " ")))
         }
     }
+}
+
+enum Step {
+    Up,
+    Down,
+    To(u64),
+}
+
+/// brightnessctl if it's there; otherwise systemd-logind, which lets the
+/// logged-in user set the screen's brightness with nothing else installed.
+async fn brightness(args: &[&str], step: Step) -> Result<String> {
+    let mut command = vec!["brightnessctl", "set"];
+    command.extend_from_slice(args);
+    match first_of(&[&command]).await {
+        Err(e) if e.to_string().ends_with("isn't installed") => {
+            let Some((device, now, max)) = backlight() else { return Err(e) };
+            let tenth = (max / 10).max(1);
+            let target = match step {
+                Step::Up => (now + tenth).min(max),
+                // Never quite off: a black screen can't be turned back up by eye.
+                Step::Down => now.saturating_sub(tenth).max(max / 20),
+                Step::To(pct) => (max * pct / 100).max(max / 20),
+            };
+            let value = target.to_string();
+            first_of(&[&[
+                "busctl", "call", "org.freedesktop.login1", "/org/freedesktop/login1/session/auto",
+                "org.freedesktop.login1.Session", "SetBrightness", "ssu", "backlight", &device, &value,
+            ]])
+            .await
+        }
+        other => other,
+    }
+}
+
+/// The first backlight: its name, brightness and maximum.
+fn backlight() -> Option<(String, u64, u64)> {
+    let entry = std::fs::read_dir("/sys/class/backlight").ok()?.flatten().next()?;
+    let read = |f: &str| std::fs::read_to_string(entry.path().join(f)).ok()?.trim().parse::<u64>().ok();
+    Some((entry.file_name().to_string_lossy().to_string(), read("brightness")?, read("max_brightness")?))
+}
+
+/// Speaker volume and screen brightness as they are now, for the model,
+/// which otherwise guesses ("a comfortable level", 2026-11-22).
+pub async fn current_levels() -> Option<String> {
+    let mut parts = Vec::new();
+    let volume = tokio::time::timeout(
+        std::time::Duration::from_secs(1),
+        Command::new("wpctl").args(["get-volume", "@DEFAULT_AUDIO_SINK@"]).output(),
+    )
+    .await;
+    if let Ok(Ok(out)) = volume {
+        // "Volume: 0.50" or "Volume: 0.50 [MUTED]"
+        let text = String::from_utf8_lossy(&out.stdout);
+        if let Some(v) = text.split_whitespace().nth(1).and_then(|v| v.parse::<f64>().ok()) {
+            let muted = if text.contains("MUTED") { ", muted" } else { "" };
+            parts.push(format!("speaker volume is {}%{}", (v * 100.0).round(), muted));
+        }
+    }
+    if let Some((_, now, max)) = backlight().filter(|(_, _, max)| *max > 0) {
+        parts.push(format!("screen brightness is {}%", now * 100 / max));
+    }
+    (!parts.is_empty()).then(|| {
+        let mut line = parts.join(" and ");
+        line.replace_range(..1, &line[..1].to_uppercase());
+        format!("{}.", line)
+    })
 }
 
 /// Run the first of these commands that's installed. A missing tool moves
