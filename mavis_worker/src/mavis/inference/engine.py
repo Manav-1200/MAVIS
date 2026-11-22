@@ -25,7 +25,7 @@ MAX_CHARS = 320
 GENERIC_OFFER = re.compile(
     r"\b(?:how|what(?: else)?) can i (?:help|assist|do for)\b|\banything else (?:i can|you need)\b"
     r"|^would you like (?:me )?to\b|^what would you like (?:to do|me to)\b|^what'?s next\b"
-    r"|^is there anything else\b",
+    r"|^is there (?:anything|something)\b",
     re.IGNORECASE,
 )
 
