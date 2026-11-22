@@ -123,11 +123,31 @@ pub fn announcement(pending: &[Change], max: usize) -> Option<Announcement> {
         )),
     }
 
+    vary_openings(&mut sentences);
     Some(Announcement {
         text: sentences.join(" "),
         fingerprints,
         about: spoken.last().map(|(_, g)| g[0].occurred_at),
     })
+}
+
+/// Two updates on one day read "Your system update today…" twice; the
+/// second becomes "Another update today…".
+fn vary_openings(sentences: &mut [String]) {
+    let mut days = std::collections::HashSet::new();
+    for s in sentences.iter_mut() {
+        if let Some(rest) = s.strip_prefix("Your system update ") {
+            // The day is everything before what the update did.
+            let day: String = rest
+                .split_whitespace()
+                .take_while(|w| !matches!(*w, "pulled" | "removed" | "put"))
+                .collect::<Vec<_>>()
+                .join(" ");
+            if !days.insert(day) {
+                *s = format!("Another update {}", rest);
+            }
+        }
+    }
 }
 
 fn answer_period(store: &SentinelStore, window: &Window) -> anyhow::Result<Spoken> {
@@ -154,8 +174,10 @@ fn answer_period(store: &SentinelStore, window: &Window) -> anyhow::Result<Spoke
         ));
     }
     sentences.extend(described.iter().filter_map(|g| describe_transaction(g)));
+    vary_openings(&mut sentences);
 
-    mark_told(store, described);
+    // Counted ones were told too, or they come back as news next turn.
+    mark_told(store, &groups);
     Ok(Spoken {
         text: sentences.join(" "),
         about: described.last().map(|g| g[0].occurred_at),
@@ -840,5 +862,17 @@ mod tests {
         assert!(!line.contains('\n') && !line.contains('*') && !line.contains('#'));
         assert!(line.ends_with('.'), "{}", line);
         assert!(line.contains("It also upgraded 3 packages."), "{}", line);
+    }
+
+    #[test]
+    fn a_second_update_on_the_same_day_says_another() {
+        let mut s = vec![
+            "Your system update today pulled in 2 packages.".to_string(),
+            "Your system update today removed cmake.".to_string(),
+            "Your system update yesterday removed rhash.".to_string(),
+        ];
+        vary_openings(&mut s);
+        assert_eq!(s[1], "Another update today removed cmake.");
+        assert_eq!(s[2], "Your system update yesterday removed rhash.");
     }
 }
