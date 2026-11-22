@@ -466,14 +466,25 @@ pub fn is_echo(transcript: &str, spoken: &SpokenLog) -> bool {
             .join(" ")
     };
     let heard = words(transcript);
-    if heard.split(' ').count() < 2 {
-        return false;
-    }
+    let compact = |s: &str| -> String { s.chars().filter(|c| c.is_alphanumeric()).collect::<String>().to_lowercase() };
+    let heard_compact = compact(transcript);
+    let one_word = heard.split(' ').count() < 2;
     let recent = spoken.lock().unwrap_or_else(|p| p.into_inner());
     recent
         .iter()
         .filter(|(_, at)| at.elapsed() < std::time::Duration::from_secs(20))
-        .any(|(text, _)| words(text).contains(&heard))
+        .any(|(text, _)| {
+            let said = words(text);
+            if !one_word {
+                return said.contains(&heard) || compact(text).contains(&heard_compact);
+            }
+            // One word: only a piece of something MAVIS read out ("PRSA" from
+            // "P_RSA3072SHA384.json"), never a word it said whole, so "stop"
+            // still interrupts.
+            heard_compact.len() >= 4
+                && compact(text).contains(&heard_compact)
+                && !said.split(' ').any(|w| w == heard)
+        })
 }
 
 struct TtsQueue {
@@ -1066,6 +1077,19 @@ mod tests {
         assert!(is_echo("Ask me what change...", &log));
         assert!(!is_echo("What changed on my system?", &log));
         assert!(!is_echo("Ask", &log), "one word says too little");
+    }
+
+    /// 2026-11-22: reading "P_RSA3072SHA384.json" came back as "PRSA".
+    #[test]
+    fn a_piece_of_a_name_it_read_out_is_its_own_voice() {
+        let log = SpokenLog::default();
+        log.lock().unwrap().push_back((
+            "Today, 3 files match their packages again: P_ECCP384SHA384.json, P_RSA3072SHA384.json and journal. Stop by later.".into(),
+            std::time::Instant::now(),
+        ));
+        assert!(is_echo("PRSA.", &log));
+        assert!(!is_echo("Stop", &log), "a word it said whole may still be the user");
+        assert!(!is_echo("Mavis", &log));
     }
 
     #[test]
