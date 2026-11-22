@@ -819,6 +819,17 @@ fn number_word(w: &str) -> Option<u64> {
         .or_else(|| WORDS.iter().position(|x| *x == w).map(|i| i as u64))
 }
 
+/// Numbers Whisper writes as other words: "workspace too" (2026-11-22).
+/// Only trusted straight after "workspace".
+fn misheard_number(w: &str) -> Option<u64> {
+    match w {
+        "to" | "too" => Some(2),
+        "for" => Some(4),
+        "won" => Some(1),
+        _ => None,
+    }
+}
+
 /// Window-manager requests: "switch to workspace 2", "full screen Thunar",
 /// "make it full screen". The window comes from what's open, the app from
 /// what's installed, as for closing.
@@ -838,7 +849,10 @@ fn window_request(text: &str, windows: &[WindowInfo], apps: &[AppEntry]) -> Opti
             || moving
             || words.iter().any(|w| matches!(*w, "switch" | "go" | "show" | "take" | "focus" | "change" | "jump"));
         if switching {
-            let index = words[at + 1..].iter().find_map(|w| number_word(w))?;
+            let index = words[at + 1..]
+                .iter()
+                .find_map(|w| number_word(w))
+                .or_else(|| words.get(at + 1).and_then(|w| misheard_number(w)))?;
             return Some(serde_json::json!([
                 {"type": "workspace", "index": index},
                 {"type": "say", "text": format!("Workspace {}.", index)},
@@ -922,11 +936,28 @@ fn level_request(text: &str) -> Option<serde_json::Value> {
     } else {
         return None;
     };
-    let level = words.iter().find_map(|w| number_word(w)).filter(|n| *n <= 100)?;
+    let level = words
+        .iter()
+        .find_map(|w| number_word(w))
+        .filter(|n| *n <= 100)
+        .or_else(|| extreme_level(&t, op))?;
     Some(serde_json::json!([
         {"type": "say", "text": format!("{} {} percent.", thing, level)},
         {"type": "system", "op": op, "value": level},
     ]))
+}
+
+/// "All the way up", "max": 100. "All the way down": 0, or 10 for the
+/// screen, which mustn't go black.
+fn extreme_level(t: &str, op: &str) -> Option<u64> {
+    let has = |p: &str| format!(" {} ", t).contains(&format!(" {} ", p));
+    if has("all the way up") || has("max") || has("maximum") || has("full") {
+        Some(100)
+    } else if has("all the way down") || has("minimum") || has("lowest") {
+        Some(if op == "brightness_set" { 10 } else { 0 })
+    } else {
+        None
+    }
 }
 
 /// Radios and the session. Only as the whole request: "how do I log out of
@@ -958,6 +989,17 @@ fn whole_request(text: &str) -> Option<serde_json::Value> {
             serde_json::json!([act, say])
         }
     })
+}
+
+/// Everything a plan says aloud, whether it's one action or a list.
+fn plan_says(plan: &serde_json::Value) -> String {
+    let actions = plan.as_array().cloned().unwrap_or_else(|| vec![plan.clone()]);
+    actions
+        .iter()
+        .filter(|a| a.get("type").and_then(|t| t.as_str()) == Some("say"))
+        .filter_map(|a| a.get("text").and_then(|t| t.as_str()))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// The plan for a close request.
@@ -1036,7 +1078,12 @@ fn grounded(command: &str, text: &str, apps: &[AppEntry]) -> bool {
     const ORDINALS: &[&str] = &[
         "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth", "tenth",
     ];
-    let said_number = said_words.iter().any(|w| number_word(w).is_some() || ORDINALS.contains(w));
+    let words: Vec<&str> = said.split_whitespace().collect();
+    let said_number = said_words.iter().any(|w| number_word(w).is_some() || ORDINALS.contains(w))
+        || words.windows(2).any(|p| p[0] == "workspace" && misheard_number(p[1]).is_some());
+    let said_extreme = ["all the way", "max", "maximum", "full", "minimum", "lowest"]
+        .iter()
+        .any(|p| format!(" {} ", said).contains(&format!(" {} ", p)));
     let mut allowed: std::collections::HashSet<String> = command_menu()
         .iter()
         .flat_map(|c| c.split_whitespace())
@@ -1055,6 +1102,7 @@ fn grounded(command: &str, text: &str, apps: &[AppEntry]) -> bool {
             || allowed.contains(w)
             || (w.len() >= 3 && compact.contains(w))
             || (said_number && w.parse::<u64>().is_ok())
+            || (said_extreme && matches!(w, "100" | "0" | "10"))
     })
 }
 
@@ -1094,6 +1142,14 @@ fn sounds_like_request(text: &str, apps: &[AppEntry]) -> bool {
         return false;
     }
     if text.trim_end().ends_with('?') && !polite {
+        return false;
+    }
+    // "Window manager, not the active window": correcting an answer.
+    let corrects = text.to_lowercase().contains(", not ")
+        || ["i didnt ask", "i didn't ask", "i asked", "i meant", "not the", "no i meant"]
+            .iter()
+            .any(|p| t.starts_with(&normalize(p)));
+    if corrects {
         return false;
     }
     // "make it louder", "can you…": worded as a request.
@@ -1684,9 +1740,11 @@ impl Planner {
                 let wm = self.working.read().await;
                 wm.open_windows.iter().map(|w| with_app_name(w, &self.apps).app_name).collect()
             };
+            let previous = self.last_exchange(event.id).await;
             serde_json::json!({
                 "request_type": "choose_command",
                 "text": intent,
+                "previous": previous,
                 "commands": command_menu(),
                 "apps": self.apps.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
                 "windows": windows,
@@ -1928,6 +1986,9 @@ impl Planner {
             if let Some(content) = describe_open_windows(&open_windows, snapshot.active_workspace) {
                 items.push(serde_json::json!({ "source": "open_windows", "content": content }));
             }
+            if let Some(levels) = crate::system::dbus::current_levels().await {
+                items.push(serde_json::json!({ "source": "levels", "content": levels }));
+            }
             // The desktop names itself; nothing here assumes which one.
             if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
                 if !desktop.trim().is_empty() {
@@ -2114,16 +2175,16 @@ impl Planner {
                     "user",
                     event.payload.get("text").and_then(|v| v.as_str()).unwrap_or(""),
                 ),
-                EventType::PlanReady => (
-                    "mavis",
-                    event
-                        .payload
-                        .get("plan")
-                        .and_then(|p| p.get("text"))
-                        .and_then(|t| t.as_str())
-                        .unwrap_or(""),
-                ),
+                EventType::PlanReady => ("mavis", ""),
                 _ => continue,
+            };
+            // "Workspace 2." and "Opening Thunar." come with an action, in a list.
+            let said;
+            let content = if source == "mavis" {
+                said = event.payload.get("plan").map(plan_says).unwrap_or_default();
+                said.as_str()
+            } else {
+                content
             };
 
             if !content.is_empty() {
@@ -2135,6 +2196,26 @@ impl Planner {
         }
 
         items
+    }
+
+    /// The user's last sentence before `current` and what MAVIS said back.
+    async fn last_exchange(&self, current: uuid::Uuid) -> Vec<String> {
+        let wm = self.working.read().await;
+        let events = wm.recent_events(12);
+        let Some(at) = events
+            .iter()
+            .rposition(|e| e.event_type == EventType::UserIntent && e.id != current)
+        else {
+            return Vec::new();
+        };
+        let user = events[at].payload.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string();
+        let reply = events[at + 1..]
+            .iter()
+            .filter(|e| e.event_type == EventType::PlanReady)
+            .filter_map(|e| e.payload.get("plan").map(plan_says))
+            .find(|s| !s.is_empty())
+            .unwrap_or_default();
+        vec![user, reply]
     }
 
     async fn handle_worker_response(&self, event: Event) -> anyhow::Result<()> {
@@ -3624,5 +3705,45 @@ mod tests {
         assert_eq!(launched_app(&plan, &apps).as_deref(), Some("About Xfce"));
         assert!(closes_what_was_opened("Close whatever you just opened"));
         assert!(!closes_what_was_opened("what did you just open"));
+    }
+
+    /// From the 2026-11-22 run.
+    #[test]
+    fn all_the_way_up_and_misheard_numbers() {
+        let apps = desktop_apps();
+        let level = |t: &str| level_request(t).map(|p| p[1]["value"].as_u64().unwrap());
+        assert_eq!(level("turn the volume all the way up"), Some(100));
+        assert_eq!(level("brightness all the way down"), Some(10));
+        assert_eq!(level("volume to the max"), Some(100));
+        assert_eq!(level("turn up the volume"), None);
+
+        let open = [window("kitty", "MAVIS", 1, true)];
+        let ws = |t: &str| window_request(t, &open, &apps).and_then(|p| p[0]["index"].as_u64());
+        assert_eq!(ws("switch to workspace too"), Some(2));
+        assert_eq!(ws("go to workspace for"), Some(4));
+        assert_eq!(ws("switch workspace to 3"), Some(3), "a real number wins");
+
+        assert!(grounded("switch to workspace 2", "Oh, the workspace too.", &apps));
+        assert!(grounded("volume to 100 percent", "It's too low, turn it all the way up again", &apps));
+        assert!(!grounded("volume to 100 percent", "It's too low, turn it up", &apps));
+    }
+
+    #[test]
+    fn corrections_skip_the_command_choice() {
+        let apps = desktop_apps();
+        for text in [
+            "Window Manager, not the active window.",
+            "I didn't ask you to close it, I asked you, what window manager am I running?",
+            "I meant the other workspace",
+        ] {
+            assert!(!sounds_like_request(text, &apps), "{}", text);
+        }
+    }
+
+    #[test]
+    fn what_a_plan_says_is_read_from_lists_too() {
+        let plan = serde_json::json!([{"type": "workspace", "index": 2}, {"type": "say", "text": "Workspace 2."}]);
+        assert_eq!(plan_says(&plan), "Workspace 2.");
+        assert_eq!(plan_says(&serde_json::json!({"type": "say", "text": "Yes?"})), "Yes?");
     }
 }
