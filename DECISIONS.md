@@ -2000,6 +2000,75 @@ The user said "recent". The exact wording already reached the Sentinel, but the 
 - **Proven** (tests): the libgtop paths give one Notable move. A different program, or a changed owner, still gives a Critical addition.
 - **Measured**: the user's `sentinel.db` rows and `pacman -Ql` output above.
 
+## 43. The 2026-11-22 run
+
+*2026-11-22.* The first full run since 6.21. It covered the Sentinel, volume, brightness, workspaces and Timeshift.
+
+**Confirmed on hardware:**
+- "What are the recent changes on my system?" was answered from the store.
+- "Close time shift" asked "Shall I close Timeshift?", and windows were named "Timeshift", not `timeshift-gtk` (6.22).
+- "Sorry, that didn't work: brightnessctl isn't installed." (6.20).
+- "Turn my volume to 100%" ran by rule. "Can you turn it down to 50%?" and "Sister Workspace 2" ran through the model's pick.
+- Command picks took 0.79–0.95 s.
+
+### The mic level, twice
+The run began deaf: no speech was detected at all. The capture level was 0.35, set on the advice of MAVIS's own clipping warning. The same thing happened on 2026-09-19, recorded in the problem log above.
+
+wpctl's volume is cubic, so 0.35 is about 4% of the signal. At 0.75 every utterance arrived 1.37–1.52× over full scale, and the clipping probably cost three things:
+- The "yes" to "Shall I close Timeshift?", where Whisper's filter found no speech and the question expired.
+- One correct transcript, dropped at confidence 0.51.
+- Lower confidence overall.
+
+**Fix:** the warning now suggests a step down (`10%-`), not a number. No fixed level suits every mic. **Reasoned.**
+
+### Problem · "PRSA"
+While reading "…P_ECCP384SHA384.json, P_RSA3072SHA384.json…", MAVIS heard itself as "PRSA". That counted as the user speaking, so it stopped and answered "I see you're using PRSA, Manav." The echo filter compares words, and the file name is one word.
+
+**Fix:** letters and digits only are compared. A single heard word counts as echo only if it is a piece of something read out and not a word said whole, so "stop" still stops it. **Proven** (test).
+
+### Problem · The Sentinel's speech
+- It read out file names a voice can't say. **Fix:** a list containing names with underscores or three digits in a row is given as a count.
+- It said "Your system update today pulled in…" twice. **Fix:** the second update on the same day becomes "Another update today…".
+- It answered "what changed", describing the latest three of 13 changes. On the next sentence it led with the others, as if they were news. **Fix:** an answer marks everything it counted as told, as the unprompted announcement already did.
+
+**Proven** (tests), except the last, which is **Reasoned**.
+
+### Problem · A correction run as a command
+"Window manager, not the active window." The model picked "close this window", and MAVIS refused to close kitty. "Close" passed the grounding check (§41) because the commands' own words are always allowed. The real fault is that the chooser never saw the question being corrected.
+
+**Fix:**
+- Sentences with ", not " or that open "I didn't ask", "I asked", "I meant" or "not the" skip the choice.
+- The chooser is told the user's previous sentence and MAVIS's reply.
+- A correction example asks for NONE.
+
+The recent turns given to the reply model now include what MAVIS said with an action ("Workspace 2."). Those came in a list and were skipped before.
+
+**Proven** (tests) for the skip. The model's use of the last exchange isn't tested.
+
+### Problem · Made-up facts
+- "Your volume is set to a comfortable level", then "…comfortably set at 75%". The model is never told the volume; 75 was most likely the mic's level.
+- "To switch to workspace 2, you can use the keyboard shortcut Ctrl+Alt+Right." There is no such shortcut, and MAVIS can switch workspaces itself.
+
+**Fix:**
+- The live facts now include speaker volume (from `wpctl get-volume`) and screen brightness (from `/sys/class/backlight`).
+- Rule 17: no level, setting or number about the computer, and no shortcut, that isn't in the facts. If asked how to do something MAVIS can do, it says to just ask.
+
+**Reasoned**; not run.
+
+### Problem · Small misses
+- **"Oh, the workspace too."** Whisper wrote "too" for "two". The model's "switch to workspace 2" was right, but the grounding check rejected it. **Fix:** right after "workspace", "to"/"too" is 2, "for" is 4 and "won" is 1, in the rules and in the check.
+- **"It's too low, turn it all the way up again."** **Fix:** "all the way up", "max" and "full" mean 100. "All the way down" means 0, or 10 for brightness, so the screen never goes black.
+- **"Is there something specific you'd like to do within it?"** got through the follow-up filter. Now it doesn't.
+
+**Proven** (tests).
+
+### Brightness without brightnessctl
+systemd-logind's `SetBrightness` lets the active session set its own backlight with no root and no extra package, called through `busctl`. It's used when `brightnessctl` is missing.
+- Steps are a tenth of the maximum.
+- It never goes below a twentieth of the maximum.
+
+**Reasoned**; not run here (no backlight in the sandbox).
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
