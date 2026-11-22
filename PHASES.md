@@ -174,7 +174,7 @@ Everything above communicates over the in-process event bus (`tokio::sync::broad
 - [x] `system/dbus.rs` — `DbusIntegration`: listens for `SystemAction` events
   - `notify` -> `notify-send`
   - `media_play_pause/next/previous` -> `playerctl` / `dbus-send` fallback
-  - `brightness_up/down` -> `brightnessctl`
+  - `brightness_up/down` -> `brightnessctl`, or systemd-logind's `SetBrightness` when it isn't installed (6.23)
   - `volume_up/down/mute` -> `pactl`
 - [x] `system/hotkeys.rs` — `HotkeyManager`: UDS socket at `/tmp/mavis_hotkey.sock`
   - Wayland-compatible (no X11 grab needed)
@@ -453,6 +453,19 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] Questions are no longer stored as memories
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
+
+### 6.23 — The 2026-11-22 run (2026-11-22)
+
+Details in [`DECISIONS.md` §43](DECISIONS.md#43-the-2026-11-22-run).
+
+- [x] Its own voice, read out as a piece of a file name ("PRSA"), is recognised as echo
+- [x] Sentinel: no unspeakable file names, "Another update today…", and a "what changed" answer counts everything it summed up as told
+- [x] Corrections ("…, not the active window") skip the command choice; the choice sees the last exchange
+- [x] The model is told the real speaker volume and screen brightness, and never invents levels or shortcuts
+- [x] "Workspace too" is workspace 2; "all the way up" is 100
+- [x] Brightness without `brightnessctl`, through systemd-logind
+- [x] The mic warning suggests a step down, not a fixed level
+- [ ] Try on hardware
 
 ### 6.22 — Questions stay questions (2026-11-18)
 
@@ -1075,4 +1088,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-19*
+*Last updated: 2026-11-22*
