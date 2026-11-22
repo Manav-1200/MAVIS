@@ -44,6 +44,14 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **"Play X" works with any app**, not just a browser: browsers get the site from `[media]` in `config/config.toml`, media players get a matching file from your Music or Videos folder, and apps with their own link type get a search. The app you last played in is used next time. "Search for X" uses `[web]`. No site or app names in code.
 
 ### Fixed
+- **MAVIS interrupted itself** reading out "P_RSA3072SHA384.json": its own voice came back as "PRSA". A piece of a name it read out now counts as its own voice. A word it said whole, like "stop", still interrupts.
+- **The Sentinel was hard to listen to:** file names a voice can't read are counted rather than read out. A second update on the same day is "Another update today…". After a "what changed" answer, the changes it counted are no longer read out again on the next sentence.
+- **"Window manager, not the active window" was taken as "close this window".** Corrections skip the command choice, and the choice now sees the last exchange.
+- **Made-up levels and shortcuts:** "your volume is at a comfortable level", "use Ctrl+Alt+Right". The model is told the real speaker volume and screen brightness, and doesn't give levels or shortcuts it wasn't told.
+- **"Workspace too"** (Whisper's "two") switches to workspace 2. **"All the way up"** means 100.
+- **Brightness needed `brightnessctl`.** Without it, MAVIS asks systemd-logind, which every systemd desktop has.
+- **The mic warning suggested a fixed level (0.35)** that left MAVIS deaf on this machine. It now suggests a step down.
+- "Is there something specific you'd like to do…?" is dropped like the other follow-up offers.
 - **A false "new program that runs as root" alert** after libgtop's update. The update moved `libgtop_server2` to another folder. A setuid program with the same name, mode and owner that disappears from one folder and appears in another is now reported once, as a move, and spoken rather than raised as a critical alert.
 - **Questions were acted on:** "No, what application is open on workspace one?" opened About Xfce, and "Can you explain the recent changes…?" opened a YouTube search. Questions now skip the command choice even after "No," or "OK", with a "?" at the end, or as "can you explain" or "I want to know". The model's pick is also ignored if it names an app or site nobody mentioned.
 - **"Close Timeshift" said it wasn't open:** a window named after an app (`timeshift-gtk`) now belongs to it, even when the launcher runs another program.
