@@ -280,6 +280,7 @@ class WorkerServer:
             payload.get("commands", []) or [],
             payload.get("apps", []) or [],
             payload.get("windows", []) or [],
+            payload.get("previous") or None,
         )
         try:
             loop = asyncio.get_event_loop()
