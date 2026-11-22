@@ -234,7 +234,7 @@ class STTEngine:
             audio = (audio / peak_in) * 0.95
             print(
                 f"[stt] Input at {peak_in:.2f}× full scale — scaled down. "
-                "Lower the capture gain: wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35",
+                "Lower the capture gain a step: wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 10%-",
                 flush=True,
             )
 
@@ -260,7 +260,7 @@ class STTEngine:
                 # to be quieter.
                 print(
                     f"[stt] Microphone is CLIPPING (peak {peak:.2f}, should stay under 1.0). "
-                    "Lower the input gain: wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.35",
+                    "Lower the input gain a step: wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 10%-",
                     flush=True,
                 )
             if not speech:
