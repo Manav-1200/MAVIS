@@ -289,11 +289,28 @@ pub(super) fn counted(items: &[String], one: &dyn Fn(&str) -> String, many: &dyn
     match items.len() {
         0 => None,
         1 => Some(one(&items[0])),
+        // "P_RSA3072SHA384.json" can't be said; the count can.
+        n if items.iter().any(|i| !speakable(i)) => Some(many(n)),
         n => {
             let names: Vec<&str> = items.iter().map(String::as_str).collect();
             Some(format!("{}{}", many(n), listed(&names)))
         }
     }
+}
+
+/// Names a voice can read: no underscores, no long runs of digits.
+fn speakable(name: &str) -> bool {
+    let mut digits = 0;
+    for c in name.chars() {
+        if c == '_' {
+            return false;
+        }
+        digits = if c.is_ascii_digit() { digits + 1 } else { 0 };
+        if digits >= 3 {
+            return false;
+        }
+    }
+    true
 }
 
 /// File name only: a spoken path is all slashes.
@@ -637,6 +654,15 @@ mod tests {
         let kind = ChangeKind::SetuidAdded { path: "/usr/local/bin/helper".into(), setuid: true, root_owned: true };
         let line = summarize(&[privilege(kind, "setuid", 10)]).unwrap();
         assert_eq!(line, "Today, a new program that runs as root appeared: helper.");
+    }
+
+    #[test]
+    fn names_a_voice_cannot_read_are_counted() {
+        let names: Vec<String> = ["P_ECCP384SHA384.json", "P_RSA3072SHA384.json", "journal"].map(String::from).to_vec();
+        let line = counted(&names, &|f| format!("{} is back", f), &|n| format!("{} files are back", n)).unwrap();
+        assert_eq!(line, "3 files are back");
+        let fine: Vec<String> = ["wlroots0.20", "scenefx"].map(String::from).to_vec();
+        assert!(counted(&fine, &|f| f.into(), &|n| format!("{} files", n)).unwrap().contains("wlroots0.20"));
     }
 
     #[test]
