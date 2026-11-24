@@ -2069,6 +2069,44 @@ systemd-logind's `SetBrightness` lets the active session set its own backlight w
 
 **Reasoned**; not run here (no backlight in the sandbox).
 
+## 44. The model understands, the code checks (DO/SAY)
+
+*2026-11-23.* The user saw the phrases in §41–43 ("Window Manager, not the active window", "I didn't ask you to close it", "workspace too") and asked for them to go: "I want MAVIS to know and not bake it into code itself." That was the right call. Each run added another pattern for another phrasing, and each pattern was a guess about language made in code.
+
+### What it is
+- **One call.** Every sentence that isn't a stop, a confirmation answer or a Sentinel question goes to the model once. That's the call that wrote replies before; there's no separate step.
+- **Two answers.** The model must write `DO <action>` or `SAY <reply>`. A llama.cpp GBNF grammar, built from the action names, allows nothing else. It can't write a half-command or an action that doesn't exist.
+- **The catalogue.** `ACTIONS` in `planner.rs` lists what MAVIS can do: a name, its arguments, and a few words on what it does, such as `volume_set <0-100>: set the speaker volume in percent`. Nothing in it is a way of asking.
+- **The checks.** A `DO` becomes a plan only when:
+  - the action is listed;
+  - its arguments fit (levels 0–100, an argument only where one is taken);
+  - an app or site it names was said or described by the user, which carries over the grounding from §41;
+  - and then the permission gate asks first where the risk calls for it.
+
+  A failure is said ("Sorry, I'm not sure which one you mean."), never replaced by a guess.
+- **The prompt.** The instructions say how to answer and list the actions and installed apps. They contain no examples taken from the user's speech. The static part stays at the front of the prompt, and warm-up primes that same prefix, so llama.cpp keeps reusing it.
+
+### Removed
+- `sounds_like_request` and all its word lists: openers, question words, "can you"/"I want", corrections.
+- `command_menu`, the `choose_command` request, `CHOOSE_PROMPT` and its examples, `clean_command`, and `engine.choose`.
+- `misheard_number` ("too" = 2) and `extreme_level` ("all the way up" = 100). The model handles these from the conversation.
+- `rule_plan` on the live path. The command tables, match functions and `close_request` remain only as builders behind `open`/`close`/`fullscreen`, and inside the confirmation check, until steps 2 and 6.
+- A rules fallback, should the worker fail, was considered and dropped. Speech-to-text runs in the same worker, so without it nothing is heard anyway.
+
+### Costs
+- **Simple commands are no longer instant.** "Volume up" used to skip the model; now it costs a model call. A `DO` is about 5 tokens, so it costs mostly the prompt processing.
+- **Grammar-constrained sampling** costs some generation speed in llama-cpp-python. Not measured yet.
+- **Wrong picks that pass the checks** ("volume" for "brightness") aren't caught. Undo and self-learning (step 4) are the answer, not new phrase lists.
+
+**Evidence:**
+- **Proven** (tests):
+  - The grammar compiles in llama-cpp-python 0.3.38.
+  - The engine returns a `DO` untouched and cleans a `SAY`.
+  - The worker sends a `DO` as a command, with the actions and apps in the system prompt.
+  - The planner turns `DO`s into plans and rejects unknown actions, wrong arguments, levels over 100 and apps nobody named.
+  - Session actions are said before they run.
+- **Not run:** the model's own choices. No model can be downloaded here. The next hardware run measures how many were right and how long they took.
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
