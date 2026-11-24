@@ -1010,7 +1010,8 @@ const fn act(name: &'static str, args: &'static str, what: &'static str, op: Opt
 }
 
 const ACTIONS: &[Action] = &[
-    act("open", "<app or website>", "open an installed app or a website", None, "", true),
+    act("open", "<app>", "open an installed app", None, "", true),
+    act("open_website", "<website>", "open a website in the browser", None, "", true),
     act("close", "<app>", "close an app's windows", None, "", true),
     act("close_focused", "", "close the window in front", None, "", false),
     act("close_last_opened", "", "close the app you opened last", None, "", false),
@@ -1663,6 +1664,14 @@ impl Planner {
         }
 
         let working_memory = self.build_working_memory(intent, event.id).await;
+        let targets: Vec<String> = {
+            let wm = self.working.read().await;
+            let mut names: Vec<String> = self.apps.iter().map(|a| a.name.clone()).collect();
+            names.extend(wm.open_windows.iter().map(|w| with_app_name(w, &self.apps).app_name));
+            names.sort();
+            names.dedup();
+            names
+        };
         // One call: the model answers "DO <action>" or "SAY <reply>". The
         // system prompt lives in Python; the actions are listed from code.
         self.bus.publish(Event {
@@ -1677,10 +1686,13 @@ impl Planner {
                 // Replies are cut to three sentences after generation; this
                 // is the backstop.
                 "max_tokens": 128,
-                "temperature": 0.7,
+                // Lower than plain chat: choosing an action should be steady.
+                "temperature": 0.4,
                 "working_memory": working_memory,
                 "actions": action_menu(),
                 "apps": self.apps.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+                // What an app argument may be: installed apps and open windows.
+                "targets": targets,
             }),
         });
         Ok(())
@@ -1690,9 +1702,11 @@ impl Planner {
     /// can't be done becomes a sentence saying why, never a guess.
     async fn action_plan(&self, line: &str, said: &str) -> serde_json::Value {
         let say = |text: String| serde_json::json!({"type": "say", "text": text});
-        let (name, arg) = match line.trim().split_once(' ') {
-            Some((n, a)) => (n, a.trim().trim_matches('"')),
-            None => (line.trim(), ""),
+        // "volume_set <80>." still means 80: the model copies the menu's form.
+        let line = line.trim().trim_end_matches(['.', '!']);
+        let (name, arg) = match line.split_once(' ') {
+            Some((n, a)) => (n, a.trim().trim_matches(['"', '<', '>'])),
+            None => (line, ""),
         };
         let Some(action) = ACTIONS.iter().find(|a| a.name == name) else {
             return say("Sorry, I'm not sure what you want me to do.".into());
@@ -1724,7 +1738,7 @@ impl Planner {
             with_focus(&wm.open_windows, wm.active_window.as_ref())
         };
         match name {
-            "open" => {
+            "open" | "open_website" => {
                 let plan = open_plan(arg, &self.apps);
                 if let Some(app) = launched_app(&plan, &self.apps) {
                     if let Ok(mut last) = self.last_opened.lock() {
@@ -3386,6 +3400,7 @@ mod tests {
             ("open About Xfce", "what is open on workspace one"),
             ("format_disk", "wipe it"),
             ("volume_up 5", "louder"),
+            ("volume_set <80>.", "turn it down to 80"),
         ];
         let mut plans = Vec::new();
         for (action, said) in cases {
@@ -3402,6 +3417,7 @@ mod tests {
         assert!(text(&plans[5]).contains("which one"), "an app nobody named");
         assert!(text(&plans[6]).contains("not sure"), "not an action");
         assert!(text(&plans[7]).contains("not sure"), "an argument it doesn't take");
+        assert_eq!(plans[8][0]["value"].as_u64(), Some(80), "the menu's form is read too");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
