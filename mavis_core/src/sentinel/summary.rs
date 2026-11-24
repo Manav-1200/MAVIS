@@ -75,19 +75,34 @@ pub fn summarize(group: &[Change]) -> Option<String> {
     let mut group: Vec<&Change> = group.iter().collect();
     group.sort_by_key(|c| c.occurred_at);
 
+    // What each package ended up as. One installed and removed again (or
+    // removed and put back) in the same update comes to nothing, and is
+    // never named twice: "removed dux-gop, dux-shell, dux-gop and
+    // dux-shell" (2026-11-24).
+    let mut fate: Vec<(&str, char, char)> = Vec::new(); // name, first, last
+    for change in &group {
+        let (name, what) = match &change.kind {
+            ChangeKind::PackageInstalled { name, requested, .. } => (name, if *requested { 'r' } else { 'i' }),
+            ChangeKind::PackageRemoved { name, .. } => (name, 'x'),
+            ChangeKind::PackageDowngraded { name, .. } => (name, 'd'),
+            _ => continue,
+        };
+        match fate.iter_mut().find(|(n, _, _)| *n == name.as_str()) {
+            Some(f) => f.2 = what,
+            None => fate.push((name, what, what)),
+        }
+    }
     let mut pulled_in: Vec<&str> = Vec::new();
     let mut removed: Vec<&str> = Vec::new();
     let mut downgraded: Vec<&str> = Vec::new();
-
-    for change in &group {
-        match &change.kind {
-            ChangeKind::PackageInstalled {
-                name,
-                requested: false,
-                ..
-            } => pulled_in.push(name),
-            ChangeKind::PackageRemoved { name, .. } => removed.push(name),
-            ChangeKind::PackageDowngraded { name, .. } => downgraded.push(name),
+    for (name, first, last) in fate {
+        let installed = |c: char| c == 'i' || c == 'r';
+        match (first, last) {
+            (f, 'x') if installed(f) => {}
+            ('x', l) if installed(l) => {}
+            (_, 'i') => pulled_in.push(name),
+            (_, 'x') => removed.push(name),
+            (_, 'd') => downgraded.push(name),
             _ => {}
         }
     }
@@ -654,6 +669,22 @@ mod tests {
         let kind = ChangeKind::SetuidAdded { path: "/usr/local/bin/helper".into(), setuid: true, root_owned: true };
         let line = summarize(&[privilege(kind, "setuid", 10)]).unwrap();
         assert_eq!(line, "Today, a new program that runs as root appeared: helper.");
+    }
+
+    #[test]
+    fn a_package_that_came_and_went_is_not_named() {
+        let at = |m: i64| Utc::now() - chrono::Duration::minutes(60 - m);
+        let ch = |kind: ChangeKind, m: i64| Change::new(kind, "pacman", at(m));
+        let inst = |n: &str| ChangeKind::PackageInstalled { name: n.into(), version: "1".into(), requested: false };
+        let gone = |n: &str| ChangeKind::PackageRemoved { name: n.into(), version: "1".into() };
+        let group = vec![
+            ch(inst("dux-shell"), 1), ch(gone("dux-shell"), 2), ch(inst("dux-shell"), 3), ch(gone("dux-shell"), 4),
+            ch(gone("cmake"), 5), ch(gone("cmake"), 6), ch(inst("rhash"), 7),
+        ];
+        let line = summarize(&group).unwrap();
+        assert!(!line.contains("dux-shell"), "{}", line);
+        assert_eq!(line.matches("cmake").count(), 1, "{}", line);
+        assert!(line.contains("pulled in rhash"), "{}", line);
     }
 
     #[test]
