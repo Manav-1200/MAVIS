@@ -39,6 +39,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Changed
+- **MAVIS understands instead of matching phrases.** Every sentence goes to the model once, which answers `DO <action>` or `SAY <reply>`, enforced by a grammar. Actions come from a catalogue in code. The code checks each one before it runs: the action exists, levels are 0–100, and named apps or sites come from what you said. The request filter, the separate command chooser, the examples copied from logs and the command tables on the live path are gone. Simple commands now take about as long as a short reply.
 - **The orb follows the cursor while you drag it**, like a window.
 - **The orb floats.** On Wayland desktops with the layer shell (niri, Hyprland, Sway, KDE) it's an overlay above every window, on every workspace, never taking keyboard focus, and you can drag it anywhere. GNOME and X11 keep the window.
 - **"Play X" works with any app**, not just a browser: browsers get the site from `[media]` in `config/config.toml`, media players get a matching file from your Music or Videos folder, and apps with their own link type get a search. The app you last played in is used next time. "Search for X" uses `[web]`. No site or app names in code.
