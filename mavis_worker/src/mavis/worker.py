@@ -232,7 +232,7 @@ class WorkerServer:
         grammar = None
         if actions:
             system_prompt = with_actions(SYSTEM_PROMPT, actions, payload.get("apps") or [])
-            grammar = answer_grammar(actions)
+            grammar = answer_grammar(actions, payload.get("targets") or [])
         self.system_prompt = system_prompt
         chat_messages = build_chat_messages(
             user_messages=messages,
