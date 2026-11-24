@@ -86,6 +86,12 @@ const SPEECH_END_MIN: f32 = 0.06;
 const START_RATIO: f32 = 1.8;
 const END_RATIO: f32 = 1.5;
 
+/// A too-quiet mic: this many bursts of sound in this many seconds, each
+/// above the room but under the speech threshold, and none heard as speech.
+const QUIET_BURSTS: usize = 4;
+const QUIET_WINDOW_SECS: u64 = 30;
+const QUIET_MIN: f32 = 0.008;
+
 /// Where the floor starts before calibration: the measured silence median.
 const INITIAL_NOISE_FLOOR: f32 = 0.035;
 /// Upper bound on the floor. At 0.25 the start threshold is already 0.45;
@@ -224,6 +230,13 @@ struct EnergyVad {
     debug_energy: bool,
     debug_frames: u64,
     debug_window_max: f32,
+    /// Sound clearly above the room but under the speech threshold, again
+    /// and again with no speech: the mic is too quiet (2026-11-22, -24).
+    frames_seen: u64,
+    quiet_run: usize,
+    quiet_bursts: VecDeque<u64>,
+    warned_quiet: bool,
+    pub too_quiet: bool,
 }
 
 impl EnergyVad {
@@ -267,6 +280,31 @@ impl EnergyVad {
             ),
             debug_frames: 0,
             debug_window_max: 0.0,
+            frames_seen: 0,
+            quiet_run: 0,
+            quiet_bursts: VecDeque::new(),
+            warned_quiet: false,
+            too_quiet: false,
+        }
+    }
+
+    /// Track bursts of sound that never reach the speech threshold.
+    fn note_quiet(&mut self, level: f32) {
+        let frames_per_sec = (self.sample_rate / self.frame_size.max(1)) as u64;
+        if level > self.noise_floor * START_RATIO && level > QUIET_MIN {
+            self.quiet_run += 1;
+            return;
+        }
+        if self.quiet_run >= self.min_speech_threshold_frames {
+            self.quiet_bursts.push_back(self.frames_seen);
+        }
+        self.quiet_run = 0;
+        while self.quiet_bursts.front().is_some_and(|&f| self.frames_seen - f > QUIET_WINDOW_SECS * frames_per_sec) {
+            self.quiet_bursts.pop_front();
+        }
+        if self.quiet_bursts.len() >= QUIET_BURSTS && !self.warned_quiet {
+            self.warned_quiet = true;
+            self.too_quiet = true;
         }
     }
 
@@ -340,6 +378,7 @@ impl EnergyVad {
     }
 
     fn process_frame(&mut self, frame: &[f32]) -> Option<Vec<f32>> {
+        self.frames_seen += 1;
         let energy = (frame.iter().map(|s| s * s).sum::<f32>() / frame.len() as f32).sqrt();
         self.smoothed = if self.smoothed == 0.0 {
             energy
@@ -448,6 +487,7 @@ impl EnergyVad {
             self.speech_frames += 1;
             self.silence_frames = 0;
             if self.speech_frames >= confirm && !self.is_speaking {
+                self.quiet_bursts.clear();
                 info!(
                     "VAD: SPEECH START (level={:.4}, threshold={:.4}, noise_floor={:.4})",
                     level, threshold, self.noise_floor
@@ -480,6 +520,7 @@ impl EnergyVad {
             }
             self.speech_frames = self.speech_frames.saturating_sub(1);
         } else {
+            self.note_quiet(level);
             // Only frames clearly below the speech threshold teach the
             // floor. Counting louder ones let a word's onset, or echo just
             // after MAVIS spoke, inflate the floor — measured at 0.22 in
@@ -860,6 +901,17 @@ impl Capture {
         });
     }
 
+    /// Something MAVIS should say about its own hearing.
+    fn publish_say(&self, text: &str) {
+        self.bus.publish(Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "stt".to_string(),
+            event_type: EventType::PlanReady,
+            payload: serde_json::json!({ "plan": { "type": "say", "text": text } }),
+        });
+    }
+
     /// Nothing came of an interruption — let MAVIS carry on.
     fn publish_resume(&self) {
         self.bus.publish(Event {
@@ -986,15 +1038,23 @@ impl Capture {
             let _ = self.energy_tx.try_send(frame_energy);
         }
 
-        let (was_speaking, result, max_energy, now_speaking, loud) = {
+        let (was_speaking, result, max_energy, now_speaking, loud, too_quiet) = {
             let mut g = match self.vad.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
             let was = g.is_speaking;
             let r = g.process(&resampled);
-            (was, r, g.last_max_energy, g.is_speaking, g.loud_frames())
+            let quiet = std::mem::take(&mut g.too_quiet);
+            (was, r, g.last_max_energy, g.is_speaking, g.loud_frames(), quiet)
         };
+        if too_quiet {
+            warn!(
+                "VAD: sound keeps arriving below the speech threshold — the mic is probably too quiet \
+                 (wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 5%+)"
+            );
+            self.publish_say("I can hear sound, but it's too quiet for me to make out words. Your microphone level may be too low.");
+        }
 
         // Someone has talked over MAVIS long enough to be the user, not a
         // cough or a beat of music: pause it now rather than waiting for
@@ -1386,4 +1446,30 @@ mod vad_tests {
         assert_eq!(v.calibration_left, 0, "every frame was analysed");
         assert!(v.pending.len() < FRAME);
     }
+
+    /// A mic so quiet that speech never crosses the threshold is reported,
+    /// once; a normal room with speech is not.
+    #[test]
+    fn a_mic_too_quiet_for_speech_is_reported_once() {
+        let mut seed = 7;
+        let mut v = vad();
+        let mut audio = noise(0.005, 40, &mut seed);
+        for _ in 0..6 {
+            audio.extend(speech(0.04, 0.005, 600, &mut seed));
+            audio.extend(noise(0.005, 60, &mut seed));
+        }
+        assert!(feed(&mut v, &audio).is_empty(), "nothing loud enough to be speech");
+        assert!(v.too_quiet && v.warned_quiet);
+        v.too_quiet = false;
+        feed(&mut v, &audio);
+        assert!(!v.too_quiet, "said once");
+
+        let mut v = vad();
+        let mut audio = noise(0.005, 40, &mut seed);
+        audio.extend(speech(0.3, 0.005, 800, &mut seed));
+        audio.extend(noise(0.005, 60, &mut seed));
+        feed(&mut v, &audio);
+        assert!(!v.too_quiet);
+    }
+
 }
