@@ -27,6 +27,7 @@
 | 7 | Memory & Learning | Recall with decay, daily consolidation, episodic replay, entity graph, context compression. | Persistent memory | :white_check_mark: 7.1–7.2 complete; 7.3 deferred |
 | 8 | Safety & Permissions | Risk scoring, permission gate, confirmation flow, rollback, append-only audit log. | Trust layer | :white_check_mark: Built (per-skill permissions wait on Phase 9) |
 | 8.5 | System Sentinel | Notices what changed on the machine: packages, privileges, file integrity, advisories. | Machine awareness | :construction: Built — steps 2b–4 await a hardware run, step 5 unverified |
+| 8.6 | Understanding & Trust | The model decides what you mean (DO/SAY); sensitive actions warn and ask; your voice and face authorise them; it learns how you talk; it reads files and builds projects. | Understands, not scripted | :construction: Step 1 built |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
 | 10 | Automation & Proactive Intelligence | Rule engine, predictive suggestions, workflow recording, wellness reminders, daily briefing. | Proactive assistant | Not started |
 | 11 | Vision & Advanced UX | OCR, screenshot understanding, UI element detection, secondary monitor dashboard, conversation history. | Sees the screen | Not started |
@@ -889,6 +890,21 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
+## Phase 8.6 — Understanding & Trust
+
+MAVIS stops matching phrases and lets the model understand. Code keeps what it's good at: the list of actions, checking them, and safety. Plan agreed 2026-11-23. Each step gets a hardware run before the next.
+
+- [x] **1. DO/SAY** ([`DECISIONS.md` §44](DECISIONS.md#44-the-model-understands-the-code-checks-dosay)). One model call per sentence answers `DO <action>` or `SAY <reply>`, held to that form by a grammar. The actions are a catalogue in code. Removed: the request filter, the command chooser, the examples copied from logs, the command tables on the live path, and the "workspace too" / "all the way up" patches.
+- [ ] Hardware run: how many sentences became the right action, how many were wrong, how long they took. Compare Phi-3-mini with Qwen2.5-3B-Instruct.
+- [ ] **2. Sensitive actions warn and ask.** `rm -rf`, `sudo`, deleting files and the session say exactly what they'll do and wait for a yes. Nothing is refused outright. Root goes through `pkexec`, so the system's own password check comes last. Unrecoverable actions ask twice.
+- [ ] **3. Voice match.** Only the enrolled user can authorise sensitive actions; anyone else is told so. Local ECAPA speaker embeddings. Known limit: recordings and cloned voices.
+- [ ] **4. Self-learning.** It learns from the user's own confirmed DOs and daily patterns, never from undone or corrected ones or from other voices. It only gives examples and suggestions, never automatic actions. Everything learned can be read out and forgotten; nothing leaves the machine; the model's weights never change.
+- [ ] **5. Face check** with liveness, only at sensitive moments; infrared if the camera has it.
+- [ ] **6. The remaining phrase lists go:** confirmations (yes/no words), the Sentinel's question grammar, the meta-question deflection, and the output filters, where DO/SAY can replace them.
+- [ ] **7. Files and projects.** Find and read files of any format, summarise them, and build a project from a document with a plan, a time estimate, progress reports and the safety rules above. Which coding model is still open: local, cloud, or both.
+
+---
+
 ## Phase 9 — Skills Platform
 
 **Goal:** Modular capabilities. Each skill is a Rust crate or Python module with a manifest.
@@ -1088,4 +1104,4 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ---
 
-*Last updated: 2026-11-23*
+*Last updated: 2026-11-24*
