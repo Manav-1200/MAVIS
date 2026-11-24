@@ -172,9 +172,9 @@ def build_chat_messages(
 ACTIONS_PROMPT = """
 
 HOW YOU ANSWER: write DO followed by one action, or SAY followed by what you say out loud.
-Use DO when the user wants something done now that one of your actions does. Fill in its <parts> from what they said, the conversation and the facts.
-Use SAY for everything else: answers, conversation, and when you can't tell what they want, in which case ask.
-A SAY never says you did, are doing or will do something. Only DO makes anything happen.
+Use DO only when the user asks you to do something now and one of your actions does exactly that. Write the action's name, then its value in place of the <part>, without the angle brackets.
+Use SAY for everything else: questions (even about things an action could change), conversation, and requests you can't carry out or can't make sense of, in which case ask.
+Never SAY what the user should do or what you will do instead of acting: if an action does it, use DO. A SAY never says you did, are doing or will do something.
 
 Your actions:
 {actions}
@@ -189,13 +189,38 @@ def with_actions(system_prompt: str, actions: list[str], apps: list[str]) -> str
     )
 
 
-def answer_grammar(actions: list[str]) -> str:
-    """GBNF that allows only "DO <listed action>[ <argument>]" or "SAY <text>"."""
-    names = sorted({a.split(":")[0].split()[0] for a in actions}, key=len, reverse=True)
-    alternatives = " | ".join(f'"{n}"' for n in names)
-    return (
-        'root ::= "DO " name arg? | "SAY " say\n'
-        f"name ::= {alternatives}\n"
-        'arg ::= " " [^\\n]+\n'
-        "say ::= [^\\n]+\n"
+def answer_grammar(actions: list[str], targets: list[str] | None = None) -> str:
+    """GBNF allowing only "SAY <text>" or "DO <action>" with arguments of the
+    right kind: a level is a number 0-100, an app is one of `targets`."""
+
+    def literal(text: str) -> str:
+        return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+    kinds = {
+        "<0-100>": "level",
+        "<number>": "number",
+        "<app>": "app",
+        "<website>": "website",
+    }
+    branches = []
+    for entry in actions:
+        name, _, args = entry.split(":")[0].partition(" ")
+        args = args.strip()
+        if not args:
+            branches.append(literal(name))
+        else:
+            branches.append(f"{literal(name + ' ')} {kinds.get(args, 'text')}")
+    names = [t for t in dict.fromkeys(targets or []) if t.strip()]
+    app = " | ".join(literal(t) for t in names) if names else "text"
+    return "\n".join(
+        [
+            'root ::= "DO " action | "SAY " text',
+            "action ::= " + " | ".join(branches),
+            'level ::= "100" | [1-9] [0-9] | [0-9]',
+            "number ::= [1-9] [0-9]?",
+            f"app ::= {app}",
+            'website ::= [a-zA-Z0-9-]+ ("." [a-zA-Z0-9-]+)+',
+            "text ::= [^\\n]+",
+            "",
+        ]
     )
