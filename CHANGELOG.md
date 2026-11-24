@@ -39,12 +39,16 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Changed
+- **Qwen models are supported:** a model file with "qwen" in its name uses its chat format, for comparing against Phi-3 at choosing actions.
 - **MAVIS understands instead of matching phrases.** Every sentence goes to the model once, which answers `DO <action>` or `SAY <reply>`, enforced by a grammar. Actions come from a catalogue in code. The code checks each one before it runs: the action exists, levels are 0–100, and named apps or sites come from what you said. The request filter, the separate command chooser, the examples copied from logs and the command tables on the live path are gone. Simple commands now take about as long as a short reply.
 - **The orb follows the cursor while you drag it**, like a window.
 - **The orb floats.** On Wayland desktops with the layer shell (niri, Hyprland, Sway, KDE) it's an overlay above every window, on every workspace, never taking keyboard focus, and you can drag it anywhere. GNOME and X11 keep the window.
 - **"Play X" works with any app**, not just a browser: browsers get the site from `[media]` in `config/config.toml`, media players get a matching file from your Music or Videos folder, and apps with their own link type get a search. The app you last played in is used next time. "Search for X" uses `[web]`. No site or app names in code.
 
 ### Fixed
+- **The model's actions were loose.** It wrote `volume_set <80>`, invented `volume_down 20`, and once produced `workspace 2. SAY "Thunar is now open…"`. The grammar now holds each argument to its kind: a level is a number from 0 to 100, a workspace a number, an app one of the installed or open apps, and a website a domain. `open_website` is separate from `open`. Choosing an action runs at temperature 0.4, and the instructions say questions get a SAY and requests get a DO.
+- **MAVIS sat deaf without saying so** when the mic was too quiet. Bursts of sound that stay above the room but below the speech threshold, four times in 30 seconds with no speech, now get one spoken warning.
+- **The Sentinel named packages twice** ("removed dux-gop, dux-shell, dux-gop and dux-shell"). Each package is described by what it ended up as. One installed and removed again in the same update isn't mentioned.
 - **MAVIS interrupted itself** reading out "P_RSA3072SHA384.json": its own voice came back as "PRSA". A piece of a name it read out now counts as its own voice. A word it said whole, like "stop", still interrupts.
 - **The Sentinel was hard to listen to:** file names a voice can't read are counted rather than read out. A second update on the same day is "Another update today…". After a "what changed" answer, the changes it counted are no longer read out again on the next sentence.
 - **"Window manager, not the active window" was taken as "close this window".** Corrections skip the command choice, and the choice now sees the last exchange.
