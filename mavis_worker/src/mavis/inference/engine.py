@@ -349,37 +349,27 @@ class LlamaEngine:
                 break
         return text, finish_reason, tokens, first_token_at
 
-    def choose(self, messages: list[dict[str, str]], max_tokens: int = 24) -> str:
-        """A short, deterministic answer, without the reply clean-up chat() does."""
-        self.load_model()
-        started = time.perf_counter()
-        manual_prompt = self._format_chat_prompt(messages)
-        if manual_prompt is not None:
-            result = self._llm(
-                prompt=manual_prompt,
-                max_tokens=max_tokens,
-                temperature=0.0,
-                stop=[*self._get_stop_tokens(), "\n"],
-            )
-            text = result.get("choices", [{}])[0].get("text", "")
-        else:
-            result = self._llm.create_chat_completion(
-                messages=messages, max_tokens=max_tokens, temperature=0.0
-            )
-            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-        print(
-            f"[engine] Choice in {time.perf_counter() - started:.2f}s: {text.strip()!r}", flush=True
-        )
-        return text
+    def _grammar(self, text: str):
+        """Compiled once per grammar text; the action list rarely changes."""
+        from llama_cpp import LlamaGrammar
+
+        if getattr(self, "_grammar_text", None) != text:
+            self._grammar_text = text
+            self._grammar_compiled = LlamaGrammar.from_string(text, verbose=False)
+        return self._grammar_compiled
 
     def chat(
         self,
         messages: list[dict[str, str]],
         max_tokens: int = 256,
         temperature: float = 0.7,
+        grammar: str | None = None,
     ) -> dict[str, Any]:
+        """A reply. With a grammar the model answers "DO …" or "SAY …";
+        a DO comes back as "action", untouched by the reply clean-up."""
         self.load_model()
         started = time.perf_counter()
+        extra = {"grammar": self._grammar(grammar)} if grammar else {}
 
         manual_prompt = self._format_chat_prompt(messages)
         if manual_prompt is not None:
@@ -392,6 +382,7 @@ class LlamaEngine:
                 temperature=temperature,
                 stop=self._get_stop_tokens(),
                 stream=True,
+                **extra,
             )
             raw_text, finish_reason, tokens, ttft = self._stream(
                 chunks, lambda c: c.get("text", "")
@@ -403,6 +394,7 @@ class LlamaEngine:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 stream=True,
+                **extra,
             )
             raw_text, finish_reason, tokens, ttft = self._stream(
                 chunks, lambda c: c.get("delta", {}).get("content", "")
@@ -417,11 +409,16 @@ class LlamaEngine:
             flush=True,
         )
 
-        # Fix: this used to only run for tinyllama/phi3 (manual_prompt branch),
-        # so llama3/unknown models skipped style cleanup entirely.
-        text = self._post_process(raw_text)
+        action = None
+        if grammar:
+            kind, _, body = raw_text.strip().partition(" ")
+            if kind == "DO":
+                action = body.strip()
+            raw_text = body if kind in ("DO", "SAY") else raw_text
+        text = "" if action else self._post_process(raw_text)
 
         return {
+            "action": action,
             "choices": [
                 {
                     "message": {"content": text, "role": "assistant"},
