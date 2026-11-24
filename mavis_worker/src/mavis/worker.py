@@ -17,11 +17,11 @@ from mavis.core.logger import setup_logging
 from mavis.inference import (
     SYSTEM_PROMPT,
     LlamaEngine,
+    answer_grammar,
     build_chat_messages,
-    choose_messages,
-    clean_command,
     drop_name,
     user_name,
+    with_actions,
 )
 from mavis.stt.engine import STTEngine
 from mavis.tts.engine import TTSEngine
@@ -104,6 +104,8 @@ class WorkerServer:
         self.idle_timeout = self.config.get("worker", {}).get("idle_timeout", 300)
         # The user's name is said in the first reply of a run at most.
         self.replied_once = False
+        # The prompt the last reply used, actions included: what warm-up primes.
+        self.system_prompt = SYSTEM_PROMPT
         # Requests being worked on. The idle monitor never unloads a model
         # while this is above zero, so an inference can't lose its model
         # halfway through.
@@ -179,8 +181,6 @@ class WorkerServer:
             return await self._health()
         elif req_type == "chat":
             return await self._chat(payload)
-        elif req_type == "choose_command":
-            return await self._choose_command(payload)
         elif req_type == "generate":
             return await self._generate(payload)
         elif req_type == "stt":
@@ -218,6 +218,7 @@ class WorkerServer:
         max_tokens = payload.get("max_tokens", 256)
         temperature = payload.get("temperature", 0.7)
         working_memory = payload.get("working_memory", []) or []
+        actions = payload.get("actions") or []
 
         if not messages:
             return _make_event(
@@ -227,10 +228,16 @@ class WorkerServer:
                 }
             )
 
+        system_prompt = SYSTEM_PROMPT
+        grammar = None
+        if actions:
+            system_prompt = with_actions(SYSTEM_PROMPT, actions, payload.get("apps") or [])
+            grammar = answer_grammar(actions)
+        self.system_prompt = system_prompt
         chat_messages = build_chat_messages(
             user_messages=messages,
             working_memory=working_memory,
-            system_prompt=SYSTEM_PROMPT,
+            system_prompt=system_prompt,
         )
 
         try:
@@ -241,8 +248,17 @@ class WorkerServer:
                     messages=chat_messages,
                     max_tokens=max_tokens,
                     temperature=temperature,
+                    grammar=grammar,
                 ),
             )
+            if result.get("action"):
+                return _make_event(
+                    {
+                        "type": "command",
+                        "command": result["action"],
+                        "text": payload.get("text", ""),
+                    }
+                )
 
             content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
             if self.replied_once:
@@ -268,37 +284,6 @@ class WorkerServer:
                     "error": f"Inference failed: {e!s}",
                 }
             )
-
-    async def _choose_command(self, payload: dict) -> dict:
-        """Which of the core's commands the user meant, or NONE.
-
-        The chat request comes back too, so the core can reply instead.
-        """
-        text = payload.get("text", "")
-        messages = choose_messages(
-            text,
-            payload.get("commands", []) or [],
-            payload.get("apps", []) or [],
-            payload.get("windows", []) or [],
-            payload.get("previous") or None,
-        )
-        try:
-            loop = asyncio.get_event_loop()
-            raw = await loop.run_in_executor(
-                self.llm_executor, lambda: self.engine.choose(messages)
-            )
-            command = clean_command(raw)
-        except (RuntimeError, OSError, ValueError) as e:
-            print(f"[worker] Choosing a command failed: {e!s}", flush=True)
-            command = "NONE"
-        return _make_event(
-            {
-                "type": "command",
-                "text": text,
-                "command": command,
-                "chat": payload.get("chat"),
-            }
-        )
 
     async def _generate(self, payload: dict) -> dict:
         prompt = payload.get("prompt", "")
@@ -440,7 +425,7 @@ class WorkerServer:
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(
             self.llm_executor,
-            lambda: self.engine.warm_up(SYSTEM_PROMPT),
+            lambda: self.engine.warm_up(self.system_prompt),
         )
         print("[worker] LLM warm-up complete", flush=True)
         return _make_event(
