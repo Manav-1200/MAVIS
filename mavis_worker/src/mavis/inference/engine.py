@@ -87,6 +87,8 @@ class LlamaEngine:
             return "phi3"
         if "llama-3" in p or "llama3" in p:
             return "llama3"
+        if "qwen" in p:
+            return "chatml"
         return "unknown"
 
     def load_model(self):
@@ -145,9 +147,12 @@ class LlamaEngine:
         prefix = self._format_chat_prompt([{"role": "system", "content": system_prompt}])
         if prefix is None:
             return
-        # Drop the trailing "<|assistant|>" opener the formatter appends:
-        # the real prompt continues with working memory there instead.
-        prefix = prefix.rsplit("<|assistant|>", 1)[0]
+        # Drop the assistant opener the formatter appends: the real prompt
+        # continues with working memory there instead.
+        for opener in ("<|im_start|>assistant", "<|assistant|>"):
+            if opener in prefix:
+                prefix = prefix.rsplit(opener, 1)[0]
+                break
         try:
             started = time.perf_counter()
             self._llm.create_completion(prompt=prefix, max_tokens=1, temperature=0.0)
@@ -213,6 +218,14 @@ class LlamaEngine:
             parts.append("<|assistant|>\n")
             return "\n".join(parts)
 
+        if self._model_name_hint == "chatml":
+            parts = [
+                f"<|im_start|>{m.get('role', 'user')}\n{m.get('content', '')}<|im_end|>"
+                for m in messages
+            ]
+            parts.append("<|im_start|>assistant\n")
+            return "\n".join(parts)
+
         return None
 
     def _get_stop_tokens(self) -> list[str]:
@@ -228,6 +241,8 @@ class LlamaEngine:
                 "<|endoftext|>",
                 "</s>",
             ]
+        if self._model_name_hint == "chatml":
+            return ["<|im_end|>", "<|im_start|>", "<|endoftext|>"]
         return []
 
     def _post_process(self, text: str) -> str:
