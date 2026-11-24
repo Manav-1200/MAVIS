@@ -148,9 +148,9 @@ Many laptops send the Copilot key's press and release together however long it's
 
 ### Voice commands
 
-Some phrases are handled directly by the planner without an LLM round trip, so they respond near-instantly:
+What MAVIS can do. Say it however you like: the model works out what you mean, so the phrasings below are only examples.
 
-| Say | MAVIS does |
+| For example | MAVIS does |
 |-----|------------|
 | "open firefox", "launch terminal", "can you open thunar for me" | Launches the app; a name misheard by a letter or two ("tuner") still finds it |
 | "open the terminal", "close the browser" | Finds the app by what it is (from its launcher's GenericName and Categories); asks "Which one?" when several fit |
@@ -170,7 +170,7 @@ Some phrases are handled directly by the planner without an LLM round trip, so t
 | "open Firefox and play lofi" | Plays it in the app just opened, if that app can play anything |
 | "brighter", "dim the screen" | Adjusts brightness |
 
-Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. A request said in other words ("it's way too loud", "get rid of this window") goes to the model with the list of commands MAVIS knows, and it picks one or none. Its pick then goes through the same rules and the same "Shall I…?" as a spoken command, so it can only choose what MAVIS can already do. A pick that names an app or site you never mentioned is ignored, and questions never reach this step. Anything else goes to the local model with context attached. The model can't act, and a reply that claims an action ("closing the terminal now") is replaced with "I can't do that yet." If an action fails, MAVIS says so and why.
+Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. Everything you say goes to the local model once, with the conversation, what's on screen and the list of MAVIS's actions. It answers either `DO <action>` or `SAY <reply>`, and llama.cpp's grammar allows nothing else. No phrase lists decide what you meant. Before a `DO` runs, the code checks it: the action must be on the list, levels must be 0–100, and an app or site must be one you mentioned or described ("the browser"). Closing apps, logging out and shutting down still ask "Shall I…?" first. A reply that claims an action it didn't take ("closing the terminal now") is replaced with "I can't do that yet." If an action fails, MAVIS says so and why.
 
 An utterance that starts with an explicit action is never treated as system control — "google how to mute a tab" searches rather than muting your machine.
 
