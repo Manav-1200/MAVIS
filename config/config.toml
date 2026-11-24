@@ -53,6 +53,8 @@ provider = "local"
 # What has actually been running. If the file is missing, the worker tries
 # the Phi-3 and TinyLlama files in the same folder.
 path = "~/.local/share/mavis/models/Phi-3-mini-4k-instruct-Q4_K_M.gguf"
+# Qwen2.5-3B-Instruct (Q4_K_M, about 2 GB) is the candidate for choosing
+# actions; any file with "qwen" in its name uses its chat format.
 n_ctx = 4096
 n_gpu_layers = 20        # full offload (-1) failed on 6 GB
 verbose = false
