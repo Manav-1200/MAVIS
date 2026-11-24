@@ -2107,6 +2107,37 @@ systemd-logind's `SetBrightness` lets the active session set its own backlight w
   - Session actions are said before they run.
 - **Not run:** the model's own choices. No model can be downloaded here. The next hardware run measures how many were right and how long they took.
 
+## 45. The 2026-11-24 run: DO/SAY on Phi-3
+
+*2026-11-24.* The first run of §44. The first attempt heard nothing: the mic was too quiet again, after a Timeshift rollback, and MAVIS didn't say so. The second run had 14 sentences, and Phi-3-mini answered DO or SAY for 9 of them.
+
+| Said | Model answered | Right? |
+|---|---|---|
+| "Mavis, are you online?" | `DO workspace 2.` | No: a question |
+| "What's my volume at?" | `SAY Volume is set to 100%.` | Yes, with the real level from §43 |
+| "Can you turn it down to 80%?" | `SAY Turn the volume down to 80%.` | No: it described the action instead of taking it |
+| "It's still on 100%, it's not down to 80%." | `DO volume_down 20` | The intent was right, but the argument was made up, so it was rejected |
+| "How would you turn the volume down to 80%?" | `DO volume_set <80>` | The intent was right, but the brackets made it unreadable |
+| "Can you turn my volume down to 80%?" | `DO volume_set <80>` | The same |
+| "Can you open Thunar?" | `DO workspace 2. SAY "Thunar is now open in workspace 2."` | No: garbage that only checks turned into a harmless "Which workspace number?" |
+| "I want you to open Thunar File Manager." | `DO workspace 2` | **No, and it ran:** the workspace switched |
+| "What is my active window?" | `SAY Your active window is kitty…` | Yes |
+
+So 3 of 9 were right, 3 had the right intent in the wrong form, and 3 were wrong; one of the wrong ones acted. The checks caught every malformed action and the made-up argument, but nothing could catch a well-formed wrong choice (`workspace 2`). Replies took 0.8–1.9 s, with the first token after 0.46–0.98 s.
+
+**Fixes:**
+- **Arguments are held to their kind by the grammar, not just checked afterwards.** A level is 0–100, a workspace is a number, an app is one of the installed or open apps, and a website is a domain. `volume_set <80>`, `volume_down 20` and `workspace 2. SAY …` can no longer be written. For "open Thunar", `open Thunar` is now one of the few things that fits. `open` no longer takes websites; `open_website` does. **Proven:** the grammar compiles in llama.cpp, with and without apps.
+- **The core reads `<80>` as 80 and drops a trailing full stop,** in case a model still writes the menu's form. **Proven** (test).
+- **Temperature for answers that can act is 0.4,** down from 0.7, so a choice is less of a dice roll. **Reasoned.**
+- **The instructions** now say questions get SAY even when they mention something an action could change, and that a request an action does gets DO, never a description. There are still no examples copied from logs. **Reasoned.**
+- **Qwen's chat format is supported.** Phi-3 is the likely limit. Its wrong picks came out of nowhere: "are you online?" became a workspace switch. Qwen2.5-3B-Instruct is about the same size and does better at tool choice, but that's reported, not measured here; the next run compares the two on the same sentences.
+- **MAVIS now says when it can't hear you.** Bursts of sound above the room but under the speech threshold, four within 30 s with no speech detected, get one spoken line: "I can hear sound, but it's too quiet for me to make out words. Your microphone level may be too low." **Proven** (simulated audio).
+- **Sentinel:** packages are described by what they ended up as. Friday's update had installed and removed dux-shell and dux-gop twice each, so they were named four times; now they aren't named at all. **Proven** (test).
+
+**Still open:**
+- The mic at 0.6 still clipped (1.31–1.41×). 0.5 is the next step.
+- "Date on Friday." was correctly taken as MAVIS's own voice, and playback carried on (the §43 fix).
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
