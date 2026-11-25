@@ -469,9 +469,9 @@ pub fn is_echo(transcript: &str, spoken: &SpokenLog) -> bool {
             if !one_word {
                 return said.contains(&heard) || compact(text).contains(&heard_compact);
             }
-            // One word: only a piece of something MAVIS read out ("PRSA" from
-            // "P_RSA3072SHA384.json"), never a word it said whole, so "stop"
-            // still interrupts.
+            // One word: only a piece of something MAVIS read out (part of a
+            // file name), never a word it said whole, so "stop" still
+            // interrupts.
             heard_compact.len() >= 4
                 && compact(text).contains(&heard_compact)
                 && !said.split(' ').any(|w| w == heard)
