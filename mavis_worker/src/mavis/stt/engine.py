@@ -287,8 +287,8 @@ class STTEngine:
             # Bias the decoder toward the vocabulary actually used when
             # talking to a desktop assistant. This is not a filter: it tells
             # Whisper which rare words exist, so a weak signal resolves to
-            # "clipboard" rather than "clayboard", and "MAVIS" rather than
-            # "Ladies". App names come from this machine, not from here.
+            # the right word and to "MAVIS". App names come from this
+            # machine, not from here.
             # Written as things said to her: a bare "MAVIS." is misheard as
             # similar-sounding words. App names go
             # first: a prompt over ~220 tokens loses its beginning, and the
