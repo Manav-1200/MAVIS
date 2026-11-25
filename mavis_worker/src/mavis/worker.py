@@ -52,9 +52,8 @@ def _prefer_local_models(whisper_model: str) -> None:
     """
     Work offline only when every model is already downloaded.
 
-    Kokoro used to switch the whole process offline as soon as its own
-    weights were cached, which stopped a newly chosen speech model from
-    ever downloading (2026-11-10).
+    Switching offline as soon as one model's weights are cached would stop
+    a newly chosen model from ever downloading.
     """
     if os.environ.get("HF_HUB_OFFLINE") is not None:
         return
@@ -539,9 +538,9 @@ class WorkerServer:
 def main():
     # Without this, every logger.info in the worker goes nowhere: the root
     # logger's default level is WARNING and nothing configures a handler.
-    # Only print() reached the Rust log, so the STT diagnostics — how much
-    # speech was found, which segments were dropped, each transcript's
-    # confidence — were invisible for every run up to 2026-09-26.
+    # Only print() would reach the Rust log, and the STT diagnostics — how
+    # much speech was found, which segments were dropped, each transcript's
+    # confidence — would be invisible.
     setup_logging()
     server = WorkerServer()
     asyncio.run(server.run())
