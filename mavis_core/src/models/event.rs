@@ -54,6 +54,9 @@ pub enum EventType {
     /// Push to talk: start listening for one utterance, or stop. Sent by
     /// the hotkey socket (`toggle_listen`).
     ListenToggle,
+    /// The answer to an open "Shall I…?", as the model understood it:
+    /// `{"approved": true|false}`. Published by the planner.
+    Confirmation,
 }
 
 #[cfg(test)]
