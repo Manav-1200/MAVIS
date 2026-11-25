@@ -18,9 +18,6 @@ pub const MAX_LEAD_SENTENCES: usize = 2;
 /// Most updates described in answer to "what changed?".
 pub const MAX_DESCRIBED_UPDATES: usize = 3;
 
-/// What "recently" means when no time was given.
-pub const DEFAULT_LOOKBACK_DAYS: i64 = 7;
-
 /// Row cap for one answer.
 const QUERY_LIMIT: usize = 20_000;
 
@@ -39,46 +36,36 @@ pub struct Spoken {
     pub about: Option<DateTime<Utc>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum Turn {
-    /// The whole reply; nothing else answers this turn.
-    Answer(Spoken),
-    /// Say this first, then handle the utterance as normal.
-    Lead(Spoken),
-}
-
-/// The Sentinel's part in one user turn, if any.
-/// If a lead can't be marked as told, nothing is said; otherwise it
-/// would repeat on every utterance.
-pub fn respond(
-    store: &SentinelStore,
-    text: &str,
-    window: Option<Window>,
-    last_told: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-) -> anyhow::Result<Option<Turn>> {
-    // Checked first: "what did the update change" also matches below.
-    if is_update_question(text) {
-        return answer_update(store, last_told).map(|s| Some(Turn::Answer(s)));
-    }
-    if is_change_question(text) {
-        let window = window.unwrap_or_else(|| Window {
-            start: now - Duration::days(DEFAULT_LOOKBACK_DAYS),
-            end: now,
-            label: "in the last week".to_string(),
-        });
-        return answer_period(store, &window).map(|s| Some(Turn::Answer(s)));
-    }
-
+/// Pending changes worth saying before the reply, marked told. If they
+/// can't be marked, nothing is said; otherwise they'd repeat every turn.
+pub fn lead(store: &SentinelStore) -> anyhow::Result<Option<Spoken>> {
     let pending = store.unannounced(Severity::Notable)?;
     let Some(told) = announcement(&pending, MAX_LEAD_SENTENCES) else {
         return Ok(None);
     };
     store.mark_announced(&told.fingerprints)?;
-    Ok(Some(Turn::Lead(Spoken {
-        text: told.text,
-        about: told.about,
-    })))
+    Ok(Some(Spoken { text: told.text, about: told.about }))
+}
+
+/// What changed over the last `days` days, for the model's `system_changes`.
+pub fn answer_changes(store: &SentinelStore, days: u64, now: DateTime<Utc>) -> anyhow::Result<Spoken> {
+    let days = days.clamp(1, 365);
+    let label = match days {
+        1 => "today".to_string(),
+        7 => "in the last week".to_string(),
+        n => format!("in the last {} days", n),
+    };
+    let start = if days == 1 {
+        now.with_timezone(&chrono::Local)
+            .date_naive()
+            .and_hms_opt(0, 0, 0)
+            .and_then(|t| t.and_local_timezone(chrono::Local).single())
+            .map(|t| t.with_timezone(&Utc))
+            .unwrap_or(now - Duration::days(1))
+    } else {
+        now - Duration::days(days as i64)
+    };
+    answer_period(store, &Window { start, end: now, label })
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -184,7 +171,7 @@ fn answer_period(store: &SentinelStore, window: &Window) -> anyhow::Result<Spoke
     })
 }
 
-fn answer_update(
+pub fn answer_update(
     store: &SentinelStore,
     last_told: Option<DateTime<Utc>>,
 ) -> anyhow::Result<Spoken> {
@@ -316,129 +303,6 @@ fn number_word(n: usize) -> String {
     }
 }
 
-/// "MAVIS, what's changed?" → ["whats", "changed"].
-fn words(text: &str) -> Vec<String> {
-    let flat: String = text
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect();
-    let mut out: Vec<String> = flat.split_whitespace().map(String::from).collect();
-    while out
-        .first()
-        .is_some_and(|w| matches!(w.as_str(), "hey" | "ok" | "okay" | "so" | "mavis"))
-    {
-        out.remove(0);
-    }
-    out
-}
-
-/// "What changed recently?" Every word must be in the grammar, so "what
-/// changed in the Rust release?" still goes to the model. "installed" and
-/// "removed" need an event word ("what got installed"), since "what's
-/// installed?" is an inventory question.
-#[rustfmt::skip]
-pub fn is_change_question(text: &str) -> bool {
-    if asks_about_changes(&words(text)) {
-        return true;
-    }
-    // "Well, I want to know what changed on my system recently": the
-    // question after the lead-in (2026-11-17, it went to the model).
-    let w = words(text);
-    match w.iter().position(|x| x == "what" || x == "whats") {
-        Some(at) if at > 0 => asks_about_changes(&w[at..]),
-        _ => false,
-    }
-}
-
-fn asks_about_changes(w: &[String]) -> bool {
-    const OPENERS: &[&str] = &["what", "whats", "anything", "has", "have", "did", "was", "were", "any"];
-    const CHANGED: &[&str] = &["changed", "updated", "upgraded"];
-    const STATE: &[&str] = &["installed", "removed", "uninstalled"];
-    const EVENT: &[&str] = &[
-        "was", "were", "got", "gotten", "been", "new", "recently", "lately", "today",
-        "yesterday", "week", "morning", "afternoon", "evening", "since", "days",
-    ];
-    const GRAMMAR: &[&str] = &[
-        "what", "whats", "has", "have", "had", "anything", "something", "been", "got",
-        "gotten", "was", "were", "did", "any", "new", "change", "changed", "installed",
-        "updated", "upgraded", "removed", "uninstalled", "recently", "lately", "today",
-        "yesterday", "this", "last", "past", "week", "morning", "afternoon", "evening",
-        "few", "days", "on", "in", "to", "my", "the", "system", "computer", "machine",
-        "laptop", "pc", "since", "so", "far", "there", "packages", "package", "software",
-    ];
-
-    if asks_for_recent_changes(w) {
-        return true;
-    }
-    let Some(first) = w.first() else { return false };
-    if !OPENERS.contains(&first.as_str()) {
-        return false;
-    }
-    if !w.iter().all(|x| GRAMMAR.contains(&x.as_str())) {
-        return false;
-    }
-    let has = |set: &[&str]| w.iter().any(|x| set.contains(&x.as_str()));
-    has(CHANGED) || (has(&["change"]) && has(&["did"])) || (has(STATE) && has(EVENT))
-}
-
-/// "Tell me the recent changes on my system", "any recent updates?". The
-/// noun form, which the grammar above didn't have; the model answered it
-/// with "I'll provide a summary" and nothing followed.
-#[rustfmt::skip]
-fn asks_for_recent_changes(w: &[String]) -> bool {
-    const GRAMMAR: &[&str] = &[
-        "tell", "me", "about", "all", "list", "show", "give", "read", "can", "could", "you",
-        "please", "what", "whats", "are", "were", "any", "the", "of", "on", "to", "my", "system",
-        "computer", "machine", "laptop", "pc", "recent", "latest", "new", "changes", "updates",
-        "today", "lately", "recently", "this", "last", "past", "week",
-    ];
-    let has = |set: &[&str]| w.iter().any(|x| set.contains(&x.as_str()));
-    // "What's changed recently on my system" heard as "what's since
-    // recently on my system": a short what-question about recently and the
-    // system is this question whatever the middle word became.
-    let misheard = w.len() <= 8
-        && matches!(w.first().map(String::as_str), Some("what" | "whats"))
-        && has(&["recently", "lately"])
-        && has(&["system", "computer", "machine", "laptop", "pc"]);
-    // "What are the recent changes on my system" heard as "…the vision
-    // changes…" (2026-11-18): one word outside the grammar is let through.
-    let unknown = w.iter().filter(|x| !GRAMMAR.contains(&x.as_str())).count();
-    let one_misheard = w.len() <= 9
-        && unknown == 1
-        && matches!(w.first().map(String::as_str), Some("what" | "whats"))
-        && has(&["changes", "updates"])
-        && has(&["system", "computer", "machine", "laptop", "pc"]);
-    misheard
-        || one_misheard
-        || (!w.is_empty()
-            && w.iter().all(|x| GRAMMAR.contains(&x.as_str()))
-            && has(&["changes", "updates"])
-            && has(&["recent", "latest", "new", "today", "lately", "recently", "week"]))
-}
-
-/// "What did that update do?" Every word must be in the grammar, so
-/// "what is the latest update for Firefox" still goes to the model.
-pub fn is_update_question(text: &str) -> bool {
-    const UPDATE: &[&str] = &["update", "upgrade"];
-    const POINTER: &[&str] = &["that", "the", "last", "latest", "recent", "this"];
-    const GRAMMAR: &[&str] = &[
-        "what", "did", "does", "was", "were", "in", "that", "the", "last", "latest", "recent",
-        "this", "my", "system", "update", "upgrade", "do", "change", "install", "actually",
-        "exactly", "just", "bring", "include",
-    ];
-
-    let w = words(text);
-    if w.first().map(String::as_str) != Some("what") {
-        return false;
-    }
-    if !w.iter().all(|x| GRAMMAR.contains(&x.as_str())) {
-        return false;
-    }
-    let has = |set: &[&str]| w.iter().any(|x| set.contains(&x.as_str()));
-    has(UPDATE) && has(POINTER)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,96 +350,16 @@ mod tests {
     const DAY: i64 = 86_400;
 
     #[test]
-    fn change_questions_are_recognised() {
-        for q in [
-            "What changed recently?",
-            "what's changed",
-            "MAVIS, what changed?",
-            "Hey MAVIS, has anything changed on my system?",
-            "What got installed yesterday?",
-            "What was installed this week?",
-            "anything new installed lately",
-            "What's been updated since this morning?",
-            "Did anything change on my computer?",
-            "what packages were removed today",
-            "Tell me all the recent changes on my system.",
-            "Can you list the latest updates?",
-            "any recent changes",
-            "Mavis, what's since recently on my system?",
-            "Well, I want to know what changed on my system recently.",
-            "Mavis, what are the vision changes on my system?",
-        ] {
-            assert!(is_change_question(q), "should match: {q}");
-        }
-    }
-
-    #[test]
-    fn other_questions_are_left_for_the_model() {
-        for q in [
-            "What changed in the Rust release?",
-            "What changes should I make to my system?",
-            "what's installed",
-            "what have you changed",
-            "How do I see what changed in git?",
-            "is firefox installed",
-            "changed my mind",
-            "what change",
-            "any change in the weather",
-            "what time is it",
-            "what are the latest updates for firefox",
-            "tell me about changes",
-            "what have you been doing on my computer recently and why",
-            "",
-        ] {
-            assert!(!is_change_question(q), "should not match: {q}");
-        }
-    }
-
-    #[test]
-    fn update_questions_are_recognised() {
-        for q in [
-            "What did that update do?",
-            "what did the update do",
-            "What was in the last update?",
-            "MAVIS, what did the latest system update install?",
-            "what exactly did that update change",
-        ] {
-            assert!(is_update_question(q), "should match: {q}");
-        }
-    }
-
-    #[test]
-    fn update_questions_need_a_particular_update() {
-        for q in [
-            "what is the latest update for firefox",
-            "what update",
-            "should I update",
-            "what did you do",
-            "what did that do",
-        ] {
-            assert!(!is_update_question(q), "should not match: {q}");
-        }
-    }
-
-    #[test]
-    fn matching_survives_non_ascii() {
-        // Curly apostrophes and accents from Whisper must not panic.
-        assert!(is_change_question("What’s changed?"));
-        assert!(!is_change_question("qué cambió"));
-        assert!(!is_update_question("what did thé update do"));
-    }
-
-    #[test]
     fn nothing_pending_means_nothing_said() {
         assert!(announcement(&[], MAX_LEAD_SENTENCES).is_none());
         // Routine only: must not produce an empty sentence.
-        assert!(announcement(&[upgraded("firefox", 10)], 2).is_none());
+        assert!(announcement(&[upgraded("webby", 10)], 2).is_none());
     }
 
     #[test]
     fn one_update_is_one_sentence() {
         let pending = vec![
-            installed("hyprland", false, 10),
+            installed("alphawm", false, 10),
             installed("foo", false, 11),
         ];
         let a = announcement(&pending, MAX_LEAD_SENTENCES).unwrap();
@@ -624,23 +408,23 @@ mod tests {
         let (store, path) = temp_store("lead_once");
         store
             .record_all(&[
-                installed("hyprland", false, HOUR),
-                upgraded("firefox", HOUR),
+                installed("alphawm", false, HOUR),
+                upgraded("webby", HOUR),
             ])
             .unwrap();
 
-        let first = respond(&store, "what's the weather", None, None, Utc::now()).unwrap();
-        let Some(Turn::Lead(spoken)) = first else {
+        let first = lead(&store).unwrap();
+        let Some(spoken) = first else {
             panic!("expected a lead, got {:?}", first)
         };
-        assert!(spoken.text.contains("hyprland"), "{}", spoken.text);
+        assert!(spoken.text.contains("alphawm"), "{}", spoken.text);
         assert!(
-            !spoken.text.contains("firefox"),
+            !spoken.text.contains("webby"),
             "routine is never volunteered"
         );
         assert_eq!(spoken.about, Some(ago(HOUR)));
 
-        let second = respond(&store, "and tomorrow?", None, None, Utc::now()).unwrap();
+        let second = lead(&store).unwrap();
         assert_eq!(second, None, "told once");
 
         assert_eq!(store.count().unwrap(), 2);
@@ -652,24 +436,24 @@ mod tests {
         let (store, path) = temp_store("answer");
         store
             .record_all(&[
-                installed("hyprland", false, DAY + 10),
-                installed("neovim", true, DAY + 5),
-                upgraded("firefox", DAY),
+                installed("alphawm", false, DAY + 10),
+                installed("texted", true, DAY + 5),
+                upgraded("webby", DAY),
                 upgraded("mesa", DAY),
                 upgraded("glibc", DAY),
             ])
             .unwrap();
 
-        let turn = respond(&store, "what changed recently?", None, None, Utc::now()).unwrap();
-        let Some(Turn::Answer(spoken)) = turn else {
+        let turn = Some(answer_changes(&store, 7, Utc::now()).unwrap());
+        let Some(spoken) = turn else {
             panic!("expected an answer, got {:?}", turn)
         };
         assert!(
-            spoken.text.contains("pulled in hyprland"),
+            spoken.text.contains("pulled in alphawm"),
             "{}",
             spoken.text
         );
-        assert!(spoken.text.contains("installed neovim"), "{}", spoken.text);
+        assert!(spoken.text.contains("installed texted"), "{}", spoken.text);
         assert!(
             spoken.text.contains("upgraded 3 packages"),
             "{}",
@@ -677,7 +461,7 @@ mod tests {
         );
 
         // Answered, so not led with next time.
-        let next = respond(&store, "thanks", None, None, Utc::now()).unwrap();
+        let next = lead(&store).unwrap();
         assert_eq!(next, None);
         let _ = std::fs::remove_file(&path);
     }
@@ -688,13 +472,13 @@ mod tests {
         store
             .record_all_announced(&[installed("old", false, 30 * DAY)])
             .unwrap();
-        let turn = respond(&store, "has anything changed?", None, None, Utc::now()).unwrap();
+        let turn = answer_changes(&store, 7, Utc::now()).unwrap();
         assert_eq!(
             turn,
-            Some(Turn::Answer(Spoken {
+            Spoken {
                 text: "Nothing changed on the system in the last week.".into(),
                 about: None
-            }))
+            }
         );
         let _ = std::fs::remove_file(&path);
     }
@@ -710,17 +494,7 @@ mod tests {
             end: Utc::now() - Duration::days(1),
             label: "yesterday".into(),
         };
-        let turn = respond(
-            &store,
-            "what changed yesterday",
-            Some(window),
-            None,
-            Utc::now(),
-        )
-        .unwrap();
-        let Some(Turn::Answer(spoken)) = turn else {
-            panic!()
-        };
+        let spoken = answer_period(&store, &window).unwrap();
         assert_eq!(spoken.text, "Nothing changed on the system yesterday.");
         let _ = std::fs::remove_file(&path);
     }
@@ -732,10 +506,7 @@ mod tests {
             .map(|d| upgraded(&format!("pkg{d}"), d * DAY / 2))
             .collect();
         store.record_all_announced(&changes).unwrap();
-        let turn = respond(&store, "what changed", None, None, Utc::now()).unwrap();
-        let Some(Turn::Answer(spoken)) = turn else {
-            panic!()
-        };
+        let spoken = answer_changes(&store, 7, Utc::now()).unwrap();
         assert!(
             spoken
                 .text
@@ -758,35 +529,21 @@ mod tests {
         let (store, path) = temp_store("that_update");
         store
             .record_all(&[
-                installed("hyprland", false, 2 * DAY),
+                installed("alphawm", false, 2 * DAY),
                 upgraded("dms-shell", 2 * DAY),
             ])
             .unwrap();
-        store.record_all(&[upgraded("firefox", DAY)]).unwrap(); // newer, routine
+        store.record_all(&[upgraded("webby", DAY)]).unwrap(); // newer, routine
 
-        let lead = respond(&store, "hello", None, None, Utc::now()).unwrap();
-        let Some(Turn::Lead(told)) = lead else {
-            panic!("{:?}", lead)
-        };
-
-        let turn = respond(
-            &store,
-            "what did that update do?",
-            None,
-            told.about,
-            Utc::now(),
-        )
-        .unwrap();
-        let Some(Turn::Answer(spoken)) = turn else {
-            panic!()
-        };
-        assert!(spoken.text.contains("hyprland"), "{}", spoken.text);
+        let told = lead(&store).unwrap().expect("a lead");
+        let spoken = answer_update(&store, told.about).unwrap();
+        assert!(spoken.text.contains("alphawm"), "{}", spoken.text);
         assert!(
             spoken.text.contains("upgraded dms-shell"),
             "{}",
             spoken.text
         );
-        assert!(!spoken.text.contains("firefox"), "{}", spoken.text);
+        assert!(!spoken.text.contains("webby"), "{}", spoken.text);
         let _ = std::fs::remove_file(&path);
     }
 
@@ -797,20 +554,10 @@ mod tests {
             .record_all_announced(&[upgraded("old", 2 * DAY)])
             .unwrap();
         store
-            .record_all_announced(&[upgraded("firefox", DAY)])
+            .record_all_announced(&[upgraded("webby", DAY)])
             .unwrap();
-        let turn = respond(
-            &store,
-            "what did the last update do",
-            None,
-            None,
-            Utc::now(),
-        )
-        .unwrap();
-        let Some(Turn::Answer(spoken)) = turn else {
-            panic!()
-        };
-        assert!(spoken.text.contains("upgraded firefox"), "{}", spoken.text);
+        let spoken = answer_update(&store, None).unwrap();
+        assert!(spoken.text.contains("upgraded webby"), "{}", spoken.text);
         assert!(!spoken.text.contains("old"), "{}", spoken.text);
         let _ = std::fs::remove_file(&path);
     }
@@ -818,10 +565,7 @@ mod tests {
     #[test]
     fn that_update_on_an_empty_store_says_so() {
         let (store, path) = temp_store("empty");
-        let turn = respond(&store, "what did that update do", None, None, Utc::now()).unwrap();
-        let Some(Turn::Answer(spoken)) = turn else {
-            panic!()
-        };
+        let spoken = answer_update(&store, None).unwrap();
         assert_eq!(spoken.text, "I haven't seen any system updates yet.");
         let _ = std::fs::remove_file(&path);
     }
@@ -830,30 +574,27 @@ mod tests {
     fn nothing_pending_and_no_question_is_silence() {
         let (store, path) = temp_store("silence");
         store
-            .record_all_announced(&[installed("hyprland", false, HOUR)])
+            .record_all_announced(&[installed("alphawm", false, HOUR)])
             .unwrap();
-        store.record_all(&[upgraded("firefox", 10)]).unwrap();
-        assert_eq!(
-            respond(&store, "open firefox", None, None, Utc::now()).unwrap(),
-            None
-        );
+        store.record_all(&[upgraded("webby", 10)]).unwrap();
+        assert_eq!(lead(&store).unwrap(), None);
         let _ = std::fs::remove_file(&path);
     }
 
     #[test]
     fn a_routine_only_update_is_described_plainly() {
         let line =
-            describe_transaction(&[upgraded("firefox", 10), installed("gimp", true, 10)]).unwrap();
+            describe_transaction(&[upgraded("webby", 10), installed("gimp", true, 10)]).unwrap();
         assert_eq!(
             line,
-            "Your system update today installed gimp and upgraded firefox."
+            "Your system update today installed gimp and upgraded webby."
         );
     }
 
     #[test]
     fn descriptions_are_speakable() {
         let line = describe_transaction(&[
-            installed("hyprland", false, 10),
+            installed("alphawm", false, 10),
             upgraded("a", 10),
             upgraded("b", 10),
             upgraded("c", 10),
