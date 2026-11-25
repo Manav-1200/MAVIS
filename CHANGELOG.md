@@ -39,6 +39,9 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Changed
+- **Code comments without test history:** dates, run references and quoted transcripts moved out of the code. The reasons stay; the history lives in `DECISIONS.md`.
+- **No phrase lists left.** MAVIS's answers to "Shall I…?", questions about system changes, "stop", looking back over past days and remembering facts all go through the model as actions (`confirm`, `cancel`, `system_changes`, `update_details`, `stop`, `look_back`, `remember`). The word lists, the Sentinel's question grammar, time-phrase parsing, the command tables, the reply filters and the real names in tests and comments are gone.
+- **High-risk actions are asked twice,** the second time saying they can't be undone, instead of needing "yes, administrator". A tap on the orb never answers them.
 - **Qwen models are supported:** a model file with "qwen" in its name uses its chat format, for comparing against Phi-3 at choosing actions.
 - **MAVIS understands instead of matching phrases.** Every sentence goes to the model once, which answers `DO <action>` or `SAY <reply>`, enforced by a grammar. Actions come from a catalogue in code. The code checks each one before it runs: the action exists, levels are 0–100, and named apps or sites come from what you said. The request filter, the separate command chooser, the examples copied from logs and the command tables on the live path are gone. Simple commands now take about as long as a short reply.
 - **The orb follows the cursor while you drag it**, like a window.
