@@ -58,7 +58,7 @@ pub fn group_transactions(changes: &[Change], gap_secs: i64) -> Vec<Vec<Change>>
 /// worth interrupting for.
 ///
 /// Deliberately reports and stops. No verdict, no advice — the user knows
-/// whether they wanted Hyprland on their machine and MAVIS does not.
+/// whether they wanted Alphawm on their machine and MAVIS does not.
 pub fn summarize(group: &[Change]) -> Option<String> {
     if group.is_empty() {
         return None;
@@ -77,8 +77,7 @@ pub fn summarize(group: &[Change]) -> Option<String> {
 
     // What each package ended up as. One installed and removed again (or
     // removed and put back) in the same update comes to nothing, and is
-    // never named twice: "removed dux-gop, dux-shell, dux-gop and
-    // dux-shell" (2026-11-24).
+    // never named twice.
     let mut fate: Vec<(&str, char, char)> = Vec::new(); // name, first, last
     for change in &group {
         let (name, what) = match &change.kind {
@@ -503,10 +502,10 @@ mod tests {
     #[test]
     fn a_big_update_becomes_a_single_sentence() {
         let changes = vec![
-            installed("hyprland", false, 14),
+            installed("alphawm", false, 14),
             installed("linux-firmware-amd", false, 13),
             installed("linux-firmware-ti", false, 12),
-            upgraded("firefox", 11),
+            upgraded("webby", 11),
             upgraded("mesa", 10),
         ];
         let lines = summarize_all(&changes);
@@ -516,12 +515,12 @@ mod tests {
         assert!(line.contains("3 packages you didn't ask for"), "{}", line);
         // Oldest first, joined for speech.
         assert!(
-            line.contains("hyprland, linux-firmware-amd and linux-firmware-ti"),
+            line.contains("alphawm, linux-firmware-amd and linux-firmware-ti"),
             "{}",
             line
         );
         // Routine upgrades are not mentioned at all.
-        assert!(!line.contains("firefox"), "{}", line);
+        assert!(!line.contains("webby"), "{}", line);
         assert!(!line.contains("mesa"), "{}", line);
     }
 
@@ -561,29 +560,29 @@ mod tests {
 
     #[test]
     fn a_single_pulled_in_package_reads_naturally() {
-        let line = summarize(&[installed("hyprland", false, 10)]).unwrap();
-        assert!(line.contains("pulled in hyprland, which you didn't ask for"), "{}", line);
+        let line = summarize(&[installed("alphawm", false, 10)]).unwrap();
+        assert!(line.contains("pulled in alphawm, which you didn't ask for"), "{}", line);
     }
 
     /// An update that only bumped versions is not worth interrupting for.
     #[test]
     fn a_routine_update_produces_nothing() {
-        let changes = vec![upgraded("firefox", 10), upgraded("mesa", 11)];
+        let changes = vec![upgraded("webby", 10), upgraded("mesa", 11)];
         assert!(summarize_all(&changes).is_empty());
         assert!(summarize(&changes).is_none());
     }
 
     #[test]
     fn packages_the_user_asked_for_are_not_mentioned() {
-        let changes = vec![installed("neovim", true, 10), installed("ripgrep", true, 11)];
+        let changes = vec![installed("texted", true, 10), installed("ripgrep", true, 11)];
         assert!(summarize_all(&changes).is_empty());
     }
 
     #[test]
     fn removals_are_reported_alongside_pull_ins() {
-        let changes = vec![installed("hyprland", false, 10), removed("oldthing", 11)];
+        let changes = vec![installed("alphawm", false, 10), removed("oldthing", 11)];
         let line = summarize(&changes).unwrap();
-        assert!(line.contains("hyprland"), "{}", line);
+        assert!(line.contains("alphawm"), "{}", line);
         assert!(line.contains("removed oldthing"), "{}", line);
         assert!(line.contains(" and "), "{}", line);
     }
@@ -608,7 +607,7 @@ mod tests {
     /// Spoken aloud, so no markdown, no newlines, and it ends properly.
     #[test]
     fn summaries_are_speakable() {
-        let changes = vec![installed("hyprland", false, 10), installed("foo", false, 11)];
+        let changes = vec![installed("alphawm", false, 10), installed("foo", false, 11)];
         let line = summarize(&changes).unwrap();
         assert!(!line.contains('\n'));
         assert!(!line.contains('*'));
@@ -678,11 +677,11 @@ mod tests {
         let inst = |n: &str| ChangeKind::PackageInstalled { name: n.into(), version: "1".into(), requested: false };
         let gone = |n: &str| ChangeKind::PackageRemoved { name: n.into(), version: "1".into() };
         let group = vec![
-            ch(inst("dux-shell"), 1), ch(gone("dux-shell"), 2), ch(inst("dux-shell"), 3), ch(gone("dux-shell"), 4),
+            ch(inst("pkg-x"), 1), ch(gone("pkg-x"), 2), ch(inst("pkg-x"), 3), ch(gone("pkg-x"), 4),
             ch(gone("cmake"), 5), ch(gone("cmake"), 6), ch(inst("rhash"), 7),
         ];
         let line = summarize(&group).unwrap();
-        assert!(!line.contains("dux-shell"), "{}", line);
+        assert!(!line.contains("pkg-x"), "{}", line);
         assert_eq!(line.matches("cmake").count(), 1, "{}", line);
         assert!(line.contains("pulled in rhash"), "{}", line);
     }
@@ -699,11 +698,11 @@ mod tests {
     #[test]
     fn a_moved_setuid_program_is_said_as_a_move() {
         let kind = ChangeKind::SetuidMoved {
-            from: "/usr/lib/libgtop/libgtop_server2".into(),
-            to: "/usr/lib/libgtop_server2".into(),
+            from: "/usr/lib/helperd/helperd_server".into(),
+            to: "/usr/lib/helperd_server".into(),
         };
         let line = summarize(&[privilege(kind, "setuid", 10)]).unwrap();
-        assert_eq!(line, "Today, libgtop_server2, a program with special rights, moved to another folder.");
+        assert_eq!(line, "Today, helperd_server, a program with special rights, moved to another folder.");
     }
 
     /// Routine privilege changes are never volunteered, but are described when asked.
