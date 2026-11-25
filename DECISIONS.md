@@ -2138,6 +2138,72 @@ So 3 of 9 were right, 3 had the right intent in the wrong form, and 3 were wrong
 - The mic at 0.6 still clipped (1.31–1.41×). 0.5 is the next step.
 - "Date on Friday." was correctly taken as MAVIS's own voice, and playback carried on (the §43 fix).
 
+## 46. No phrase lists left
+
+*2026-11-24.* The user saw a test line naming a real song and asked: "Can we remove every lines like those and prompts that are still present? I want MAVIS to understand and execute and not follow a script." §44 had left four phrase-based parts for later. Removing them, and the matchers they used, finishes step 6 of Phase 8.6.
+
+### What the model now decides, as actions
+- **Answers to "Shall I…?"**
+  - While a question is open, the model sees it as a live fact ("You just asked the user: …") and gains `confirm` and `cancel`. The planner sends the answer to the gate as a `Confirmation` event.
+  - The gate no longer reads speech at all. Gone: `is_affirmative` and its word lists, and `repeats_request`.
+  - High-risk actions (score 8+) are asked twice, the second time saying they can't be undone, which the user agreed to on 2026-11-23. That replaces needing the phrase "yes, administrator".
+  - A tap answers an ordinary question, never a high-risk one.
+- **System changes.** `system_changes <days>` and `update_details` call the Sentinel's answers directly.
+  - Gone: `is_change_question`, `is_update_question` and their grammars, including the one-misheard-word allowance from §41.
+  - Pending changes still lead a reply unasked.
+- **Stop.** `stop` goes quiet, or pauses media when MAVIS is silent. Gone: `is_stop_request`.
+- **Looking back.** `look_back <days>` answers again, this time with that stretch of memory in front of the model. Gone: `parse_time_reference` ("yesterday", "this week").
+- **Facts about the user.** `remember <fact>` stores at recall importance 9, but only if most of the fact's words are the user's own.
+  - Gone: `SELF_FACT_MARKERS` ("my name is", "I like"…) and the question-word list in importance scoring. A trailing "?" still marks a question.
+- **Undo** was already an action.
+
+### Also removed
+- **Matchers and tables:** `SYSTEM_INTENTS`, `WHOLE_REQUESTS`, `match_system_intent`, `match_action_intent`, `level_request`, `whole_request`, `window_request`, `close_request` and its variants, `close_focused`, `link_request`, `opened_app`, `request_body`, `find_verb`, `is_undo_request` and `number_word`. `close <app>` and `fullscreen` are now built directly from the target (`close_app`, `fullscreen_plan`), still never closing MAVIS's own windows.
+- **Pre-model checks:** the meta-question deflection and its phrases, and the canned "Yes?" for the wake name alone. The model answers both.
+- **The confidence bypass for commands** (`heard_as_command`). Unclear transcripts are now dropped unless a question is open.
+- **Reply filters:** `ACTION_CLAIM` / `CANT_DO` and `GENERIC_OFFER` in the worker. With DO/SAY, acting is structural, so a reply that claims an action is a prompt failure to fix, not to paper over. The instructions no longer quote example phrases. Name removal keeps only the comma and sentence-start cases, with no word list.
+- **Real names in tests and comments.** Real app, song, site and package names were replaced with invented ones (Webby, Filey, termy, Snapkeep, "Sunbeam by The Band", alphawm…). Tests still contain sentences, because a test needs an input, but none is a real one from the user's sessions.
+
+### What stays, and why
+- **Safety lists** in `risk.rs`: dangerous commands and destructive or elevated tokens. They judge what would run, not what was said. Step 2 turns refusals into warn-and-ask.
+- **Plumbing:**
+  - stopwords for memory search;
+  - filler words in app-name matching;
+  - the media-search small words;
+  - the address and misheard forms of "MAVIS";
+  - freedesktop category names;
+  - code file extensions.
+
+  None of these interprets the user's request.
+
+### Costs
+- **More rests on the model.** A small model will sometimes misjudge yes and no. The gate still holds the action, and saying nothing lets it lapse.
+- **One-word questions get no help.** Mishearings like "vision" for "recent" are now the model's problem, not a code allowance.
+- **Replies can claim actions again.** Rule 14 and the DO grammar are the only guard against a reply like "Done!" now.
+
+**Evidence:**
+- **Proven** (277 tests):
+  - `DO confirm` reaches the gate.
+  - An open question adds `confirm` and `cancel` and shows the question to the model.
+  - High-risk actions are asked twice, and taps don't answer them.
+  - `system_changes` and `update_details` answer from the record.
+  - `stop` stays silent.
+  - `close_app` spares MAVIS's own window.
+  - `remember` refuses facts that weren't said.
+  - Clippy is unchanged. Ruff is clean. The grammar compiles.
+- **Not run on hardware.**
+
+
+## 47. No test history in the code
+
+**Decision:** Comments, docstrings and test data in `mavis_core` and `mavis_worker` describe what the code does and why, not the run that taught it. Dates, run and log references, `§` numbers, quoted transcripts, the user's own names and packages from their updates were removed. Old changelog headers at the top of `main.rs` and `executor.rs` were removed too. That history stays here, in `CHANGELOG.md` and in git.
+
+**Kept:** the example pacman, dpkg and dnf lines in `sentinel/packages.rs`. They document file formats.
+
+**Evidence:**
+- **Proven:** 275 + 277 tests pass. Clippy matches HEAD. Ruff is clean.
+- **Reasoned:** this changes comments and test data only, so behaviour is unchanged.
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
