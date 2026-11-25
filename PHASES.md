@@ -27,7 +27,7 @@
 | 7 | Memory & Learning | Recall with decay, daily consolidation, episodic replay, entity graph, context compression. | Persistent memory | :white_check_mark: 7.1–7.2 complete; 7.3 deferred |
 | 8 | Safety & Permissions | Risk scoring, permission gate, confirmation flow, rollback, append-only audit log. | Trust layer | :white_check_mark: Built (per-skill permissions wait on Phase 9) |
 | 8.5 | System Sentinel | Notices what changed on the machine: packages, privileges, file integrity, advisories. | Machine awareness | :construction: Built — steps 2b–4 await a hardware run, step 5 unverified |
-| 8.6 | Understanding & Trust | The model decides what you mean (DO/SAY); sensitive actions warn and ask; your voice and face authorise them; it learns how you talk; it reads files and builds projects. | Understands, not scripted | :construction: Step 1 built |
+| 8.6 | Understanding & Trust | The model decides what you mean (DO/SAY); sensitive actions warn and ask; your voice and face authorise them; it learns how you talk; it reads files and builds projects. | Understands, not scripted | :construction: In progress |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
 | 10 | Automation & Proactive Intelligence | Rule engine, predictive suggestions, workflow recording, wellness reminders, daily briefing. | Proactive assistant | Not started |
 | 11 | Vision & Advanced UX | OCR, screenshot understanding, UI element detection, secondary monitor dashboard, conversation history. | Sees the screen | Not started |
@@ -892,17 +892,44 @@ Reads the package manager's own transaction log rather than diffing package list
 
 ## Phase 8.6 — Understanding & Trust
 
-MAVIS stops matching phrases and lets the model understand. Code keeps what it's good at: the list of actions, checking them, and safety. Plan agreed 2026-11-23. Each step gets a hardware run before the next.
+MAVIS understands instead of following a script. The model decides what was meant and how to say it; code checks actions and keeps them safe. The vision behind this phase is [`DECISIONS.md` §48](DECISIONS.md#48-the-vision-for-mavis). Each step gets a hardware run before the next.
 
-- [x] **1. DO/SAY** ([`DECISIONS.md` §44](DECISIONS.md#44-the-model-understands-the-code-checks-dosay)). One model call per sentence answers `DO <action>` or `SAY <reply>`, held to that form by a grammar. The actions are a catalogue in code. Removed: the request filter, the command chooser, the examples copied from logs, the command tables on the live path, and the "workspace too" / "all the way up" patches.
-- [x] First hardware run (§45): Phi-3-mini got 3 of 7 decisions right and switched workspace when asked to open Thunar. Fixes: arguments held to their kind by the grammar (levels are numbers, apps are installed or open apps), `open_website` split from `open`, temperature 0.4, clearer instructions, Qwen's chat format supported.
-- [ ] Second run, then Phi-3-mini against Qwen2.5-3B-Instruct.
-- [ ] **2. Sensitive actions warn and ask.** (Asking twice for high-risk actions is done, §46.) `rm -rf`, `sudo`, deleting files and the session say exactly what they'll do and wait for a yes. Nothing is refused outright. Root goes through `pkexec`, so the system's own password check comes last. Unrecoverable actions ask twice.
-- [ ] **3. Voice match.** Only the enrolled user can authorise sensitive actions; anyone else is told so. Local ECAPA speaker embeddings. Known limit: recordings and cloned voices.
-- [ ] **4. Self-learning.** It learns from the user's own confirmed DOs and daily patterns, never from undone or corrected ones or from other voices. It only gives examples and suggestions, never automatic actions. Everything learned can be read out and forgotten; nothing leaves the machine; the model's weights never change.
-- [ ] **5. Face check** with liveness, only at sensitive moments; infrared if the camera has it.
-- [x] **6. The remaining phrase lists are gone** ([`DECISIONS.md` §46](DECISIONS.md#46-no-phrase-lists-left)). The model answers confirmations (`confirm`/`cancel`), asks the Sentinel (`system_changes`, `update_details`), goes quiet (`stop`), looks back in memory (`look_back`) and keeps facts (`remember`). Removed: the yes/no and repeat-the-request words, the Sentinel's question grammar, time-phrase parsing, the stop, undo and wake-name checks, the meta-question deflection, the command tables and matchers, the self-fact markers, the confidence bypass for commands, the reply filters for action claims and closing offers, and every real app, song and package name in tests and comments.
-- [ ] **7. Files and projects.** Find and read files of any format, summarise them, and build a project from a document with a plan, a time estimate, progress reports and the safety rules above. Which coding model is still open: local, cloud, or both.
+Done:
+
+- [x] **DO/SAY** ([§44](DECISIONS.md#44-the-model-understands-the-code-checks-dosay)). One model call per sentence answers `DO <action>` or `SAY <reply>`, held to that form by a grammar. Arguments are held to their kind. Actions come from a catalogue in code, checked before they run.
+- [x] **No phrase lists left** ([§46](DECISIONS.md#46-no-phrase-lists-left)). Confirmations, Sentinel questions, going quiet, looking back and remembering all go through the model as actions. High-risk actions are asked twice.
+- [x] **No test history in the code** ([§47](DECISIONS.md#47-no-test-history-in-the-code)).
+
+Next, in order:
+
+- [ ] **1. Natural replies and a long conversation.** Every word MAVIS says comes from the model: actions report what happened and MAVIS says it its own way. The fixed reply strings go. Conversation is held over many turns; older turns are summarised, not dropped, and what matters is kept for later. Qwen2.5-3B becomes the default model.
+- [ ] **2. The open action.** Beyond the catalogue, the model can propose its own command for anything the catalogue doesn't cover. Everything goes through the risk gate: harmless commands run, risky ones are explained in plain words and wait for a yes, root goes through `pkexec`, irreversible ones are asked twice. Then multi-step tasks: plan, act, read the result, carry on.
+- [ ] **3. Learning from use.** From the owner's confirmed actions, stated facts and daily patterns, never from undone or corrected ones or other voices. Stored as data that can be read out and forgotten; nothing leaves the machine; the model's weights never change.
+- [ ] **4. Voice and face for owner-only actions.** See the rules below. Enrollment is a separate command until the install script exists.
+- [ ] **5. Files and projects.** Find and read files of any format, summarise and explain them, and build a project from a document with a plan, a time estimate and progress reports. Local on every machine, with optional cloud help (the user's own key) for large builds.
+- [ ] **6. Install script.** Last, once everything else is done. One command: detects the hardware, picks and downloads models that fit, installs everything, enrolls the owner's voice and face, and sets MAVIS up. The hardware check lives in MAVIS, so it can suggest a better model if the machine changes.
+
+Who can approve what:
+
+| Anyone | Owner only |
+|---|---|
+| Media, opening and closing apps, volume, brightness, workspaces, search, questions, conversation, locking the screen | `sudo` or root, installing or removing software, system settings, users and services, anything irreversible, logging out, suspend, shut down, restart, deleting files |
+
+Rules for voice and face:
+
+- Enrolled for the owner during installation. Only templates are stored, locally; never recordings or photos. They can be re-enrolled or deleted at any time.
+- Voice is checked in whatever the owner says at that moment, never a fixed phrase, so a recording of the enrollment can't unlock anything.
+- The face check runs in the background with no camera window, only at owner-only moments, for a second or two. The camera light always comes on; MAVIS never hides it. Frames are compared and discarded straight away.
+- Liveness is checked from natural movement; if unsure, MAVIS asks for a blink. If the owner still can't be confirmed, the system password (`pkexec`) is the fallback.
+- Machines without a camera use voice alone.
+
+Models by machine (chosen by the install script, changeable in `config/config.toml`):
+
+| Machine | Language model | Speech recognition |
+|---|---|---|
+| No graphics card, 4–8 GB RAM | Qwen2.5 0.5B–1.5B on the processor | Whisper tiny or base |
+| About 6 GB graphics memory | Qwen2.5-3B on the graphics card | Whisper small |
+| 12 GB or more | Qwen2.5 7B–14B | Whisper medium |
 
 ---
 
@@ -1102,6 +1129,9 @@ MAVIS stops matching phrases and lets the model understand. Code keeps what it's
 - Never block the async runtime.
 - No circular dependencies.
 - Privacy is default.
+- No scripts: phrase lists, sample sentences, run logs and pre-written replies never decide what MAVIS does or says.
+- Fix the ability behind a problem, not the one sentence that failed. Run history goes in `DECISIONS.md`, never in code.
+- Test data is neutral: no real people, machines or session transcripts.
 
 ---
 
