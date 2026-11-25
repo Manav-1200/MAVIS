@@ -21,13 +21,8 @@ const STOPWORDS: &[&str] = &[
     "this", "of", "to", "in", "on", "for", "and", "or", "about", "tell", "can", "with",
 ];
 
-/// Phrases where the user is stating something durable about themselves —
-/// worth remembering long after the conversation ends.
-const SELF_FACT_MARKERS: &[&str] = &[
-    "my name is", "call me", "i work", "i use", "i prefer", "i like", "i hate",
-    "i'm working on", "i am working on", "remember that", "don't forget",
-    "i always", "i usually", "my project", "my setup", "i live",
-];
+/// Importance of a fact the model chose to remember: above the recall line.
+const FACT_IMPORTANCE: i64 = 9;
 
 #[derive(Debug, Clone)]
 pub struct Memory {
@@ -59,13 +54,27 @@ impl RecallStore {
         Ok(Self { conn })
     }
 
+    /// A fact about the user the model chose to keep, recalled later.
+    pub fn remember(&self, fact: &str, timestamp: &str) -> Result<()> {
+        let fact = fact.trim();
+        if fact.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO memory_fts (text, role, timestamp, importance)
+             VALUES (?1, 'user', ?2, ?3)",
+            params![fact, timestamp, FACT_IMPORTANCE],
+        )?;
+        Ok(())
+    }
+
     pub fn record(&self, role: &str, text: &str, timestamp: &str) -> Result<()> {
         let text = text.trim();
         if text.is_empty() {
             return Ok(());
         }
         let importance = score_importance(role, text);
-        // Nothing below 2 is worth storing — "yes", "open firefox", and
+        // Nothing below 2 is worth storing — "yes", "open webby", and
         // other one-shot commands would just dilute later searches.
         if importance < 2 {
             return Ok(());
@@ -86,16 +95,12 @@ impl RecallStore {
     /// stored (replay and consolidation need them), but feeding them back as
     /// context created a loop: a vague guess was recorded, later recalled,
     /// then treated as established fact, producing more of the same.
-    /// Observed 2026-09-16 — 10 of 17 recalled entries were MAVIS quoting
-    /// its own speculation, one carrying a mistranscription forward as
-    /// though it were real.
     /// Below this, a memory is conversation rather than knowledge, and
     /// putting it in a prompt is noise. `score_importance` gives 9 to
     /// something the user stated about themselves and 5 to ordinary talk,
     /// so this line is the difference between recalling "I'm working on
-    /// the sentinel" and recalling "MAVIS, open Firefox browser" — which
-    /// is what came back on 2026-09-30, three times, while answering a
-    /// question about the clipboard. Everything is still stored; replay
+    /// the sentinel" and recalling an old command while answering an
+    /// unrelated question. Everything is still stored; replay
     /// and the daily summaries read it all.
     const MIN_RECALL_IMPORTANCE: i64 = 8;
 
@@ -135,11 +140,10 @@ impl RecallStore {
 
     /// Delete anything today's rules would no longer store.
     ///
-    /// Questions stopped counting as memories on 2026-09-26 — they are
-    /// what the user asked, not what they told MAVIS — but rows recorded
-    /// before that are still in the database, and they kept coming back:
-    /// asking "Mavis, can you hear me?" recalled the same question from a
-    /// week earlier. Runs at startup and is idempotent.
+    /// Questions don't count as memories — they are what the user asked,
+    /// not what they told MAVIS — but rows recorded by older builds are
+    /// still in the database and would keep coming back as answers to the
+    /// same question. Runs at startup and is idempotent.
     pub fn purge_by_current_rules(&self) -> Result<usize> {
         let mut stmt = self.conn.prepare("SELECT rowid, role, text FROM memory_fts")?;
         let stale: Vec<i64> = stmt
@@ -300,18 +304,9 @@ fn score_importance(role: &str, text: &str) -> i64 {
         return 2;
     }
 
-    if SELF_FACT_MARKERS.iter().any(|m| t.contains(m)) {
-        return 9;
-    }
-
-    let trimmed = t.trim_end_matches(|c: char| c.is_ascii_punctuation());
-    let is_question = text.trim_end().ends_with('?')
-        || [
-            "what", "when", "where", "who", "how", "why", "is ", "are ", "do ", "did ",
-            "can ",
-        ]
-        .iter()
-        .any(|p| trimmed.starts_with(p));
+    // What's worth keeping about the user is the model's call: it uses
+    // `remember`, which stores at FACT_IMPORTANCE. Here only the shape.
+    let is_question = text.trim_end().ends_with('?');
     // A question is not a memory. Storing them meant recall kept handing
     // the model the user's own past questions — "[recalled] Earlier, user
     // said: What is my name, Mavis?" — which is noise in the prompt and,
