@@ -7,7 +7,7 @@
 >
 > **Repo:** `github.com/Manav-1200/MAVIS`
 >
-> **Stack:** Rust 1.85+ (tokio, minifb, serde, rusqlite, notify, cpal), Python 3.10+ (llama-cpp-python, faster-whisper, piper, kokoro)
+> **Stack:** Rust 1.85+ (tokio, minifb, serde, rusqlite, notify, cpal), Python 3.10+ (llama-cpp-python, faster-whisper, kokoro, piper as fallback)
 >
 > **Why things are the way they are:** see [`DECISIONS.md`](DECISIONS.md) — every decision, the problem behind it, and the evidence for each fix.
 
@@ -23,7 +23,7 @@
 | 4 | Integration | Voice wake -> STT -> LLM -> TTS. Intent system. First automations. | Full voice companion | :white_check_mark: Complete |
 | 5 | Interaction Polish | TTS queue, interruption, session recovery, personality foundation. | Daily polish | :white_check_mark: Complete |
 | 6 | Context Awareness | Active window, open windows, workspace, clipboard, IDE, terminal, project, calendar. | Companion senses | :white_check_mark: Complete |
-| 6.5 | Action Execution | App launching, YouTube, web search, system control; cross-platform app discovery. | Companion acts | :white_check_mark: Built |
+| 6.5 | Action Execution | App launching, media, web search, system control; cross-platform app discovery. | Companion acts | :white_check_mark: Built |
 | 7 | Memory & Learning | Recall with decay, daily consolidation, episodic replay, entity graph, context compression. | Persistent memory | :white_check_mark: 7.1–7.2 complete; 7.3 deferred |
 | 8 | Safety & Permissions | Risk scoring, permission gate, confirmation flow, rollback, append-only audit log. | Trust layer | :white_check_mark: Built (per-skill permissions wait on Phase 9) |
 | 8.5 | System Sentinel | Notices what changed on the machine: packages, privileges, file integrity, advisories. | Machine awareness | :construction: Built — steps 2b–4 await a hardware run, step 5 unverified |
@@ -366,7 +366,7 @@ Real bugs found through live voice testing on target hardware — not simulated,
 - [x] **Low-confidence drops were a black box** — logging now includes the actual dropped text, not just the score, so borderline rejections are debuggable instead of silent.
 - [x] **"MAVIS" misheard as baby/movies/moose** — added `initial_prompt="MAVIS"` to bias the Whisper decoder toward the rare proper noun. Measurable improvement (4/6 correct in one test session), not a full fix — expected limitation of a quantized small model on an uncommon name.
 - [x] **Worker logs arriving late / out of order** — Python's stdout was block-buffered when piped (no `PYTHONUNBUFFERED`); prints without explicit `flush=True` queued for seconds before appearing, which had been actively misleading live debugging all session.
-- [x] **Prompt leakage via paraphrase** — tightening `SYSTEM_PROMPT` rule 13's wording did not work; the model swapped "guiding principles" for "my guidance" and leaked the same way. Real fix: deterministic phrase-match in `planner.rs` (`is_meta_instruction_question`) that bypasses the LLM entirely for meta-questions about its own instructions, returning a fixed deflection instead. Verified 3/3 on real hardware, including against a mis-transcribed "Movis, do you have any system prompt?".
+- [x] **Prompt leakage via paraphrase** — tightening `SYSTEM_PROMPT` rule 13's wording did not work; the model swapped "guiding principles" for "my guidance" and leaked the same way. Real fix: deterministic phrase-match in `planner.rs` (`is_meta_instruction_question`) that bypasses the LLM entirely for meta-questions about its own instructions, returning a fixed deflection instead. Verified 3/3 on real hardware. *(Removed in Phase 8.6, §46: the model handles these questions itself.)*
 - [x] **Session recovery** — verified working across two consecutive restarts; correct user name persisted both times.
 - [x] **Model path / GPU layer config drift** — `WorkerServer` was constructing `LlamaEngine()` with no arguments, silently ignoring `config.toml` entirely. Now wired through safely — a configured model path is only honored if that file actually exists on disk, otherwise falls back to the existing auto-detection, so a stale/wrong config value can never break a working setup.
 
@@ -399,10 +399,7 @@ Real bugs found through live voice testing on target hardware — not simulated,
 
 ### 6.1 — Verified live (2026-09-11)
 Confirmed by real voice interaction, not analysis alone:
-- "How many workspaces do I have open?" → *"You have 2 workspaces open, workspace 1 and workspace 2."*
-- "What's on my screen?" → *"Currently on screen: antigravity-ide, brave-browser, kitty, Firefox."*
-- "Tell me my global context" → *"Friday, 11 September 2026, 9:29 PM, MAVIS project, workspace 1."*
-- "What's on my clipboard?" → *"Clipboard contains project details and log level."*
+- Open workspaces, the windows on screen, the date, time and current project, and the clipboard were each asked about and answered correctly.
 
 ### 6.2 — Voice pipeline tuning (2026-09-11 — 2026-09-12)
 
@@ -444,7 +441,7 @@ The first full run after the audit answered "hello MAVIS, can you hear me" in 60
 
 ### 6.5 — Barge-in and action reliability (2026-09-26)
 
-Second live run: 2 s median replies, no hallucinations — and five "Opening Firefox" replies with nothing opened. Details in [`DECISIONS.md` §16](DECISIONS.md#16-the-2026-09-26-live-run-and-barge-in).
+Second live run: 2 s median replies, no hallucinations — and five "Opening …" replies with nothing opened. Details in [`DECISIONS.md` §16](DECISIONS.md#16-the-2026-09-26-live-run-and-barge-in).
 
 - [x] **Barge-in** — MAVIS listens while it speaks and stops the moment you talk over it; "stop" is understood as a request for silence, not a question. `MAVIS_BARGE_IN=0` restores mute-while-speaking. *Simulated only; not yet tried on real speakers.*
 - [x] **Actions actually run** — the verb may appear anywhere provided an installed app or URL follows; punctuation after the wake word no longer blocks matching; an app matches when its name appears in what was said
@@ -454,168 +451,6 @@ Second live run: 2 s median replies, no hallucinations — and five "Opening Fir
 - [x] Questions are no longer stored as memories
 - [x] The Python worker's logging was never switched on — `setup_logging()` is now called
 - [x] Kokoro starts from its local cache instead of asking Hugging Face
-
-### 6.23 — The 2026-11-22 run (2026-11-22)
-
-Details in [`DECISIONS.md` §43](DECISIONS.md#43-the-2026-11-22-run).
-
-- [x] Its own voice, read out as a piece of a file name ("PRSA"), is recognised as echo
-- [x] Sentinel: no unspeakable file names, "Another update today…", and a "what changed" answer counts everything it summed up as told
-- [x] Corrections ("…, not the active window") skip the command choice; the choice sees the last exchange
-- [x] The model is told the real speaker volume and screen brightness, and never invents levels or shortcuts
-- [x] "Workspace too" is workspace 2; "all the way up" is 100
-- [x] Brightness without `brightnessctl`, through systemd-logind
-- [x] The mic warning suggests a step down, not a fixed level
-- [ ] Try on hardware
-
-### 6.22 — Questions stay questions (2026-11-18)
-
-Details in [`DECISIONS.md` §41](DECISIONS.md#41-the-2026-11-18-run).
-
-- [x] **Questions skip the command choice**: after "No," or "OK", ending in "?", "can you explain", "I want to know"
-- [x] **The model's pick must come from what was said**: no apps or sites nobody mentioned
-- [x] "Close whatever you just opened"; "close the active window" without the model
-- [x] Windows named after their app (`timeshift-gtk` is Timeshift)
-- [x] Change questions with one misheard word reach the Sentinel
-- [x] A setuid program that changes folder is one move, not a critical new one (§42)
-- [ ] Try on hardware
-
-### 6.21 — Requests in your own words (2026-11-17)
-
-Details in [`DECISIONS.md` §40](DECISIONS.md#40-the-model-picks-the-command-the-rules-carry-it-out).
-
-- [x] **The model picks a command** from the rules' own list when no rule matched, or none
-- [x] **The pick goes back through the rules**, with the same confirmations; none means the usual reply
-- [x] Questions skip it; the command list is built from the rules, so the two can't drift
-- [x] Tried on hardware (§41): picks take 0.75–1.15 s; questions were mistaken for requests, fixed in 6.22
-
-### 6.20 — Honest, safe, and more capable (2026-11-17)
-
-Details in [`DECISIONS.md` §39](DECISIONS.md#39-the-2026-11-17-run).
-
-- [x] **No made-up actions**: claims are replaced with "I can't do that yet"; failed actions are said, with the reason
-- [x] **MAVIS never closes its own terminal**
-- [x] **Ignores its own voice** during playback
-- [x] **Apps by kind**: "the terminal", "the browser", asking which when several fit
-- [x] **New controls**: workspaces, full screen, volume and brightness levels, Bluetooth, Wi-Fi, lock, log out, suspend, shut down, restart (the session ones ask first)
-- [x] Window names from installed apps; "[mavis]" labels, lead-in change questions and follow-ups cleaned up
-- [x] **The orb follows the cursor while dragging**
-- [x] Let the model choose actions for requests no rule recognises (6.21)
-- [ ] Try on hardware
-
-### 6.19 — The orb floats (2026-11-14)
-
-Details in [`DECISIONS.md` §38](DECISIONS.md#38-the-orb-floats).
-
-- [x] **Overlay on Wayland** (layer shell): above every window, on every workspace, never takes focus; a window on GNOME and X11
-- [x] **Drag anywhere**, moved on release and kept on screen; `MAVIS_ORB_POS` works on Wayland
-- [ ] See it on niri
-
-### 6.18 — The name, once (2026-11-14)
-
-Details in [`DECISIONS.md` §37](DECISIONS.md#37-the-name-once).
-
-- [x] **The user's name only in the first reply of a run**; later replies drop it where it only addresses them.
-- [ ] Hear it on hardware
-
-### 6.17 — Review before testing (2026-11-13)
-
-Details in [`DECISIONS.md` §36](DECISIONS.md#36-review-of-611616).
-
-- [x] Thirteen bugs found by reading the code since 6.11, each fixed and most with a test: "open tuner" with Bulk Rename installed, "yes, close it", "close it" from the orb, offline start, Whisper's prompt, web search, the site after a music app, link types, "Mavis?", download errors, narration, the not-found message, the folder search
-- [ ] Hardware run
-
-### 6.16 — Speech model download (2026-11-10)
-
-Details in [`DECISIONS.md` §35](DECISIONS.md#35-the-speech-model-that-couldnt-download).
-
-- [x] **A new speech model can download**: offline only once every model is on disk.
-- [x] **Falls back to a speech model already downloaded**, and says so.
-- [x] **No five-fold retry** of a request the worker has already refused.
-- [x] **Says why it can't hear** instead of going quiet; the red orb fades after four seconds.
-- [ ] Confirm `small.en` downloads and loads on hardware
-
-### 6.15 — No more dragging (2026-11-09)
-
-Details in [`DECISIONS.md` §34](DECISIONS.md#34-focus-is-handed-back-once).
-
-- [x] **Switching window or workspace no longer pulls you back**: focus is handed back from the orb only as it opens.
-- [ ] Check on hardware
-
-### 6.14 — Playing in any app (2026-11-07)
-
-Details in [`DECISIONS.md` §33](DECISIONS.md#33-playing-in-any-app).
-
-- [x] **No site or browser in code**: `[media]` and `[web]` in `config/config.toml`.
-- [x] **"Play X in <app>" for any app**, by what it registers for: browser → site, media player → your files, own link type → its search.
-- [x] **The app last played in is used next time.**
-- [ ] Try with a second browser and a music app on hardware
-- [ ] Decide: the model choosing actions instead of phrase matching
-
-### 6.13 — Run fixes (2026-11-06)
-
-Details in [`DECISIONS.md` §32](DECISIONS.md#32-the-2026-11-06-run).
-
-- [x] **The worker reads `config/config.toml`**, so `small.en` actually loads; the model settings in it now match what runs.
-- [x] **"Open Thunar" opens Thunar**, not another entry using the same binary.
-- [x] **"Yes Mavis, close it" style answers confirm**, and **"close it"** closes the focused window.
-- [x] **No made-up system state**; misheard "what changed recently" still reaches the Sentinel.
-- [ ] Hear these on hardware; confirm whether Thunar windows were missing from the count
-
-### 6.12 — Full run (2026-11-05)
-
-Details in [`DECISIONS.md` §31](DECISIONS.md#31-the-2026-11-05-full-run).
-
-- [x] **"Play X" plays the top YouTube video** instead of opening a search; the search page is the fallback.
-- [x] **Misheard app names still open** ("tuner" → Thunar), and an app that isn't installed is said to be missing instead of the model claiming it can't open apps.
-- [x] **"Close X" can be confirmed by saying it again**, and commands and answers are no longer dropped as unclear.
-- [x] **`small.en` by default**, and a Whisper prompt that writes "Mavis" instead of "Movies".
-- [x] Window counts, terminal titles, "recent changes" and closing offers of help fixed
-- [ ] Hear these on hardware; confirm a video starts in Firefox
-
-### 6.11 — What MAVIS says about itself (2026-11-05)
-
-Details in [`DECISIONS.md` §30](DECISIONS.md#30-what-mavis-says-about-itself).
-
-- [x] **MAVIS knows it speaks.** It had said "I don't have a voice", in its voice.
-- [x] **No third-person narration** ("Mavis responds…: '…'"); only what MAVIS says is spoken.
-- [x] **Fuller replies**: up to three sentences when asked to explain, instead of a hard two-sentence, 180-character cut.
-- [x] **"Say that again" repeats the last reply.**
-- [ ] Hear these on hardware
-
-### 6.10 — A natural voice (2026-11-05)
-
-- [x] **Kokoro is the default voice.** Piper was, because the executor used Kokoro only when `MAVIS_TTS_ENGINE=kokoro` was set — so the worker loaded and warmed Kokoro on every start and no reply ever used it. Piper stays as the fallback. See [`DECISIONS.md` §29](DECISIONS.md#29-a-natural-voice).
-- [x] **Replies are spoken a sentence at a time**, the next one synthesized while the current one plays, so a long reply starts as soon as its first sentence is ready.
-
-### 6.9 — Third hardware run (2026-11-01)
-
-Details in [`DECISIONS.md` §28](DECISIONS.md#28-the-2026-11-01-run).
-
-- [x] **"Stop" over MAVIS's voice works again.** Since 6.8 a short word couldn't be heard at all while MAVIS spoke. MAVIS now listens at once, and only pauses its voice once the user has spoken for 360 ms; a lone "stop" is transcribed and acted on.
-- [x] **The Whisper model is a setting** (`[stt]` in `config/config.toml`), so `small.en` can replace the multilingual `small`.
-- [x] **The orb no longer hides the focused window.** It took keyboard focus when it opened, and MAVIS then knew of no focused window until the user clicked something. The window MAVIS was started from is read first, and on niri focus is handed back to it.
-
-### 6.8 — Second hardware run (2026-10-15)
-
-Details in [`DECISIONS.md` §27](DECISIONS.md#27-the-2026-10-15-run).
-
-- [x] **What's on screen goes last in the prompt, apart from the conversation** — the model answered "Brave" with kitty focused, copying its own previous answer.
-- [x] **Media pauses while MAVIS speaks** and resumes afterwards, unless the user paused, resumed or opened something in between.
-- [x] **Interrupting MAVIS takes 360 ms of speech over it**, not 150 — 9 of 10 interruptions were noise, each a stutter.
-
-### 6.7 — First hardware run since Phase 6 (2026-10-13)
-
-The first real session in two weeks. Launching apps worked on hardware for the first time; four things the user asked for did not. Details in [`DECISIONS.md` §26](DECISIONS.md#26-the-2026-10-13-run).
-
-- [x] **"Stop" pauses what's playing** when MAVIS isn't speaking, and is honoured even when Whisper is unsure of it. "Pause" and "resume" no longer toggle.
-- [x] **"Play X in <app>" / "Use <app>"** opens the video in that app, if it registers for web links. "Open <app> and play X" does the same. Searches stop at the end of the sentence.
-- [x] **Two requests in one sentence** both run ("volume up and next song").
-- [x] **A misheard name** ("MOVIS, what changed?") still counts as addressing MAVIS.
-- [x] **Open apps and workspaces are counted before the model sees them**, and workspaces are the numbers niri shows, not its internal ids.
-- [x] **No app names in the code.** Editors, terminals and browsers are no longer special-cased; Whisper's vocabulary is the apps installed on this machine.
-- [x] The worker's full prompt is logged only with `MAVIS_PROMPT_DEBUG=1`.
-- [x] **"Close <app>"** *(2026-10-14)* — closes that app's open windows, as their close button would, after "Shall I close …? It may lose anything unsaved." Matched against the windows actually open. niri only for now: it's the one desktop that reports window ids.
 
 ### 6.6 — Barge-in, second pass (2026-09-27)
 
@@ -628,27 +463,183 @@ Barge-in met real speakers and MAVIS cut itself off on every reply. Details in [
 - [x] **`MAVIS_AUDIO_OUTPUT`** for playback, with the right flag per player; `MAVIS_AUDIO_DEVICE` no longer breaks audio
 - [x] The worker warns when the microphone is clipping
 
-### 7.4 — Memory hygiene (2026-09-30)
+### 6.7 — First hardware run since Phase 6 (2026-10-13)
 
-A fresh run answered "can you hear me" with a clipboard from four days earlier. Details in [`DECISIONS.md` §18](DECISIONS.md#18-memory-that-follows-you-into-the-next-session).
+The first real session in two weeks. Launching apps worked on hardware for the first time; four things the user asked for did not. Details in [`DECISIONS.md` §26](DECISIONS.md#26-the-2026-10-13-run).
 
-- [x] **A restart starts a new conversation** — the event ring no longer survives it; the name, recall, summaries and entities do
-- [x] **Stored questions are purged at startup** by today's rules — they stopped being memories on 09-26, but old rows kept coming back
-- [x] **Recall drops what is essentially the question being asked** (70% word overlap either way)
-- [x] The clipping warning reports the measured peak
-- [x] **Clipboard flattened to one line** before it goes in a prompt, with its length stated when long
-- [x] **Recall injects stated facts only** (importance 8+); chatter stays in the store for replay
-- [x] **Over-range audio scaled back** to 0.95 before the speech detector and Whisper
+- [x] **"Stop" pauses what's playing** when MAVIS isn't speaking, "Pause" and "resume" no longer toggle. *(Since Phase 8.6 the model chooses `stop`; the low-confidence exception was removed, §46.)*
+- [x] **"Play X in <app>" / "Use <app>"** opens the video in that app, if it registers for web links. "Open <app> and play X" does the same. Searches stop at the end of the sentence.
+- [x] **Two requests in one sentence** both run ("volume up and next song").
+- [x] **A misheard name** ("MOVIS, what changed?") still counts as addressing MAVIS.
+- [x] **Open apps and workspaces are counted before the model sees them**, and workspaces are the numbers niri shows, not its internal ids.
+- [x] **No app names in the code.** Editors, terminals and browsers are no longer special-cased; Whisper's vocabulary is the apps installed on this machine.
+- [x] The worker's full prompt is logged only with `MAVIS_PROMPT_DEBUG=1`.
+- [x] **"Close <app>"** *(2026-10-14)* — closes that app's open windows, as their close button would, after "Shall I close …? It may lose anything unsaved." Matched against the windows actually open. niri only for now: it's the one desktop that reports window ids.
+
+### 6.8 — Second hardware run (2026-10-15)
+
+Details in [`DECISIONS.md` §27](DECISIONS.md#27-the-2026-10-15-run).
+
+- [x] **What's on screen goes last in the prompt, apart from the conversation** — the model answered "Brave" with kitty focused, copying its own previous answer.
+- [x] **Media pauses while MAVIS speaks** and resumes afterwards, unless the user paused, resumed or opened something in between.
+- [x] **Interrupting MAVIS takes 360 ms of speech over it**, not 150 — 9 of 10 interruptions were noise, each a stutter.
+
+### 6.9 — Third hardware run (2026-11-01)
+
+Details in [`DECISIONS.md` §28](DECISIONS.md#28-the-2026-11-01-run).
+
+- [x] **"Stop" over MAVIS's voice works again.** Since 6.8 a short word couldn't be heard at all while MAVIS spoke. MAVIS now listens at once, and only pauses its voice once the user has spoken for 360 ms; a lone "stop" is transcribed and acted on.
+- [x] **The Whisper model is a setting** (`[stt]` in `config/config.toml`), so `small.en` can replace the multilingual `small`.
+- [x] **The orb no longer hides the focused window.** It took keyboard focus when it opened, and MAVIS then knew of no focused window until the user clicked something. The window MAVIS was started from is read first, and on niri focus is handed back to it.
+
+### 6.10 — A natural voice (2026-11-05)
+
+- [x] **Kokoro is the default voice.** Piper was, because the executor used Kokoro only when `MAVIS_TTS_ENGINE=kokoro` was set — so the worker loaded and warmed Kokoro on every start and no reply ever used it. Piper stays as the fallback. See [`DECISIONS.md` §29](DECISIONS.md#29-a-natural-voice).
+- [x] **Replies are spoken a sentence at a time**, the next one synthesized while the current one plays, so a long reply starts as soon as its first sentence is ready.
+
+### 6.11 — What MAVIS says about itself (2026-11-05)
+
+Details in [`DECISIONS.md` §30](DECISIONS.md#30-what-mavis-says-about-itself).
+
+- [x] **MAVIS knows it speaks.** It had said "I don't have a voice", in its voice.
+- [x] **No third-person narration** ("Mavis responds…: '…'"); only what MAVIS says is spoken.
+- [x] **Fuller replies**: up to three sentences when asked to explain, instead of a hard two-sentence, 180-character cut.
+- [x] **"Say that again" repeats the last reply.**
+- [ ] Hear these on hardware
+
+### 6.12 — Full run (2026-11-05)
+
+Details in [`DECISIONS.md` §31](DECISIONS.md#31-the-2026-11-05-full-run).
+
+- [x] **"Play X" plays the top YouTube video** instead of opening a search; the search page is the fallback.
+- [x] **Misheard app names still open**, and an app that isn't installed is said to be missing instead of the model claiming it can't open apps.
+- [x] **"Close X" can be confirmed by saying it again**, and commands and answers are no longer dropped as unclear.
+- [x] **`small.en` by default**, and a Whisper prompt that writes "Mavis" instead of "Movies".
+- [x] Window counts, terminal titles, "recent changes" and closing offers of help fixed
+- [ ] Hear these on hardware; confirm a video starts in the browser
+
+### 6.13 — Run fixes (2026-11-06)
+
+Details in [`DECISIONS.md` §32](DECISIONS.md#32-the-2026-11-06-run).
+
+- [x] **The worker reads `config/config.toml`**, so `small.en` actually loads; the model settings in it now match what runs.
+- [x] **"Open <app>" opens that app**, not another entry using the same binary.
+- [x] **Answers to "Shall I…?" confirm**, and **"close it"** closes the focused window. *(Answers are understood by the model since Phase 8.6.)*
+- [x] **No made-up system state**; misheard "what changed recently" still reaches the Sentinel.
+- [ ] Hear these on hardware; confirm whether some windows were missing from the count
+
+### 6.14 — Playing in any app (2026-11-07)
+
+Details in [`DECISIONS.md` §33](DECISIONS.md#33-playing-in-any-app).
+
+- [x] **No site or browser in code**: `[media]` and `[web]` in `config/config.toml`.
+- [x] **"Play X in <app>" for any app**, by what it registers for: browser → site, media player → your files, own link type → its search.
+- [x] **The app last played in is used next time.**
+- [ ] Try with a second browser and a music app on hardware
+- [x] Decide: the model choosing actions instead of phrase matching — decided and built in Phase 8.6 (§44)
+
+### 6.15 — No more dragging (2026-11-09)
+
+Details in [`DECISIONS.md` §34](DECISIONS.md#34-focus-is-handed-back-once).
+
+- [x] **Switching window or workspace no longer pulls you back**: focus is handed back from the orb only as it opens.
+- [ ] Check on hardware
+
+### 6.16 — Speech model download (2026-11-10)
+
+Details in [`DECISIONS.md` §35](DECISIONS.md#35-the-speech-model-that-couldnt-download).
+
+- [x] **A new speech model can download**: offline only once every model is on disk.
+- [x] **Falls back to a speech model already downloaded**, and says so.
+- [x] **No five-fold retry** of a request the worker has already refused.
+- [x] **Says why it can't hear** instead of going quiet; the red orb fades after four seconds.
+- [ ] Confirm `small.en` downloads and loads on hardware
+
+### 6.17 — Review before testing (2026-11-13)
+
+Details in [`DECISIONS.md` §36](DECISIONS.md#36-review-of-611616).
+
+- [x] Thirteen bugs found by reading the code since 6.11, each fixed and most with a test: a misheard name shared by two entries, "yes, close it", "close it" from the orb, offline start, Whisper's prompt, web search, the site after a music app, link types, "Mavis?", download errors, narration, the not-found message, the folder search
+- [ ] Hardware run
+
+### 6.18 — The name, once (2026-11-14)
+
+Details in [`DECISIONS.md` §37](DECISIONS.md#37-the-name-once).
+
+- [x] **The user's name only in the first reply of a run**; later replies drop it where it only addresses them.
+- [ ] Hear it on hardware
+
+### 6.19 — The orb floats (2026-11-14)
+
+Details in [`DECISIONS.md` §38](DECISIONS.md#38-the-orb-floats).
+
+- [x] **Overlay on Wayland** (layer shell): above every window, on every workspace, never takes focus; a window on GNOME and X11
+- [x] **Drag anywhere**, moved on release and kept on screen; `MAVIS_ORB_POS` works on Wayland
+- [ ] See it on niri
+
+### 6.20 — Honest, safe, and more capable (2026-11-17)
+
+Details in [`DECISIONS.md` §39](DECISIONS.md#39-the-2026-11-17-run).
+
+- [x] **No made-up actions**: failed actions are said, with the reason. *(The reply filter for claimed actions was removed in Phase 8.6, §46: DO/SAY means a claim can't happen without the action.)*
+- [x] **MAVIS never closes its own terminal**
+- [x] **Ignores its own voice** during playback
+- [x] **Apps by kind**: "the terminal", "the browser", asking which when several fit
+- [x] **New controls**: workspaces, full screen, volume and brightness levels, Bluetooth, Wi-Fi, lock, log out, suspend, shut down, restart (the session ones ask first)
+- [x] Window names from installed apps; "[mavis]" labels, lead-in change questions and follow-ups cleaned up
+- [x] **The orb follows the cursor while dragging**
+- [x] Let the model choose actions for requests no rule recognises (6.21; now every request, Phase 8.6)
+- [ ] Try on hardware
+
+### 6.21 — Requests in your own words (2026-11-17)
+
+*Superseded by Phase 8.6 (§44): the model understands every request directly.*
+
+Details in [`DECISIONS.md` §40](DECISIONS.md#40-the-model-picks-the-command-the-rules-carry-it-out).
+
+- [x] **The model picks a command** from the rules' own list when no rule matched, or none
+- [x] **The pick goes back through the rules**, with the same confirmations; none means the usual reply
+- [x] Questions skip it; the command list is built from the rules, so the two can't drift
+- [x] Tried on hardware (§41): picks take 0.75–1.15 s; questions were mistaken for requests, fixed in 6.22
+
+### 6.22 — Questions stay questions (2026-11-18)
+
+*The question filters below were replaced in Phase 8.6 (§44, §46); the model tells questions from requests.*
+
+Details in [`DECISIONS.md` §41](DECISIONS.md#41-the-2026-11-18-run).
+
+- [x] **Questions skip the command choice**: after "No," or "OK", ending in "?", "can you explain", "I want to know"
+- [x] **The model's pick must come from what was said**: no apps or sites nobody mentioned
+- [x] "Close whatever you just opened"; "close the active window" without the model
+- [x] Windows named after their app, even when the window's id differs from the launcher's
+- [x] Change questions with one misheard word reach the Sentinel
+- [x] A setuid program that changes folder is one move, not a critical new one (§42)
+- [ ] Try on hardware
+
+### 6.23 — The 2026-11-22 run (2026-11-22)
+
+*The command-choice and "workspace too" / "all the way up" items were replaced in Phase 8.6 (§44).*
+
+Details in [`DECISIONS.md` §43](DECISIONS.md#43-the-2026-11-22-run).
+
+- [x] Its own voice, read out as a piece of a file name ("PRSA"), is recognised as echo
+- [x] Sentinel: no unspeakable file names, "Another update today…", and a "what changed" answer counts everything it summed up as told
+- [x] Corrections ("…, not the active window") skip the command choice; the choice sees the last exchange
+- [x] The model is told the real speaker volume and screen brightness, and never invents levels or shortcuts
+- [x] "Workspace too" is workspace 2; "all the way up" is 100
+- [x] Brightness without `brightnessctl`, through systemd-logind
+- [x] The mic warning suggests a step down, not a fixed level
+- [ ] Try on hardware
 
 ---
 
 ## Phase 6.5 — Action Execution
 
-**Status:** :white_check_mark: Built 2026-09-12, pending live test
+**Status:** :white_check_mark: Built 2026-09-12; launching apps confirmed on hardware 2026-10-13 (6.7)
 
 MAVIS could previously only ever `say` things — `executor.rs` had `shell`, `app`, `notify` and `system` implemented, but `planner.rs` emitted nothing but `say`, so none of it was reachable.
 
-- [x] **Deterministic action intents** — phrase matching in `planner.rs`, not LLM tool-calling. A 3.8B model has been unreliable at following even simple format rules here, and putting it in charge of emitting actions would make its mistakes consequential rather than merely wrong. Same approach as the meta-instruction deflection, which tested 3/3.
+- [x] **Deterministic action intents** — phrase matching in `planner.rs`, not LLM tool-calling. *(Replaced in Phase 8.6, §44: the model chooses from a catalogue of actions, held to form by a grammar, and code checks each choice before it runs.)*
 - [x] **App launching** — "open firefox", "launch terminal"
 - [x] **YouTube** — "play lofi hip hop" → opens a search
 - [x] **Web search** — "google rust async traits"
@@ -662,7 +653,7 @@ MAVIS could previously only ever `say` things — `executor.rs` had `shell`, `ap
 
 ### 6.5.1 — Installed application discovery
 
-First implementation used a hardcoded alias list, which broke the moment the user changed browser or editor. Replaced with discovery from what's actually installed, so swapping to LibreWolf, Zen, or any other app works with no code change.
+First implementation used a hardcoded alias list, which broke the moment the user changed browser or editor. Replaced with discovery from what's actually installed, so swapping to any other app works with no code change.
 
 | Platform | Source | Launch | Status |
 |----------|--------|--------|--------|
@@ -670,9 +661,9 @@ First implementation used a hardcoded alias list, which broke the moment the use
 | Windows | Start Menu `.lnk`, recursed 3 levels | `cmd /c start "" "<path>"` | :warning: **Untested** |
 | macOS | `.app` bundles in 4 standard dirs | `open -a "<Name>"` | :warning: **Untested** |
 
-Discovery lives behind `PlatformProvider::installed_apps()` with an empty default, so an unimplemented platform degrades to "no apps found" rather than failing. Matching is deliberately loose for speech — "code" finds Code - OSS, "notepad" finds DMS Notepad, "calculator" finds GNOME Calculator — and returns nothing rather than guessing at a binary that doesn't exist. Scanned once at startup; new installs need a restart.
+Discovery lives behind `PlatformProvider::installed_apps()` with an empty default, so an unimplemented platform degrades to "no apps found" rather than failing. Matching is deliberately loose for speech — a spoken word finds an app whose name begins with or contains it — and returns nothing rather than guessing at a binary that doesn't exist. Scanned once at startup; new installs need a restart.
 
-**System control** (added 2026-09-15): "volume up", "mute", "next track", "dim the screen" and similar reach the existing DBus operations directly. Matched as whole phrases, and never when the utterance opens with an explicit action — so "google how to mute a tab" searches instead of muting the machine.
+**System control** (added 2026-09-15): volume, mute, media keys and brightness reach the existing DBus operations directly. *(Chosen by the model since Phase 8.6.)*
 
 **Not yet reachable from voice:** `notify`.
 
@@ -697,12 +688,12 @@ Two deliberate departures from the original plan, both made to avoid dependencie
 
 ### 7.1 Intelligent Memory Pipeline
 
-- [x] **Importance scoring** — heuristic, not an LLM call. The plan specified "lightweight LLM call rates memory importance", but the model is already the latency bottleneck and scoring every interaction would add a round trip to every exchange. Stated facts ("my name is", "I prefer") score 9, questions 3, bare commands 1 and are dropped entirely.
+- [x] **Importance scoring** — no extra model call per exchange. Facts are kept when the model chooses `remember` (importance 9, and only if the fact restates what was said); ordinary statements score 5; questions and very short utterances aren't stored. *(The phrase markers for facts were removed in Phase 8.6, §46.)*
 - [x] **Episodic store** — `recall.db`, FTS5 virtual table over `(text, role, timestamp, importance)`.
 - [x] **Forgetting / decay** — retention scales with importance rather than a flat 30 days: MAVIS's own replies 7 days, questions 30, statements 90, stated facts never. Purged once at startup.
 - [x] **Automatic summaries** — consolidation task runs hourly, looking back 7 days for any completed day not yet summarized. Hourly rather than a fixed-time cron because MAVIS isn't guaranteed to be running at 3am; "check whether yesterday still needs doing" is more robust. Skips already-summarized days without an LLM call, and skips days with fewer than 3 meaningful memories.
 - [x] **Long-term consolidation** — summaries stored in `long_term.db` with FTS5 search. No vector embeddings (see 7.2).
-- [x] **Episodic replay** — "what was I doing yesterday afternoon" maps to a concrete time window. Recognised: `yesterday`, `today`, `this/yesterday morning|afternoon|evening`, `last week`, `this week`. Deliberately a small fixed set rather than general date parsing — a wrong window is worse than none, since it would inject unrelated history into the prompt.
+- [x] **Episodic replay** — "what was I doing yesterday?" is answered from memory of that period. The model works out how far back to look (`look_back <days>`); the code fetches that window. *(The fixed time-phrase list was removed in Phase 8.6, §46.)*
 - [x] **Context compression** *(2026-10-08)* — the prompt carries the last 12 events in full. Anything older, including what has already left the 50-event ring, becomes one line: "Earlier in this conversation the user said: …" — the last five things the user said, 80 bytes each. User words only, for the reason recall keeps only them (§7.4). No LLM summary: that would cost a model call per turn.
 
 ### 7.2 Advanced Memory
@@ -715,7 +706,7 @@ Two deliberate departures from the original plan, both made to avoid dependencie
 
 ### 7.3 Learning Engine
 
-**Deferred, deliberately** *(reaffirmed 2026-10-08)*. Routine detection needs months of accumulated behaviour to find anything real; MAVIS has days. Building a pattern detector with no patterns to detect would produce confident nonsense, and the entity graph from 7.2 is precisely the data that will eventually feed it. Revisit once `entities.db` has meaningful history.
+**Moved to Phase 8.6, step 3 (learning from use).** Originally deferred *(reaffirmed 2026-10-08)*: Routine detection needs months of accumulated behaviour to find anything real; MAVIS has days. Building a pattern detector with no patterns to detect would produce confident nonsense, and the entity graph from 7.2 is precisely the data that will eventually feed it. Revisit once `entities.db` has meaningful history.
 
 - [ ] Routine detection
 - [ ] Preferred apps per context
@@ -733,6 +724,18 @@ Two deliberate departures from the original plan, both made to avoid dependencie
 ### 7.5 — Not yet verified
 
 Everything above compiles and its logic is unit-verified, but none of it has run in a live session. Consolidation in particular cannot be confirmed until MAVIS has been left running across a day boundary. Recall and replay only become meaningful after several sessions of accumulated history.
+
+### 7.6 — Memory hygiene (2026-09-30)
+
+A fresh run answered "can you hear me" with a clipboard from four days earlier. Details in [`DECISIONS.md` §18](DECISIONS.md#18-memory-that-follows-you-into-the-next-session).
+
+- [x] **A restart starts a new conversation** — the event ring no longer survives it; the name, recall, summaries and entities do
+- [x] **Stored questions are purged at startup** by today's rules — they stopped being memories on 09-26, but old rows kept coming back
+- [x] **Recall drops what is essentially the question being asked** (70% word overlap either way)
+- [x] The clipping warning reports the measured peak
+- [x] **Clipboard flattened to one line** before it goes in a prompt, with its length stated when long
+- [x] **Recall injects stated facts only** (importance 8+); chatter stays in the store for replay
+- [x] **Over-range audio scaled back** to 0.95 before the speech detector and Whisper
 
 ---
 
@@ -758,13 +761,13 @@ Planner --PlanReady--> PermissionGate --PlanApproved--> Executor
 |---|---|
 | `Read`, `Notify` | risk 0–2: `say`, `notify`, `system` (volume/media/brightness), `app`, `undo` — run silently |
 | `Ask`, `Execute` | risk 3–7: "Shall I run …?" — waits up to 20 s for a clear yes |
-| `Administrator` | risk 8+: requires the word "administrator" |
+| `Administrator` | risk 8+: asked twice, the second time saying it can't be undone *(Phase 8.6, §46; was "yes, administrator")* |
 | — | irreversible patterns: refused at any score |
 
 - [ ] **Per-plugin / per-skill permissions** — blocked on Phase 9. *(The original list had this item twice.)*
 - [x] **Dry-run mode** — the question reads out what would run: "Shall I run rm notes.txt? It modifies or deletes data." *(2026-10-07)*
 - [x] **Audit log** — `audit.db`, append-only by construction: `AuditLog` exposes no update or delete method. Columns are `(timestamp, action_type, detail, risk_score, outcome, reason)` rather than the planned `(skill, args, user_confirmed)`, since skills don't exist yet.
-- [x] **Confirmation prompts** — voice, plus an orange orb state held from the question until it is answered or lapses *(2026-10-07)*. **Tapping the orb answers yes** for risk 3–7, never for administrator actions *(2026-10-08)*. A tap is a press under 400 ms that moves less than 4 px; anything else is a drag.
+- [x] **Confirmation prompts** — voice, plus an orange orb state held from the question until it is answered or lapses *(2026-10-07)*. **Tapping the orb answers yes** for risk 3–7, never for risk 8+, which needs a spoken answer *(2026-10-08)*. A tap is a press under 400 ms that moves less than 4 px; anything else is a drag.
 
 ### 8.2 Safety Layer
 
@@ -784,13 +787,12 @@ As built. The plan contradicted itself (§8.2 said confirm from 5, this section 
 PlanReady -> assess_plan() -> audit.db
     -> deny pattern:   "I won't do that. It's not reversible."      (never runs)
     -> score 0-2:      run silently
-    -> score 3-7:      "Shall I run <command>? It <reason>."  -> clear yes or an orb tap within 20 s
-    -> score 8+:       "That needs administrator permission. I would run <command> ..." -> "yes, administrator"
+    -> score 3-7:      "Shall I <what>? It <reason>."  -> a yes (understood by the model) or an orb tap within 20 s
+    -> score 8+:       asked, then asked again: "This can't be undone. Are you sure …?" -> two spoken yeses
     -> anything else:  "Cancelled."                   -> audit: declined / expired / superseded
 ```
 
-- **The whole answer has to be a yes.** "Yes", "sure, go ahead", "ok do it" count. "Okay, so what about the weather" does not: every word must belong to a small grammar of agreement, so anything else — including every "no", "wait" and "cancel" — is a refusal.
-- **The answer is ordinary speech, and it is the gate's alone.** While a question is open the planner leaves the next utterance to the gate, so "yes" isn't also answered as a question.
+- **The model understands the answer.** While a question is open, the model is told what was asked and can choose `confirm` or `cancel`, however the user puts it. Anything else leaves the question open until it lapses. *(Phase 8.6, §46; the yes/no word grammar was removed.)*
 - **A question lapses on time.** After 20 s it is recorded `expired`, whether or not the user speaks again.
 - **One question at a time.** A newer one closes the older as `superseded`; "yes" means the one asked last.
 - **Every plan shape is scored the same** — an array, one action, or `{"actions": [...]}`. The gate and the executor read a plan with the same function.
@@ -802,7 +804,7 @@ PlanReady -> assess_plan() -> audit.db
 All three recorded here on 2026-09-18 were closed on 2026-10-07, with a fourth found on the way — see [`DECISIONS.md` §23](DECISIONS.md#23-finishing-phase-8).
 
 - ~~`app` actions bypass shell scoring~~ — scored as the command they amount to.
-- ~~"ok" counts as consent~~ — the whole utterance has to be agreement.
+- ~~"ok" counts as consent~~ — the whole utterance had to be agreement; since Phase 8.6 the model judges it.
 - ~~A second held plan silently replaces the first~~ — audited as `superseded`.
 - ~~A plan wrapped as `{"actions": [...]}` turned a refusal into a question~~ — found and fixed 2026-10-07.
 
@@ -830,7 +832,7 @@ A full line-by-line audit, run against a clone of the repository. Every claimed 
 
 **Goal:** Phase 8 audits what MAVIS does. The Sentinel audits what happened *to the machine* — so a package you never asked for doesn't sit unnoticed for days.
 
-**Why it exists:** a `pacman -Syu` pulled in Hyprland as a dependency of a DMS shell update, on a machine that runs niri. It took days to notice. Hyprland wasn't the problem; the delay would have been, had it been something that wasn't benign.
+**Why it exists:** a system update can pull in a large package nobody asked for as a dependency, and it can go unnoticed for days. That one may be harmless; the delay wouldn't be, if it weren't.
 
 **Rules it holds to:**
 - **Severity is static.** Same reasoning as the permission gate: an LLM that misjudges severity either cries wolf until you stop listening, or stays quiet about the one change that mattered.
@@ -860,7 +862,7 @@ Reads the package manager's own transaction log rather than diffing package list
 
 - [x] **`sentinel.db`** — a watermark per source plus the change history, keyed by fingerprint so re-reading a log can't announce anything twice. Append-only; only the `announced` flag is updated.
 - [x] **Watermark is a timestamp, not a byte offset** — survives log rotation. Filtered *at or after* the watermark: a scan landing mid-transaction previously lost later lines stamped with the same second.
-- [x] **First run is silent** — history is imported and marked already-announced. On the target machine that is ~2,079 transactions; announcing them would be worse than saying nothing.
+- [x] **First run is silent** — history is imported and marked already-announced. A real Arch log holds thousands of transactions; announcing them would be worse than saying nothing.
 - [x] **One sentence per update** — changes are regrouped into the transaction that produced them (300 s window): *"Your system update on Friday pulled in 3 packages you didn't ask for: …"*. With ~90% of Arch packages being dependencies, a sentence per package would be unbearable.
 - [x] **Cheap** — one `stat()` per minute; the log is re-read only when it changes.
 - [x] **Critical changes go through the permission gate**, so they're audited and the Sentinel can't become a back door to the executor.
@@ -872,7 +874,7 @@ Reads the package manager's own transaction log rather than diffing package list
 
 - [x] **2b — Speaking.** Planner leads with pending Notable changes on your next utterance; "what changed recently?" and "what did that update do?" answered from the store; `mark_announced` so you're told once. *(2026-10-01 — built and tested, not yet heard on hardware; [`DECISIONS.md` §19](DECISIONS.md#19-the-sentinel-speaks--phase-85-step-2b))*
   - Leads with at most two updates; older ones counted, all marked told.
-  - Deterministic end to end — the model never sees this path.
+  - The answer comes from the record, never from the model. Since Phase 8.6 the model recognises the question (`system_changes`, `update_details`).
   - Found and fixed on the way: the first-run import was briefly visible as news to a concurrent reader (proven, 2,990 rows seen against the old code).
 - [x] **3 — Privilege surfaces.** New setuid/setgid binaries, newly enabled systemd services and timers, sudoers changes, new users and groups, new `authorized_keys` entries. *(2026-10-01 — built and tested, not yet run on hardware; [`DECISIONS.md` §20](DECISIONS.md#20-privilege-surfaces--phase-85-step-3))*
   - Snapshot per surface, diffed each minute; setuid walk hourly and after package changes.
@@ -1055,8 +1057,8 @@ Models by machine (chosen by the install script, changeable in `config/config.to
   - Vision -> LLaVA / BakLLaVA
   - Fast fallback -> Phi-3-mini for low-latency intents
 - [ ] **Model benchmarking** — Automatic perplexity / latency benchmarks on user hardware; ranks models
-- [ ] **Automatic model selection** — Pick best model per task based on benchmark scores and current resource availability
-- [ ] **Cloud fallback** — Optional, opt-in, privacy-preserving (no conversation text sent; only anonymized embeddings if needed)
+- [ ] **Automatic model selection** — Pick best model per task based on benchmark scores and current resource availability *(choosing models to fit the machine is Phase 8.6 step 6)*
+- [ ] **Cloud help** — moved to Phase 8.6 step 5: optional, off by default, the user's own key, for large builds.
 
 ### 12.2 Cross-Platform
 
@@ -1082,29 +1084,31 @@ Models by machine (chosen by the install script, changeable in `config/config.to
 3. **Context Engine is central** — All subsystems publish events; Context Engine maintains canonical state.
 4. **Planner never executes** — Planner generates plans; Executor carries them out. Separation of strategy and action.
 5. **Event bus** — in-process `tokio::sync::broadcast`; the Python worker over UDS + length-prefixed JSON. No HTTP, no gRPC, no cloud APIs in the core loop.
-6. **Local-first, privacy-first** — No telemetry. No cloud STT/TTS by default. All models local.
+6. **Local-first, privacy-first** — No telemetry. Everything runs locally by default; cloud help is optional and off unless the user turns it on.
 7. **Voice is interface, not identity** — MAVIS does not "become" a voice. The orb is the identity.
 8. **Layered memory** — Working -> Recall -> Long-Term, with Episodic and Entities alongside. No single flat store. *(Permanent and Session were planned and removed 2026-09-19; see Phase 7.)*
-9. **AI-agnostic** — Prompts and context format must work with Phi-3, Llama, Mistral, etc.
+9. **AI-agnostic** — Prompts and context format must work with Qwen, Phi-3, Llama, Mistral, etc.
 10. **"Always present. Never intrusive."** — Every feature must pass this test before shipping.
-11. **Deterministic where it matters** — the LLM never selects actions, scores risk, rates memory importance or decides severity. It may phrase things, and may *raise* a risk score. It may never lower one.
+11. **The model understands; code checks** — the model decides what was meant and chooses actions from the catalogue (Phase 8.6). Code checks every choice, and risk scores and Sentinel severity stay static: the model may never lower a score.
 12. **Fail loud, degrade gracefully** — a missing microphone costs MAVIS its ears, not its life; a panicking subsystem is restarted and logged.
 
 ### B. Definition of Done for Each Phase
 
-- [ ] All code passes `cargo check` / `cargo clippy` / `cargo test` *(as of 2026-09-30: check, test and clippy pass — 120 tests, clippy with warnings only; the pre-commit hook still runs only `ruff`, so nothing enforces the Rust checks)*
+- [ ] All code passes `cargo check` / `cargo clippy` / `cargo test` *(as of 2026-11-25: 275 + 277 tests pass, clippy with warnings only; the pre-commit hook runs only `ruff`, so nothing enforces the Rust checks)*
 - [ ] Python code passes `ruff` pre-commit
-- [ ] Feature documented in `docs/phase-N.md`
+- [ ] Feature documented in `PHASES.md`, with the reasons in `DECISIONS.md`
 - [ ] E2E test script exists and passes
 - [ ] No regression in prior phase features
 - [ ] Memory instruction updated if architecture changes
 
-### C. Resource Budget (Target Hardware: Ryzen 5, 16 GB RAM, RTX 4050 6 GB)
+### C. Resource Budget (development machine: Ryzen 5, 16 GB RAM, RTX 4050 6 GB)
+
+Other machines get models that fit them; see Phase 8.6, models by machine.
 
 | Component | Max RAM | Max VRAM | Notes |
 |-----------|---------|----------|-------|
-| LLM (Phi-3 / Llama-3 8B) | 6 GB | 4 GB | `int4` or `int8` quantization |
-| STT (faster-whisper small) | 1 GB | 0 GB | CPU-only, `int8` |
+| LLM (Qwen2.5-3B, Q4_K_M) | 3 GB | 3 GB | Fully on the graphics card |
+| STT (faster-whisper small.en) | 1 GB | 0 GB | CPU-only, `int8` |
 | Embeddings (MiniLM) | 300 MB | 0 GB | Not used — memory search is SQLite FTS5 (Phase 7) |
 | Vision (YOLO / small DETR) | 200 MB | 2 GB | Optional; unload when idle |
 | Rust runtime + UI | 200 MB | 0 GB | Orb, event bus, context engine |
