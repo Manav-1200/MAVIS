@@ -2200,6 +2200,8 @@ So 3 of 9 were right, 3 had the right intent in the wrong form, and 3 were wrong
 
 **Kept:** the example pacman, dpkg and dnf lines in `sentinel/packages.rs`. They document file formats.
 
+**Second pass (2026-11-25):** a check of the comments found more that §47 had missed. These were quoted transcripts and model outputs, a file name read out in a session, and app names from the development machine, in `executor.rs`, `planner.rs`, `recall.rs`, `context_engine.rs`, `prompts.py`, `inference/engine.py` and `stt/engine.py`. They're rewritten the same way.
+
 **Evidence:**
 - **Proven:** 275 + 277 tests pass. Clippy matches HEAD. Ruff is clean.
 - **Reasoned:** this changes comments and test data only, so behaviour is unchanged.
