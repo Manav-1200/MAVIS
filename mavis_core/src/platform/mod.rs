@@ -101,7 +101,7 @@ impl Platform {
 /// the capability is unavailable on this DE / OS / permission tier.
 pub trait PlatformProvider: Send + Sync {
     /// Every application installed on this machine. Used to turn "open
-    /// firefox" into a launch. Default empty so a platform without an
+    /// webby" into a launch. Default empty so a platform without an
     /// implementation degrades to "no apps found" rather than failing.
     fn installed_apps(&self) -> Vec<AppEntry> {
         Vec::new()
