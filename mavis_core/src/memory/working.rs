@@ -29,9 +29,9 @@ pub struct WorkingMemory {
     pub context_timestamp: Option<u64>,
     pub user_name: Option<String>,
     /// Set when the name was learned by the current rules. Names stored
-    /// by builds before 2026-09-22 don't have it: those came from "I'm …"
-    /// patterns that produced "Using", "Sorry", "Here" — so they aren't
-    /// trusted, and are dropped on load. The user says it once more.
+    /// by older builds don't have it: those came from loose patterns that
+    /// picked up ordinary words — so they aren't trusted, and are dropped
+    /// on load. The user says it once more.
     #[serde(default)]
     pub user_name_verified: bool,
     pub browser_tab: Option<BrowserTab>,
@@ -72,7 +72,7 @@ impl WorkingMemory {
 
     /// Keep a short form of what the user said in an event leaving the ring.
     /// Only the user's words: MAVIS's own replies, kept, are what it learns
-    /// to copy (§16).
+    /// to copy.
     fn remember_earlier(&mut self, event: &Event) {
         if event.event_type != crate::models::event::EventType::UserIntent {
             return;
@@ -109,10 +109,9 @@ impl WorkingMemory {
 
     /// Begin a fresh conversation, keeping what MAVIS knows about the user.
     ///
-    /// The event ring used to be restored from disk, so a new run started
-    /// mid-conversation: on 2026-09-30 "Mavis, can you hear me?" was
-    /// answered with the contents of the clipboard, because the last thing
-    /// in the restored history was a clipboard question and its answer.
+    /// The event ring isn't restored from disk: a restored ring starts a
+    /// new run mid-conversation, answering the first question as if it
+    /// followed the last one from before.
     /// Facts survive a restart — the name here, recall and the entity
     /// graph in their own stores — but the thread of talk does not.
     pub fn start_new_session(&mut self) -> usize {
