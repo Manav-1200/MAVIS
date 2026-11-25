@@ -330,16 +330,16 @@ mod tests {
 
     #[test]
     fn ordinary_launches_stay_silent() {
-        assert_eq!(app("firefox", &[]).verdict, Verdict::Allow);
+        assert_eq!(app("webby", &[]).verdict, Verdict::Allow);
         assert_eq!(app("code-oss", &["--unity-launch"]).verdict, Verdict::Allow);
         // A search for "shutdown" is a link, not a command.
-        assert_eq!(app("https://www.youtube.com/results?search_query=shutdown", &[]).verdict, Verdict::Allow);
+        assert_eq!(app("https://www.tube.test/results?search_query=shutdown", &[]).verdict, Verdict::Allow);
         // The rules match whole program names, not fragments of them.
         assert_eq!(app("shutdown-timer", &[]).verdict, Verdict::Allow);
-        assert_eq!(app("/usr/bin/firefox", &[]).verdict, Verdict::Allow);
+        assert_eq!(app("/usr/bin/webby", &[]).verdict, Verdict::Allow);
     }
 
-    /// The gap in §8.4: a command launched as an "app" scored 2 and ran.
+    /// A command launched as an "app" must not score as an app.
     #[test]
     fn a_command_dressed_as_an_app_is_scored_as_the_command() {
         assert_eq!(app("sh", &["-c", "echo hi"]).verdict, Verdict::Confirm);
