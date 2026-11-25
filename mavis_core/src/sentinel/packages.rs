@@ -104,8 +104,8 @@ impl PackageManager {
 // Arch — /var/log/pacman.log
 // ---------------------------------------------------------------------
 //
-//   [2026-09-18T14:32:01+0545] [ALPM] installed hyprland (0.41.2-1)
-//   [2026-09-18T14:32:01+0545] [ALPM] upgraded firefox (140.0-1 -> 141.0-1)
+//   [2026-09-18T14:32:01+0545] [ALPM] installed alphawm (0.41.2-1)
+//   [2026-09-18T14:32:01+0545] [ALPM] upgraded webby (140.0-1 -> 141.0-1)
 //   [2026-09-18T14:32:01+0545] [ALPM] removed foo (1.0-1)
 //   [2026-09-18T14:32:01+0545] [ALPM] downgraded bar (2.0-1 -> 1.0-1)
 //
@@ -653,8 +653,8 @@ mod tests {
     const PACMAN_SAMPLE: &str = "\
 [2026-09-18T14:32:00+0545] [PACMAN] Running 'pacman -Syu'
 [2026-09-18T14:32:01+0545] [ALPM] transaction started
-[2026-09-18T14:32:01+0545] [ALPM] installed hyprland (0.41.2-1)
-[2026-09-18T14:32:02+0545] [ALPM] upgraded firefox (140.0-1 -> 141.0-1)
+[2026-09-18T14:32:01+0545] [ALPM] installed alphawm (0.41.2-1)
+[2026-09-18T14:32:02+0545] [ALPM] upgraded webby (140.0-1 -> 141.0-1)
 [2026-09-18T14:32:03+0545] [ALPM] removed obsolete-thing (1.0-1)
 [2026-09-18T14:32:04+0545] [ALPM] downgraded mesa (24.2-1 -> 24.1-1)
 [2026-09-18T14:32:05+0545] [ALPM-SCRIPTLET] Updating icon cache...
@@ -667,11 +667,11 @@ mod tests {
         assert_eq!(entries.len(), 4, "got: {:#?}", entries);
 
         assert_eq!(entries[0].action, Action::Installed);
-        assert_eq!(entries[0].name, "hyprland");
+        assert_eq!(entries[0].name, "alphawm");
         assert_eq!(entries[0].new_version, "0.41.2-1");
 
         assert_eq!(entries[1].action, Action::Upgraded);
-        assert_eq!(entries[1].name, "firefox");
+        assert_eq!(entries[1].name, "webby");
         assert_eq!(entries[1].old_version, "140.0-1");
         assert_eq!(entries[1].new_version, "141.0-1");
 
@@ -704,8 +704,8 @@ mod tests {
     #[test]
     fn pacman_handles_hyphenated_package_names() {
         let entries =
-            parse_pacman_log("[2026-09-18T14:32:01+0545] [ALPM] installed xdg-desktop-portal-hyprland (1.3.1-2)\n");
-        assert_eq!(entries[0].name, "xdg-desktop-portal-hyprland");
+            parse_pacman_log("[2026-09-18T14:32:01+0545] [ALPM] installed xdg-desktop-portal-alphawm (1.3.1-2)\n");
+        assert_eq!(entries[0].name, "xdg-desktop-portal-alphawm");
         assert_eq!(entries[0].new_version, "1.3.1-2");
     }
 
@@ -936,27 +936,27 @@ mod tests {
     #[test]
     fn a_dependency_pulled_in_by_an_update_is_notable() {
         let entries = parse_pacman_log(PACMAN_SAMPLE);
-        // The user explicitly installed firefox, never hyprland.
-        let changes = to_changes(&entries, &explicit(&["firefox", "niri"]), "pacman");
+        // The user explicitly installed webby, never alphawm.
+        let changes = to_changes(&entries, &explicit(&["webby", "niri"]), "pacman");
 
-        let hyprland = changes
+        let alphawm = changes
             .iter()
-            .find(|c| c.detail.contains("hyprland"))
-            .expect("hyprland change present");
-        assert_eq!(hyprland.severity, Severity::Notable);
-        assert!(hyprland.detail.contains("didn't ask for it"));
+            .find(|c| c.detail.contains("alphawm"))
+            .expect("alphawm change present");
+        assert_eq!(alphawm.severity, Severity::Notable);
+        assert!(alphawm.detail.contains("didn't ask for it"));
 
-        let firefox = changes
+        let webby = changes
             .iter()
-            .find(|c| c.detail.contains("firefox"))
-            .expect("firefox change present");
-        assert_eq!(firefox.severity, Severity::Routine);
+            .find(|c| c.detail.contains("webby"))
+            .expect("webby change present");
+        assert_eq!(webby.severity, Severity::Routine);
     }
 
     #[test]
     fn an_explicitly_installed_package_is_routine() {
-        let entries = parse_pacman_log("[2026-09-18T14:32:01+0545] [ALPM] installed neovim (0.10-1)\n");
-        let changes = to_changes(&entries, &explicit(&["neovim"]), "pacman");
+        let entries = parse_pacman_log("[2026-09-18T14:32:01+0545] [ALPM] installed texted (0.10-1)\n");
+        let changes = to_changes(&entries, &explicit(&["texted"]), "pacman");
         assert_eq!(changes[0].severity, Severity::Routine);
     }
 
@@ -986,7 +986,7 @@ mod tests {
     #[test]
     fn fingerprints_are_unique_across_a_real_transaction() {
         let entries = parse_pacman_log(PACMAN_SAMPLE);
-        let changes = to_changes(&entries, &explicit(&["firefox"]), "pacman");
+        let changes = to_changes(&entries, &explicit(&["webby"]), "pacman");
         let prints: HashSet<String> = changes.iter().map(|c| c.fingerprint()).collect();
         assert_eq!(prints.len(), changes.len(), "fingerprints must be unique");
     }
