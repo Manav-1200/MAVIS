@@ -349,7 +349,7 @@ pub fn diff(source: &str, old: &Snapshot, new: &Snapshot, at: DateTime<Utc>) -> 
             let mut gone: Vec<(&String, &String)> = removed.collect();
             for (path, v) in fresh {
                 // The same program, same mode and owner, gone from one folder
-                // and new in another: moved, as libgtop's update did (§42).
+                // and new in another: moved.
                 if let Some(at) = gone.iter().position(|(old, was)| file_name_of(old) == file_name_of(path) && *was == v) {
                     let (from, _) = gone.remove(at);
                     kinds.push(ChangeKind::SetuidMoved { from: from.clone(), to: path.clone() });
@@ -416,7 +416,7 @@ mod tests {
     const PASSWD: &str = "\
 root:x:0:0:root:/root:/bin/bash
 polkitd:x:977:977:polkit:/:/usr/bin/nologin
-manav:x:1000:1000::/home/manav:/usr/bin/zsh
+sam:x:1000:1000::/home/sam:/usr/bin/zsh
 nobody:x:65534:65534:Nobody:/:/usr/bin/nologin
 ";
 
@@ -425,7 +425,7 @@ nobody:x:65534:65534:Nobody:/:/usr/bin/nologin
         let s = parse_passwd(PASSWD, 1000);
         assert_eq!(s["root"], "0:0");
         assert_eq!(s["polkitd"], "977:0");
-        assert_eq!(s["manav"], "1000:1");
+        assert_eq!(s["sam"], "1000:1");
         assert_eq!(s["nobody"], "65534:0");
     }
 
@@ -437,8 +437,8 @@ nobody:x:65534:65534:Nobody:/:/usr/bin/nologin
 
     #[test]
     fn group_members_are_sorted_and_trimmed() {
-        let s = parse_group("wheel:x:998:manav, alice\nvideo:x:985:\n");
-        assert_eq!(s["wheel"], "alice,manav");
+        let s = parse_group("wheel:x:998:sam, alice\nvideo:x:985:\n");
+        assert_eq!(s["wheel"], "alice,sam");
         assert_eq!(s["video"], "");
     }
 
@@ -446,13 +446,13 @@ nobody:x:65534:65534:Nobody:/:/usr/bin/nologin
     fn authorized_keys_skip_options_and_comments() {
         let text = "\
 # a comment
-ssh-ed25519 AAAAC3Nza1 manav@laptop
+ssh-ed25519 AAAAC3Nza1 sam@laptop
 command=\"/bin/true\",no-pty ssh-rsa AAAAB3Nza2
 garbage line
 ";
         let s = parse_authorized_keys("~/.ssh/authorized_keys", text);
         assert_eq!(s.len(), 2);
-        assert_eq!(s["~/.ssh/authorized_keys\tAAAAC3Nza1"], "manav@laptop");
+        assert_eq!(s["~/.ssh/authorized_keys\tAAAAC3Nza1"], "sam@laptop");
         assert_eq!(s["~/.ssh/authorized_keys\tAAAAB3Nza2"], "ssh-rsa", "no comment: type is the label");
     }
 
@@ -470,7 +470,7 @@ garbage line
     fn a_uid_changed_to_zero_is_critical() {
         let old = parse_passwd(PASSWD, 1000);
         let mut new = old.clone();
-        new.insert("manav".into(), "0:1".into());
+        new.insert("sam".into(), "0:1".into());
         let changes = diff(USERS, &old, &new, now());
         assert!(matches!(changes[0].kind, ChangeKind::UserUidChanged { to: 0, .. }));
         assert_eq!(changes[0].severity, Severity::Critical);
@@ -478,8 +478,8 @@ garbage line
 
     #[test]
     fn joining_wheel_is_critical_and_new_groups_are_routine() {
-        let old = parse_group("wheel:x:998:manav\n");
-        let new = parse_group("wheel:x:998:manav,eve\nnewgroup:x:900:\n");
+        let old = parse_group("wheel:x:998:sam\n");
+        let new = parse_group("wheel:x:998:sam,eve\nnewgroup:x:900:\n");
         let changes = diff(GROUPS, &old, &new, now());
         let worst = changes.iter().map(|c| c.severity).max();
         assert_eq!(worst, Some(Severity::Critical));
@@ -488,25 +488,25 @@ garbage line
             .any(|c| matches!(&c.kind, ChangeKind::GroupAdded { name } if name == "newgroup")));
     }
 
-    /// libgtop 2.41.4 moved libgtop_server2 from /usr/lib/libgtop to
-    /// /usr/lib (2026-11-18). That's one move, not a new root program.
+    /// A root program moved from one folder to another by an update is one
+    /// move, not a new root program.
     #[test]
     fn a_setuid_program_that_changed_folder_is_a_move() {
         let snap = |pairs: &[(&str, &str)]| -> Snapshot {
             pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
         };
-        let old = snap(&[("/usr/lib/libgtop/libgtop_server2", "u:0")]);
-        let new = snap(&[("/usr/lib/libgtop_server2", "u:0")]);
+        let old = snap(&[("/usr/lib/helperd/helperd_server", "u:0")]);
+        let new = snap(&[("/usr/lib/helperd_server", "u:0")]);
         let changes = diff(SETUID, &old, &new, now());
         assert_eq!(changes.len(), 1);
         assert!(matches!(&changes[0].kind, ChangeKind::SetuidMoved { from, to }
-            if from == "/usr/lib/libgtop/libgtop_server2" && to == "/usr/lib/libgtop_server2"));
+            if from == "/usr/lib/helperd/helperd_server" && to == "/usr/lib/helperd_server"));
         assert_eq!(changes[0].severity, Severity::Notable);
 
         // A different program, or the same name now owned by someone else, is still new.
         let other = snap(&[("/usr/lib/other_helper", "u:0")]);
         assert!(matches!(diff(SETUID, &old, &other, now())[0].kind, ChangeKind::SetuidAdded { .. }));
-        let not_root = snap(&[("/usr/lib/libgtop_server2", "u:1000")]);
+        let not_root = snap(&[("/usr/lib/helperd_server", "u:1000")]);
         let changes = diff(SETUID, &old, &not_root, now());
         assert!(changes.iter().any(|c| matches!(c.kind, ChangeKind::SetuidAdded { .. })));
         assert!(changes.iter().any(|c| matches!(c.kind, ChangeKind::SetuidRemoved { .. })));
