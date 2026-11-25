@@ -105,8 +105,8 @@ fn without_redirection(title: &str) -> &str {
     &title[..end]
 }
 
-/// Every open window, counted here rather than by the model: it said "four"
-/// with five apps listed. Workspaces are the numbers the user sees.
+/// Every open window, counted here rather than by the model, which miscounts
+/// lists. Workspaces are the numbers the user sees.
 fn describe_open_windows(windows: &[WindowInfo], current: Option<u64>) -> Option<String> {
     let mut apps: Vec<(String, usize, Vec<u64>)> = Vec::new();
     for w in windows {
@@ -151,7 +151,7 @@ fn describe_open_windows(windows: &[WindowInfo], current: Option<u64>) -> Option
             }
         })
         .collect();
-    // "How many windows?" was answered with the number of applications.
+    // Windows and apps are counted separately; the model confuses the two.
     let total: usize = apps.iter().map(|(_, count, _)| count).sum();
     let mut parts = vec![format!(
         "{} {} open, from {} {}: {}.",
@@ -251,7 +251,7 @@ fn find_app<'a>(spoken: &str, apps: &'a [AppEntry]) -> Option<&'a AppEntry> {
     if let Some(a) = apps.iter().find(|a| normalize(&a.name).starts_with(&s)) {
         return Some(a);
     }
-    // Every spoken word appears in the name — "notepad" finds "DMS Notepad".
+    // Every spoken word appears in the name — "notes" finds "Quick Notes".
     let words: Vec<&str> = s.split_whitespace().collect();
     if let Some(a) = apps.iter().find(|a| {
         let n = normalize(&a.name);
@@ -303,7 +303,7 @@ fn apps_of_kind<'a>(spoken: &str, apps: &'a [AppEntry]) -> Vec<&'a AppEntry> {
         .collect()
 }
 
-/// "Which one: Surfy, Webby or Zen?"
+/// "Which one: Surfy, Webby or Netty?"
 fn which_one(names: &[String]) -> String {
     let names: Vec<&str> = names.iter().take(3).map(String::as_str).collect();
     match names.as_slice() {
@@ -384,7 +384,7 @@ fn strip_address(text: &str) -> &str {
             return t[prefix.len()..].trim_start_matches([',', ' ', '.', '?', '!']);
         }
     }
-    // Whisper often mishears the name ("MOVIS, what changed?"). A first
+    // Whisper often mishears the name by a letter. A first
     // word one letter away from it counts, when punctuation sets it off the
     // way Whisper writes someone being addressed.
     if let Some(end) = t.find([',', '.', '!', '?']) {
