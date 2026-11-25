@@ -369,10 +369,8 @@ impl ContextEngine {
 
 /// Learn a name only when it is unmistakably being given.
 ///
-/// No list of "words that aren't names". Earlier versions matched "I'm …"
-/// and then kept a denylist of what followed — here, sorry, looking,
-/// using… — which grew with every false match and could never be finished.
-/// Instead, the *shape* of the sentence decides:
+/// No list of "words that aren't names": such a list grows with every false
+/// match and is never finished. Instead, the *shape* of the sentence decides:
 ///
 /// 1. An explicit introduction: "my name is X", "call me X", "I'm called X".
 ///    "I'm X" / "I am X" don't count — they introduce a state ("I'm using
