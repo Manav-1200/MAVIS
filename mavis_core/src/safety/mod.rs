@@ -23,11 +23,12 @@ struct Pending {
     plan: serde_json::Value,
     detail: String,
     score: u8,
-    /// Scores at or above this need an explicit "yes" plus an
-    /// acknowledgement of the risk, not a bare "yeah".
+    /// Can't be undone: asked twice, the second time saying so.
     requires_explicit: bool,
+    /// The second question has been asked.
+    asked_twice: bool,
     asked_at: Instant,
-    /// What was asked, e.g. "close Firefox".
+    /// What was asked, e.g. "close Webby".
     what: String,
 }
 
@@ -42,29 +43,21 @@ pub const CONFIRMATION_WINDOW: Duration = Duration::from_secs(if cfg!(test) { 2 
 #[derive(Default)]
 pub struct Awaiting {
     asked_at: Option<Instant>,
-    answered_by: Option<uuid::Uuid>,
-    /// What the open question asks, for answers that repeat it.
-    what: Option<String>,
+    /// The question as MAVIS asked it, for the model to see.
+    question: Option<String>,
 }
 
 pub type SharedAwaiting = Arc<std::sync::Mutex<Awaiting>>;
 
 impl Awaiting {
-    /// True if this utterance is, or will be taken as, the answer. Holds
-    /// whichever of the gate and the planner sees the utterance first.
-    pub fn claims(&self, utterance: uuid::Uuid) -> bool {
-        self.answered_by == Some(utterance)
-            || self.is_open()
-    }
-
     /// A question is open and still answerable.
     pub fn is_open(&self) -> bool {
         self.asked_at.is_some_and(|at| at.elapsed() <= CONFIRMATION_WINDOW)
     }
 
-    /// The utterance repeats the open question's request.
-    pub fn repeats(&self, said: &str) -> bool {
-        self.is_open() && self.what.as_deref().is_some_and(|what| repeats_request(said, what))
+    /// The open question, while it can still be answered.
+    pub fn question(&self) -> Option<String> {
+        if self.is_open() { self.question.clone() } else { None }
     }
 }
 
@@ -101,8 +94,11 @@ impl PermissionGate {
             match event {
                 Ok(event) => match event.event_type {
                     EventType::PlanReady => self.review(event).await,
-                    // The confirmation answer arrives as ordinary speech.
-                    EventType::UserIntent => self.resolve_pending(&event).await,
+                    // The answer, as the model understood what was said.
+                    EventType::Confirmation => {
+                        let approved = event.payload.get("approved").and_then(|v| v.as_bool()).unwrap_or(false);
+                        self.answered(approved).await
+                    }
                     EventType::OrbTap => self.tapped(&event).await,
                     _ => {}
                 },
@@ -176,24 +172,18 @@ impl PermissionGate {
                     assessment.score, assessment.reason
                 );
                 // Say what would run, not only why it needs asking.
-                let question = if requires_explicit {
-                    format!(
-                        "That needs administrator permission. I would {}. It {}. Say 'yes, administrator' to go ahead.",
-                        assessment.what, assessment.reason
-                    )
-                } else {
-                    format!("Shall I {}? It {}.", assessment.what, assessment.reason)
-                };
+                let question = format!("Shall I {}? It {}.", assessment.what, assessment.reason);
                 let asked_at = Instant::now();
                 self.pending = Some(Pending {
                     plan,
                     detail,
                     score: assessment.score,
                     requires_explicit,
+                    asked_twice: false,
                     asked_at,
                     what: assessment.what.clone(),
                 });
-                self.set_awaiting(Some(asked_at), None, Some(&assessment.what));
+                self.set_awaiting(Some(asked_at), Some(&question));
                 self.show("asking");
                 self.speak(question);
             }
@@ -209,65 +199,49 @@ impl PermissionGate {
         if let Some(pending) = self.pending.take() {
             info!("PermissionGate: confirmation window expired, discarding");
             self.record(&pending, "expired", "no answer in time").await;
-            self.set_awaiting(None, None, None);
+            self.set_awaiting(None, None);
             self.show("answered");
         }
     }
 
-    /// Interpret the user's next utterance as an answer to a held action.
-    ///
-    /// Only consulted while something is actually pending, so ordinary
-    /// speech is unaffected. Anything that isn't a clear yes cancels —
-    /// silence, a new question, or an ambiguous reply all mean "don't".
-    async fn resolve_pending(&mut self, event: &Event) {
-        let pending = match self.pending.take() {
-            Some(p) => p,
-            None => return,
-        };
-
+    /// The user answered the open question; the model judged yes or no.
+    /// High-risk actions need two yeses, the second after being told it
+    /// can't be undone.
+    async fn answered(&mut self, approved: bool) {
+        let Some(mut pending) = self.pending.take() else { return };
         if pending.asked_at.elapsed() > CONFIRMATION_WINDOW {
             self.pending = Some(pending);
             self.expire().await;
             return;
         }
-        self.set_awaiting(None, Some(event.id), None);
-        self.show("answered");
-
-        // Typed intents (the hotkey socket) carry "intent" rather than "text".
-        let said = event
-            .payload
-            .get("text")
-            .or_else(|| event.payload.get("intent"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_lowercase();
-        let said = said.trim();
-
-        let approved = if pending.requires_explicit {
-            // A bare "yes" is too easy to say by accident, and too easy for
-            // a mistranscription to produce. High-risk actions need the word.
-            said.contains("administrator") && is_affirmative(said)
-        } else {
-            // Saying the request again ("close firefox") means yes too: on
-            // 2026-11-05 that was the natural answer, and it cancelled.
-            is_affirmative(said) || repeats_request(said, &pending.what)
-        };
-
-        if approved {
-            info!("PermissionGate: confirmed by user, executing");
-            self.record(&pending, "confirmed", "user approved").await;
-            self.bus.publish(Event {
-                id: uuid::Uuid::new_v4(),
-                timestamp: chrono::Utc::now(),
-                source: "permission_gate".to_string(),
-                event_type: EventType::PlanApproved,
-                payload: serde_json::json!({ "plan": pending.plan }),
-            });
-        } else {
+        if !approved {
             info!("PermissionGate: not confirmed, discarding held action");
+            self.set_awaiting(None, None);
+            self.show("answered");
             self.record(&pending, "declined", "user did not confirm").await;
             self.speak("Cancelled.".to_string());
+            return;
         }
+        if pending.requires_explicit && !pending.asked_twice {
+            let question = format!("This can't be undone. Are you sure you want me to {}?", pending.what);
+            pending.asked_twice = true;
+            pending.asked_at = Instant::now();
+            self.set_awaiting(Some(pending.asked_at), Some(&question));
+            self.pending = Some(pending);
+            self.speak(question);
+            return;
+        }
+        info!("PermissionGate: confirmed by user, executing");
+        self.set_awaiting(None, None);
+        self.show("answered");
+        self.record(&pending, "confirmed", "user approved").await;
+        self.bus.publish(Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "permission_gate".to_string(),
+            event_type: EventType::PlanApproved,
+            payload: serde_json::json!({ "plan": pending.plan }),
+        });
     }
 
     /// Hold a plan as `review` would. For tests in other modules.
@@ -284,35 +258,21 @@ impl PermissionGate {
     }
 
     #[cfg(test)]
-    pub async fn answer_for_test(&mut self, utterance: &Event) {
-        self.resolve_pending(utterance).await;
+    pub async fn answer_for_test(&mut self, approved: bool) {
+        self.answered(approved).await;
     }
 
-    /// A tap on the orb is a yes — but not for administrator-level
-    /// actions, which still need the words, so a stray click can't run them.
-    async fn tapped(&mut self, tap: &Event) {
-        let Some(pending) = self.pending.take() else { return };
-        if pending.asked_at.elapsed() > CONFIRMATION_WINDOW {
-            self.pending = Some(pending);
-            self.expire().await;
-            return;
+    /// A tap on the orb is a yes, except for what can't be undone: a stray
+    /// click must not run that.
+    async fn tapped(&mut self, _tap: &Event) {
+        match &self.pending {
+            Some(p) if p.requires_explicit => self.speak("This one needs a spoken answer.".to_string()),
+            Some(_) => {
+                info!("PermissionGate: answered by a tap on the orb");
+                self.answered(true).await;
+            }
+            None => {}
         }
-        if pending.requires_explicit {
-            self.pending = Some(pending);
-            self.speak("That one needs you to say 'yes, administrator'.".to_string());
-            return;
-        }
-        info!("PermissionGate: confirmed by a tap on the orb, executing");
-        self.set_awaiting(None, Some(tap.id), None);
-        self.show("answered");
-        self.record(&pending, "confirmed", "user tapped the orb").await;
-        self.bus.publish(Event {
-            id: uuid::Uuid::new_v4(),
-            timestamp: chrono::Utc::now(),
-            source: "permission_gate".to_string(),
-            event_type: EventType::PlanApproved,
-            payload: serde_json::json!({ "plan": pending.plan }),
-        });
     }
 
     async fn record(&self, pending: &Pending, outcome: &str, reason: &str) {
@@ -323,11 +283,10 @@ impl PermissionGate {
         }
     }
 
-    fn set_awaiting(&self, asked_at: Option<Instant>, answered_by: Option<uuid::Uuid>, what: Option<&str>) {
+    fn set_awaiting(&self, asked_at: Option<Instant>, question: Option<&str>) {
         let mut awaiting = self.awaiting.lock().unwrap_or_else(|p| p.into_inner());
         awaiting.asked_at = asked_at;
-        awaiting.answered_by = answered_by;
-        awaiting.what = what.map(String::from);
+        awaiting.question = question.map(String::from);
     }
 
     /// Tell the orb a question is open ("asking") or closed ("answered").
@@ -377,70 +336,6 @@ fn summarise(plan: &serde_json::Value) -> String {
         .join(" | ")
 }
 
-fn words_of(said: &str) -> Vec<String> {
-    said.to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect::<String>()
-        .split_whitespace()
-        .map(String::from)
-        .collect()
-}
-
-/// The answer says the request again: "close firefox, mavis" for "close
-/// Firefox", or "close it". From its verb on, only the request's own words,
-/// a pronoun for it, and fillers. Before the verb anything goes ("That's
-/// Mavis, close …" was "Yes Mavis") except a no.
-pub fn repeats_request(said: &str, what: &str) -> bool {
-    const FILLER: &[&str] = &["mavis", "please", "just", "yes", "now", "the", "i", "said"];
-    const PRONOUN: &[&str] = &["it", "that", "this", "them"];
-    const NO: &[&str] = &["no", "not", "don", "dont", "never", "cancel", "stop", "wait"];
-    let said = words_of(said);
-    let asked = words_of(what);
-    let Some(verb) = asked.first() else { return false };
-    let Some(at) = said.iter().position(|w| w == verb) else { return false };
-    if said[..at].iter().any(|w| NO.contains(&w.as_str())) {
-        return false;
-    }
-    let rest: Vec<&String> = said[at + 1..].iter().filter(|w| !FILLER.contains(&w.as_str())).collect();
-    !rest.is_empty() && rest.iter().all(|w| asked.contains(w) || PRONOUN.contains(&w.as_str()))
-}
-
-/// Whether an utterance is a clear yes.
-///
-/// Deliberately strict: the whole utterance has to be agreement. Every
-/// word must belong to this small grammar, so "okay, so what about the
-/// weather" and "is the answer yes" are not consent — a false positive
-/// here runs something destructive.
-fn is_affirmative(said: &str) -> bool {
-    // Punctuation to spaces first: "yes, administrator" is the natural
-    // way to say it, and a comma shouldn't cost the user a retry.
-    let normalised: String = said
-        .to_lowercase()
-        .chars()
-        .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect();
-    let words: Vec<&str> = normalised.split_whitespace().collect();
-    let normalised = words.join(" ");
-
-    // Agreement: a word, or one of the phrases.
-    const YES: &[&str] = &[
-        "yes", "yeah", "yep", "yup", "sure", "ok", "okay", "confirm", "confirmed", "affirmative",
-    ];
-    const YES_PHRASES: &[&str] = &["go ahead", "do it", "please do"];
-    // Words that may sit around it. Anything else — "no", "wait", "what" —
-    // is outside the grammar, so negation needs no list of its own.
-    const AROUND: &[&str] = &[
-        "please", "mavis", "administrator", "go", "ahead", "do", "it", "that", "and", "then",
-        "now", "just", "thanks", "thank", "you", "i", "am", "im",
-    ];
-
-    let in_grammar = words.iter().all(|w| YES.contains(w) || AROUND.contains(w));
-    let agrees = words.iter().any(|w| YES.contains(w))
-        || YES_PHRASES.iter().any(|p| format!(" {} ", normalised).contains(&format!(" {} ", p)));
-    in_grammar && agrees
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -488,79 +383,6 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // is_affirmative
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn repeating_the_request_answers_it() {
-        assert!(repeats_request("close firefox mavis", "close Firefox"));
-        assert!(repeats_request("Close Thunar.", "close Thunar File Manager"));
-        assert!(!repeats_request("close", "close Firefox"));
-        assert!(!repeats_request("close brave", "close Firefox"));
-        assert!(!repeats_request("don't close firefox", "close Firefox"));
-        assert!(!repeats_request("firefox", "close Firefox"));
-        assert!(repeats_request("That's Mavis, close Bulk Rename.", "close Bulk Rename"));
-        assert!(!repeats_request("no, don't close bulk rename", "close Bulk Rename"));
-        // A pronoun stands for what was asked; the bare verb still doesn't.
-        assert!(repeats_request("Yes Mavis, close it.", "close Thunar"));
-        assert!(repeats_request("close that", "close Thunar"));
-        assert!(!repeats_request("don't close it", "close Thunar"));
-    }
-
-    #[test]
-    fn clear_agreement_is_affirmative() {
-        for said in [
-            "yes", "yeah", "yep", "sure", "go ahead", "do it",
-            "yes please", "yes, administrator", "confirmed",
-        ] {
-            assert!(is_affirmative(said), "should be affirmative: {:?}", said);
-        }
-    }
-
-    #[test]
-    fn negation_always_wins() {
-        for said in [
-            "no", "no thanks", "nope, cancel", "yes no", "no, yes",
-            "actually no, cancel that", "don't", "dont do it", "stop",
-            "wait", "cancel", "never",
-        ] {
-            assert!(!is_affirmative(said), "should NOT be affirmative: {:?}", said);
-        }
-    }
-
-    /// §8.4: "ok" opened a sentence about something else and counted as yes.
-    #[test]
-    fn agreement_inside_another_sentence_is_not_consent() {
-        for said in [
-            "okay so what about the weather",
-            "ok google it instead",
-            "is the answer yes or what",
-            "yes but not that one",
-            "sure whatever you think no",
-            "do it tomorrow",
-        ] {
-            assert!(!is_affirmative(said), "should NOT be affirmative: {:?}", said);
-        }
-        for said in ["ok", "Okay.", "yes please do it", "sure, go ahead", "ok do it now", "yes MAVIS, thank you"] {
-            assert!(is_affirmative(said), "should be affirmative: {:?}", said);
-        }
-    }
-
-    #[test]
-    fn ambiguous_answers_are_not_consent() {
-        for said in ["maybe", "i think so", "what", "", "hmm", "probably"] {
-            assert!(!is_affirmative(said), "should NOT be affirmative: {:?}", said);
-        }
-    }
-
-    #[test]
-    fn is_affirmative_survives_non_ascii() {
-        for said in ["日本語", "é", "yes — administrator", "\u{2019}yes\u{2019}"] {
-            let _ = is_affirmative(said);
-        }
-    }
-
-    // ---------------------------------------------------------------
     // Gate wiring
     // ---------------------------------------------------------------
 
@@ -600,8 +422,8 @@ mod tests {
         event(EventType::PlanReady, serde_json::json!({ "plan": [{ "type": "shell", "command": command }] }))
     }
 
-    fn said(text: &str) -> Event {
-        event(EventType::UserIntent, serde_json::json!({ "text": text }))
+    fn answer(approved: bool) -> Event {
+        event(EventType::Confirmation, serde_json::json!({ "approved": approved }))
     }
 
     /// Everything the gate published since the last call: (spoken lines,
@@ -651,26 +473,22 @@ mod tests {
         r.gate.review(plan_ready("rm notes.txt")).await;
         published(&mut r.rx);
 
-        let answer = said("Yes, go ahead.");
-        assert!(r.awaiting.lock().unwrap().claims(answer.id), "the next utterance is the answer");
-        r.gate.resolve_pending(&answer).await;
+        assert!(r.awaiting.lock().unwrap().question().unwrap().starts_with("Shall I run rm notes.txt"));
+        r.gate.answered(true).await;
 
         let (_, approved, shown) = published(&mut r.rx);
         assert_eq!(approved, ["rm notes.txt"]);
         assert_eq!(shown, ["answered"]);
         assert_eq!(outcomes(&r.audit).await, ["held_for_confirmation", "confirmed"]);
-
-        // The answer stays the gate's; the utterance after it is ordinary speech.
-        assert!(r.awaiting.lock().unwrap().claims(answer.id));
-        assert!(!r.awaiting.lock().unwrap().claims(said("what's the time").id));
+        assert!(r.awaiting.lock().unwrap().question().is_none(), "closed");
     }
 
     #[tokio::test]
-    async fn anything_but_a_clear_yes_cancels() {
+    async fn a_no_cancels() {
         let mut r = rig("no");
         r.gate.review(plan_ready("rm notes.txt")).await;
         published(&mut r.rx);
-        r.gate.resolve_pending(&said("okay so what about the weather")).await;
+        r.gate.answered(false).await;
 
         let (spoken, approved, _) = published(&mut r.rx);
         assert!(approved.is_empty());
@@ -679,20 +497,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn administrator_actions_need_the_word() {
+    async fn high_risk_actions_are_asked_twice() {
         let mut r = rig("admin");
         r.gate.review(plan_ready("sudo pacman -Syu")).await;
         let (spoken, _, _) = published(&mut r.rx);
-        assert!(spoken[0].contains("I would run sudo pacman -Syu"), "{}", spoken[0]);
-        r.gate.resolve_pending(&said("yes")).await;
-        assert!(published(&mut r.rx).1.is_empty(), "a bare yes is not enough");
-
-        r.gate.review(plan_ready("sudo pacman -Syu")).await;
-        r.gate.resolve_pending(&said("yes, administrator")).await;
+        assert!(spoken[0].contains("Shall I run sudo pacman -Syu"), "{}", spoken[0]);
+        r.gate.answered(true).await;
+        let (spoken, approved, _) = published(&mut r.rx);
+        assert!(approved.is_empty(), "one yes is not enough");
+        assert!(spoken[0].starts_with("This can't be undone."), "{}", spoken[0]);
+        r.gate.answered(true).await;
         assert_eq!(published(&mut r.rx).1, ["sudo pacman -Syu"]);
     }
 
-    /// §8.4: a second held plan replaced the first without a trace.
+    /// A second held plan must not replace the first without a trace.
     #[tokio::test]
     async fn a_replaced_question_is_closed_on_record() {
         let mut r = rig("superseded");
@@ -703,7 +521,7 @@ mod tests {
             ["held_for_confirmation", "held_for_confirmation", "superseded"]
         );
         published(&mut r.rx);
-        r.gate.resolve_pending(&said("yes")).await;
+        r.gate.answered(true).await;
         assert_eq!(published(&mut r.rx).1, ["rm b.txt"], "yes means the question asked last");
     }
 
@@ -722,7 +540,7 @@ mod tests {
         assert!(approved.is_empty());
         assert_eq!(shown, ["asking", "answered"]);
         assert_eq!(outcomes(&audit).await, ["held_for_confirmation", "expired"]);
-        assert!(!awaiting.lock().unwrap().claims(uuid::Uuid::new_v4()), "later speech is ordinary speech");
+        assert!(awaiting.lock().unwrap().question().is_none(), "no question left open");
         running.abort();
     }
 
@@ -764,7 +582,7 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(file.exists(), "held: nothing runs before the answer");
 
-        bus.publish(said("yes"));
+        bus.publish(answer(true));
         until("the file is deleted", || !file.exists()).await;
 
         bus.publish(event(EventType::PlanReady, serde_json::json!({ "plan": { "type": "undo" } })));
@@ -786,23 +604,19 @@ mod tests {
         r.gate.tapped(&tap).await;
         assert_eq!(published(&mut r.rx).1, ["rm notes.txt"]);
         assert_eq!(outcomes(&r.audit).await, ["held_for_confirmation", "confirmed"]);
-        assert!(r.awaiting.lock().unwrap().claims(tap.id), "the tap was the answer");
     }
 
     /// A stray click must not run an administrator-level command.
     #[tokio::test]
-    async fn a_tap_is_not_enough_for_administrator_actions() {
+    async fn a_tap_is_not_enough_for_high_risk_actions() {
         let mut r = rig("tap_admin");
         r.gate.review(plan_ready("sudo pacman -Syu")).await;
         published(&mut r.rx);
         r.gate.tapped(&event(EventType::OrbTap, serde_json::json!({}))).await;
         let (spoken, approved, _) = published(&mut r.rx);
         assert!(approved.is_empty());
-        assert_eq!(spoken, ["That one needs you to say 'yes, administrator'."]);
-
-        // The question is still open for the spoken answer.
-        r.gate.resolve_pending(&said("yes, administrator")).await;
-        assert_eq!(published(&mut r.rx).1, ["sudo pacman -Syu"]);
+        assert_eq!(spoken, ["This one needs a spoken answer."]);
+        assert!(r.awaiting.lock().unwrap().question().is_some(), "still open for a spoken answer");
     }
 
     #[tokio::test]
@@ -822,7 +636,7 @@ mod tests {
         let (spoken, approved, _) = published(&mut r.rx);
         assert_eq!(spoken, ["I won't do that. It's not reversible."]);
         assert!(approved.is_empty());
-        r.gate.resolve_pending(&said("yes")).await;
+        r.gate.answered(true).await;
         assert!(published(&mut r.rx).1.is_empty(), "there is nothing to say yes to");
     }
 
