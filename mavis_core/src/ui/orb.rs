@@ -3,7 +3,7 @@
 // Renders a soft pulsing circle that reacts to OrbState.
 // Phase 5: Voice activity LED — brightness modulates with real-time VAD energy.
 //
-// On Wayland compositors with the layer shell (niri, Hyprland, Sway, KDE…)
+// On Wayland compositors with the layer shell (niri, Alphawm, Sway, KDE…)
 // the orb is an overlay: above every window, on every workspace, never
 // focused. Elsewhere (GNOME, X11) it's a borderless window.
 
