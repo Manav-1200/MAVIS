@@ -16,9 +16,8 @@ except ImportError as e:
     ) from e
 
 
-# How much of a reply is kept. Two sentences / 180 characters made replies
-# clipped ("4 workspaces open."); speech now starts with the first sentence,
-# so a third costs no waiting.
+# How much of a reply is kept. Two sentences clipped replies; speech starts
+# with the first sentence, so a third costs no waiting.
 MAX_SENTENCES = 3
 MAX_CHARS = 320
 
@@ -242,7 +241,7 @@ class LlamaEngine:
         text = re.sub(r"\s+", " ", text).strip()
 
         # 5. Narration about MAVIS keeps only what she says:
-        # 'Mavis responds without violating the rules: "..."' → '...'
+        # 'Mavis says: "..."' → '...'
         # Only when the reply opens with her name, so "I'm Mavis, and the
         # song is "Sunbeam"" keeps all of it.
         narrated = re.match(r"mavis\b[^\"“]*[\"“](.+?)[\"”]", text, flags=re.IGNORECASE)
