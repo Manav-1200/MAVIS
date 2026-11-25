@@ -93,7 +93,7 @@ def build_chat_messages(
     profile_lines: list[str] = []
     context_lines: list[str] = []
     # What the screen shows now. Kept apart from the conversation: mixed in,
-    # the model repeated "Surfy" from its last reply with termy focused.
+    # the model repeats its last reply instead of reading the screen.
     live_lines: list[str] = []
 
     if working_memory:
