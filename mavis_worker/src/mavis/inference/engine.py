@@ -22,38 +22,6 @@ except ImportError as e:
 MAX_SENTENCES = 3
 MAX_CHARS = 320
 
-GENERIC_OFFER = re.compile(
-    r"\b(?:how|what(?: else)?) can i (?:help|assist|do for)\b|\banything else (?:i can|you need)\b"
-    r"|^would you like (?:me )?to\b|^what would you like (?:to do|me to)\b|^what'?s next\b"
-    r"|^is there (?:anything|something)\b",
-    re.IGNORECASE,
-)
-
-# The model can't act: actions are carried out before it's asked. A reply
-# that says one is happening was made up ("Sure, closing the terminal now",
-# "Thunar is now full screen" on 2026-11-17).
-_DOING = (
-    r"closing|opening|launching|starting|switching|turning|setting|moving|muting|"
-    r"unmuting|locking|logging|shutting|restarting|rebooting|suspending|enabling|"
-    r"disabling|connecting|disconnecting|maximi[sz]ing|minimi[sz]ing|playing"
-)
-_DONE = (
-    r"closed|opened|launched|started|switched|turned|set|moved|muted|unmuted|locked|"
-    r"logged|shut|restarted|rebooted|suspended|enabled|disabled|connected|disconnected"
-)
-_STATE = r"open|opened|closed|full ?screen|on|off|muted|unmuted|locked|playing|paused"
-ACTION_CLAIM = re.compile(
-    # "Sure, closing the terminal now." — short, opening with the verb.
-    rf"^(?:(?:sure|okay|ok|alright|all right|understood|got it|right|done)[,.!]?\s+)?"
-    rf"(?:i'?m |i am |i'?ll |i will |let me |now )?(?:{_DOING})\b(?:\s+\S+){{0,5}}[.!]?$"
-    # "I've closed it."
-    rf"|\bi(?:'ve| have| just)\s+(?:just\s+)?(?:{_DONE})\b"
-    # "Thunar is now full screen.", "It's open now."
-    rf"|\b(?:is|are|'s)\s+now\s+(?:{_STATE})\b|\b(?:is|are|'s)\s+(?:{_STATE})\s+now\b",
-    re.IGNORECASE,
-)
-CANT_DO = "I can't do that yet."
-
 
 class LlamaEngine:
     def __init__(self, model_path: str | None = None, n_gpu_layers: int = 20):
@@ -276,7 +244,7 @@ class LlamaEngine:
         # 5. Narration about MAVIS keeps only what she says:
         # 'Mavis responds without violating the rules: "..."' → '...'
         # Only when the reply opens with her name, so "I'm Mavis, and the
-        # song is "Daylight"" keeps all of it.
+        # song is "Sunbeam"" keeps all of it.
         narrated = re.match(r"mavis\b[^\"“]*[\"“](.+?)[\"”]", text, flags=re.IGNORECASE)
         if narrated:
             text = narrated.group(1).strip()
@@ -284,14 +252,8 @@ class LlamaEngine:
         # Working-memory labels the model copied: "[mavis] You are looking at…"
         text = re.sub(r"^\[(?:mavis|user|[a-z_]+)\]\s*", "", text, flags=re.IGNORECASE)
 
-        # 6. Truncate to the first few sentences, without a closing offer
-        # ("What else can I assist you with?", "Would you like to…?"),
-        # which rule 5 bans and the model adds anyway.
+        # 6. Truncate to the first few sentences.
         sentences = re.split(r"(?<=[.!?])\s+", text)
-        while len(sentences) > 1 and GENERIC_OFFER.search(sentences[-1]):
-            sentences.pop()
-        if any(ACTION_CLAIM.search(s.strip()) for s in sentences):
-            return CANT_DO
         text = " ".join(sentences)
         if len(sentences) > MAX_SENTENCES:
             text = " ".join(sentences[:MAX_SENTENCES])
@@ -325,8 +287,8 @@ class LlamaEngine:
 
         _post_process keeps the first line, at most MAX_SENTENCES sentences
         and at most MAX_CHARS characters. Everything generated past that point was
-        thrown away — with max_tokens=256 that was most of an 11-second
-        wait in the 2026-09-22 log. Stopping here gives the same reply,
+        thrown away — with max_tokens=256 that could be most of the wait.
+        Stopping here gives the same reply,
         sooner. Mirrors _post_process's own rules, so it never stops before
         something that would have been kept.
         """
