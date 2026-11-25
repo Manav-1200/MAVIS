@@ -2725,6 +2725,7 @@ mod tests {
 
     #[test]
     fn a_fact_to_remember_must_be_what_was_said() {
-        assert!(restates(...));
-        assert!(!restates(...));
+        assert!(restates("aaa bbb ccc ddd", "xxx bbb ccc ddd"));
+        assert!(!restates("aaa bbb ccc ddd", "xxx yyy zzz"));
     }
+}
