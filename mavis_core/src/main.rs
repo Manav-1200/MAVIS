@@ -1,12 +1,5 @@
 // mavis_core/src/main.rs
 // Entry point. Initializes subsystems, wires them together, runs until shutdown.
-//
-// CHANGELOG 2026-08-26 (Phase 5):
-//   - Intent router: interrupts TTS when user speaks during playback
-//   - Mute controller: only unblocks mic on idle/error (not working/thinking/listening)
-//   - Voice activity LED: real-time VAD energy piped to orb
-//   - Warm-up fix: reads worker response before closing socket (no BrokenPipeError)
-//   - Shutdown save: working_memory.json written before bus.close()
 
 use anyhow::Result;
 use log::{error, info, warn};
@@ -120,7 +113,6 @@ async fn main() -> Result<()> {
     let installed_apps = platform.installed_apps();
     // The names of this machine's apps, so Whisper expects them.
     let stt_hints = speech_hints(&installed_apps);
-    let apps_for_stt = installed_apps.clone();
     // The planner's own sentinel.db connection, only when the Sentinel is on.
     let sentinel_for_planner = if sentinel::enabled() {
         match sentinel::store::SentinelStore::new(&data_dir.join("sentinel.db")) {
@@ -249,8 +241,8 @@ async fn main() -> Result<()> {
     info!("Listen mode: {:?}", listen.mode());
 
     // The window MAVIS was started from. Opening the orb takes keyboard
-    // focus away from it, and until the user clicked elsewhere MAVIS knew
-    // of no focused window at all (2026-11-01).
+    // focus away from it, and until the user clicked elsewhere MAVIS would
+    // know of no focused window at all.
     let started_from: Option<WindowInfo> = platform
         .windows()
         .and_then(|t| t.open_windows().ok())
@@ -279,10 +271,11 @@ async fn main() -> Result<()> {
                 Ok(event) => {
                     let toggle = match event.event_type {
                         EventType::ListenToggle => true,
+                        // A tap answers an open question; otherwise it's push to talk.
                         EventType::OrbTap => !awaiting_for_router
                             .lock()
                             .unwrap_or_else(|p| p.into_inner())
-                            .claims(event.id),
+                            .is_open(),
                         _ => false,
                     };
                     if toggle && listen_for_router.mode() == listen::ListenMode::Always {
@@ -542,14 +535,9 @@ async fn main() -> Result<()> {
             };
 
             if let Some((text, confidence)) = response_text {
-                // Not for a known command ("stop", "close firefox"): naming
-                // an installed app is better evidence than Whisper's score,
-                // and on 2026-11-05 correct commands scored 0.49–0.51. Nor
-                // for the answer to "Shall I?", which the gate checks itself.
+                // Not for the answer to "Shall I?": a short "yes" scores low.
                 let answering = awaiting_for_stt.lock().unwrap_or_else(|p| p.into_inner()).is_open();
-                let unclear = confidence < UNCLEAR_CONFIDENCE
-                    && !answering
-                    && !planner::heard_as_command(&text, &apps_for_stt);
+                let unclear = confidence < UNCLEAR_CONFIDENCE && !answering;
                 if paused_playback && executor::is_echo(&text, &spoken_for_stt) {
                     info!("STT: that was my own voice — ignored: {}", text);
                     resume("my own voice");
@@ -572,9 +560,8 @@ async fn main() -> Result<()> {
                 } else if unclear {
                     // Heard something, but not well enough to act on it.
                     // Answering a mangled transcript is worse than saying
-                    // so: in the 2026-09-26 run "I'm working on it right
-                    // now, where it is" — a misheard question — got a
-                    // confident answer to something never asked.
+                    // so: it gets a confident answer to something never
+                    // asked.
                     info!(
                         "STT: unclear (confidence {:.2} < {:.2}): {}",
                         confidence, UNCLEAR_CONFIDENCE, text
@@ -613,8 +600,8 @@ async fn main() -> Result<()> {
                     event_type: EventType::UiStateChange,
                     payload: serde_json::json!({ "state": "error" }),
                 });
-                // Said out loud: a red orb alone left the user wondering
-                // why MAVIS went quiet (2026-11-10).
+                // Said out loud: a red orb alone leaves the user wondering
+                // why MAVIS went quiet.
                 let line = hearing_failure_line(worker_error.as_deref());
                 let repeat = told_about_failure
                     .is_some_and(|(said, at)| said == line && at.elapsed() < Duration::from_secs(60));
@@ -681,7 +668,7 @@ async fn main() -> Result<()> {
     // Platform context polling
     //
     // Supervised too: this calls into compositor-specific parsing (niri,
-    // sway, Hyprland, X11), which handles output formats that vary between
+    // sway, Alphawm, X11), which handles output formats that vary between
     // versions and distributions. A parse panic here used to take context
     // awareness out silently for the rest of the session.
     let platform_for_poll = Arc::clone(&platform);
@@ -723,9 +710,9 @@ async fn main() -> Result<()> {
 
             if let Some(tracker) = platform_ctx.windows() {
                 // The orb is a window too, and compositors happily report
-                // it as focused — the log showed MAVIS telling the model
-                // the user was "in unknown — MAVIS", and deriving the
-                // project from MAVIS's own working directory. Our own
+                // it as focused, which would tell the model the user is
+                // in MAVIS and take the project from MAVIS's own working
+                // directory. Our own
                 // windows are removed, and while the orb has focus the
                 // user is taken to still be where they were before it.
                 let mut own_focused = false;
@@ -1009,8 +996,7 @@ fn hearing_failure_line(worker_error: Option<&str>) -> &'static str {
 
 /// Whether to move focus off the orb. Only once, as it opens: that focus
 /// was taken, not given. Later the user got there by switching window or
-/// workspace, and moving focus back dragged them to where they had been
-/// (2026-11-09).
+/// workspace, and moving focus back would drag them to where they had been.
 fn hand_focus_back(already: bool, since_open: std::time::Duration) -> bool {
     !already && since_open <= std::time::Duration::from_secs(20)
 }
@@ -1046,7 +1032,7 @@ fn speech_hints(apps: &[context_snapshot::AppEntry]) -> String {
     names.dedup();
     let mut out = String::new();
     for name in names {
-        // 300 cut the list off alphabetically, so Thunar never made it.
+        // 300 cut the list off alphabetically, so Filey never made it.
         // Whisper's prompt holds about 220 tokens, with the phrases that
         // teach it "Mavis" after the apps.
         if out.len() + name.len() + 2 > 450 {
