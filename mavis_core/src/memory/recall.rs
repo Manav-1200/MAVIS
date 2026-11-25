@@ -128,10 +128,9 @@ impl RecallStore {
         let found: Vec<Memory> = rows.collect::<Result<Vec<_>, _>>()?;
 
         // Drop anything that is essentially the sentence being answered.
-        // Full-text search is happy to return "Hello Robus, can you hear
-        // me?" for "Mavis, can you hear me?" — a match on the words that
-        // matter least, and MAVIS then answers as though the conversation
-        // were already under way.
+        // Full-text search happily matches a past greeting to a new one, on
+        // the words that matter least, and MAVIS then answers as though the
+        // conversation were already under way.
         Ok(found
             .into_iter()
             .filter(|m| !nearly_the_same(&m.text, query))
@@ -307,11 +306,8 @@ fn score_importance(role: &str, text: &str) -> i64 {
     // What's worth keeping about the user is the model's call: it uses
     // `remember`, which stores at FACT_IMPORTANCE. Here only the shape.
     let is_question = text.trim_end().ends_with('?');
-    // A question is not a memory. Storing them meant recall kept handing
-    // the model the user's own past questions — "[recalled] Earlier, user
-    // said: What is my name, Mavis?" — which is noise in the prompt and,
-    // worse, competes with the answer. Below the threshold, so it isn't
-    // stored at all.
+    // A question is not a memory: recalled, it is noise in the prompt and
+    // competes with the answer. Below the threshold, so it isn't stored.
     if is_question {
         return 1;
     }
