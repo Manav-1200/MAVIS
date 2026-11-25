@@ -29,10 +29,9 @@ FALLBACK_MODELS = ("small.en", "small", "base.en", "base")
 # Whisper is given only that. No speech, no Whisper call, nothing to invent.
 #
 # Silero ships inside faster-whisper (with onnxruntime), so this adds no
-# dependency. Tested 2026-09-22 against 40 s each of white, pink, brown and
-# fan-like noise at three levels: zero seconds reported as speech in all
-# twelve, while a spoken phrase mixed into the same noise was found with
-# correct boundaries at every level where it was audible.
+# dependency. Against white, pink, brown and fan-like noise at three levels
+# it reports no speech, while a phrase mixed into the same noise is found
+# with correct boundaries wherever it is audible.
 #
 # min_silence 500 ms matches the Rust side's end-of-utterance pause, so a
 # pause inside a sentence doesn't split it; speech_pad 300 ms keeps word
@@ -253,9 +252,8 @@ class STTEngine:
                 peak,
             )
             if peak >= 0.99 and peak_in <= 1.0:
-                # Every utterance in the 2026-09-27 run peaked at exactly
-                # 1.000: the signal is hitting the ceiling and the waveform
-                # is being squared off. Whisper degrades badly on that, and
+                # A peak at exactly 1.000 means the signal is hitting the
+                # ceiling and the waveform is being squared off. Whisper degrades badly on that, and
                 # no threshold or model change compensates — the input has
                 # to be quieter.
                 print(
@@ -284,10 +282,6 @@ class STTEngine:
             language="en",
             condition_on_previous_text=False,
             # Whisper sees only the speech regions (see SPEECH_GATE_OPTIONS).
-            # Was False since 2026-08-15, disabled for "empty transcripts" in
-            # the same session that fixed a dead microphone route and audio
-            # truncated over the socket — so it was most likely being fed
-            # no speech at all. Reversed 2026-09-22.
             vad_filter=gate,
             vad_parameters=SPEECH_GATE_OPTIONS if gate else None,
             # Bias the decoder toward the vocabulary actually used when
@@ -295,8 +289,8 @@ class STTEngine:
             # Whisper which rare words exist, so a weak signal resolves to
             # "clipboard" rather than "clayboard", and "MAVIS" rather than
             # "Ladies". App names come from this machine, not from here.
-            # Written as things said to her: a bare "MAVIS." still came out
-            # as "Movies", "Maybe" and "Babys" on 2026-11-05. App names go
+            # Written as things said to her: a bare "MAVIS." is misheard as
+            # similar-sounding words. App names go
             # first: a prompt over ~220 tokens loses its beginning, and the
             # name matters more than the last few apps.
             initial_prompt=(
@@ -429,7 +423,7 @@ class STTEngine:
         # len(parts), not len(parts) - 1: re.split leaves any text after the
         # last punctuation mark as a final unpaired element, and stopping
         # early threw it away — an unpunctuated transcript came back empty,
-        # and "Hi. open firefox" lost its command.
+        # and "Hi. open webby" lost its command.
         for i in range(0, len(parts), 2):
             phrase = parts[i].strip()
             punct = parts[i + 1] if i + 1 < len(parts) else ""
