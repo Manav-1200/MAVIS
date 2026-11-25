@@ -241,7 +241,7 @@ impl ContextEngine {
             // evict the actual conversation from the ring, which is the
             // exact failure the polling filter above exists to prevent.
             // Listening controls, not conversation.
-            EventType::OrbTap | EventType::ListenToggle => {}
+            EventType::OrbTap | EventType::ListenToggle | EventType::Confirmation => {}
 
             EventType::SystemChange => {
                 let count = event
@@ -378,7 +378,7 @@ impl ContextEngine {
 ///    "I'm X" / "I am X" don't count — they introduce a state ("I'm using
 ///    the terminal") far more often than a name.
 /// 2. X ends its clause: followed by nothing, punctuation, or "and". Names
-///    come last ("my name is Manav", "call me Azazel, please");
+///    come last ("my name is Sam", "call me Robin, please");
 ///    other words keep going ("call me back later", "my name is not
 ///    important").
 /// 3. Not a question: "what's my name is what I asked?" introduces nothing.
