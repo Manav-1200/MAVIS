@@ -152,22 +152,22 @@ What MAVIS can do. Say it however you like: the model works out what you mean, s
 
 | For example | MAVIS does |
 |-----|------------|
-| "open firefox", "launch terminal", "can you open thunar for me" | Launches the app; a name misheard by a letter or two ("tuner") still finds it |
+| "open the browser", "launch terminal", "can you open the file manager for me" | Launches the app; a name misheard by a letter or two still finds it |
 | "open the terminal", "close the browser" | Finds the app by what it is (from its launcher's GenericName and Categories); asks "Which one?" when several fit |
 | "play lofi hip hop" | Plays it in the app you last played something in; the first time, your default browser. In a browser it plays the top result from the site under `[media]` in `config/config.toml` (YouTube as shipped; needs `curl`, else the search page opens) |
-| "play daylight on youtube using firefox", "play daylight in spotify" | Plays it in that app, and remembers the app for next time. What happens depends on what the app registers for: a browser gets the site; a media player gets a matching file from your Music or Videos folder; an app with its own link type gets a search inside it; any other app is just opened |
-| "search youtube for lofi", "search spotify for lofi" | That site's or app's search, without playing |
+| "play <song> on <site> using <browser>", "play <song> in <music app>" | Plays it in that app, and remembers the app for next time. What happens depends on what the app registers for: a browser gets the site; a media player gets a matching file from your Music or Videos folder; an app with its own link type gets a search inside it; any other app is just opened |
+| "search <site> for lofi", "search <music app> for lofi" | That site's or app's search, without playing |
 | "google rust async traits", "look up …" | A web search on the site under `[web]` in `config/config.toml` |
 | "volume up", "louder", "mute" | Adjusts volume |
 | "volume to 50%", "brightness to 30 percent" | Sets that level |
 | "turn off bluetooth", "turn on Wi-Fi" | Switches the radio (`bluetoothctl` or `rfkill`; `nmcli` or `rfkill`) |
 | "lock the screen", "log out", "suspend", "shut down", "restart the computer" | Locks at once; the others ask first. Only as the whole request: "how do I log out of my mail" is a question |
-| "switch to workspace 2", "full screen Thunar", "make it full screen" | Window-manager actions (niri; workspaces also on Sway and Hyprland) |
+| "switch to workspace 2", "full screen the file manager", "make it full screen" | Window-manager actions (niri; workspaces also on Sway and Hyprland) |
 | "pause", "resume", "next song" | Media control |
-| "close Firefox", "quit the file manager" | Asks first, then closes that app's windows (niri for now). Answer "yes", or say the request again |
-| "close it", "close this window" | Asks first, then closes the focused window. "Yes", "close it" or the request again confirms. The terminal MAVIS runs in is never closed |
-| "open youtube.com" | Opens that site in your default browser |
-| "open Firefox and play lofi" | Plays it in the app just opened, if that app can play anything |
+| "close the browser", "quit the file manager" | Asks first, then closes that app's windows (niri for now) |
+| "close it", "close this window" | Asks first, then closes the focused window. The terminal MAVIS runs in is never closed |
+| "open <site>.com" | Opens that site in your default browser |
+| "open <music app> and play lofi" | Plays it in the app just opened, if that app can play anything |
 | "brighter", "dim the screen" | Adjusts brightness |
 
 Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. Everything you say goes to the local model once, with the conversation, what's on screen and the list of MAVIS's actions. It answers either `DO <action>` or `SAY <reply>`, and llama.cpp's grammar allows nothing else. No phrase lists decide what you meant. Before a `DO` runs, the code checks it: the action must be on the list, levels must be 0–100, and an app or site must be one you mentioned or described ("the browser"). Closing apps, logging out and shutting down still ask "Shall I…?" first. A reply that claims an action it didn't take ("closing the terminal now") is replaced with "I can't do that yet." If an action fails, MAVIS says so and why.
@@ -178,7 +178,7 @@ An utterance that starts with an explicit action is never treated as system cont
 
 ### Interrupting
 
-MAVIS listens while it speaks. Start talking and it stops mid-sentence, then answers what you just said. Say "stop", "quiet" or "cancel" and it simply goes quiet. When MAVIS isn't speaking, "stop" pauses whatever is playing instead.
+MAVIS listens while it speaks. Start talking and it stops mid-sentence, then answers what you just said. Ask it to be quiet, however you put it, and it simply goes quiet. When MAVIS isn't speaking, that pauses whatever is playing instead.
 
 Music or a video playing while MAVIS answers is paused for the answer and picks up afterwards. If you pause, resume or open something yourself in between, it's left as you set it.
 
@@ -204,11 +204,11 @@ Every plan is scored for risk before anything runs:
 | Risk | What happens |
 |------|--------------|
 | 0–2 | Runs silently — speaking, notifications, volume, launching an app |
-| 3–7 | "Shall I run …?" or "Shall I close …?" — reads out what it would do and waits up to 20 seconds for a clear yes, or a tap on the orb |
-| 8+ | Requires you to say "yes, administrator" — a tap is not enough |
+| 3–7 | "Shall I run …?" or "Shall I close …?" — reads out what it would do and waits up to 20 seconds for your answer, or a tap on the orb |
+| 8+ | Asked twice, the second time saying it can't be undone. Only a spoken answer counts; a tap is not enough |
 | Irreversible | Refused, whatever you say |
 
-Anything that isn't a clear yes cancels. A "no" anywhere in the answer always wins. If you answer with a request of your own ("play some lofi"), the question is cancelled and the request carried out. Before a destructive command runs, the files it names are copied — say "undo that" within five minutes to get them back. Every decision is written to `memory/audit.db`, which MAVIS can add to but never edit.
+Answer however you like: the model decides whether you said yes, no, or something else, with the question in front of it. Before a destructive command runs, the files it names are copied — say "undo that" within five minutes to get them back. Every decision is written to `memory/audit.db`, which MAVIS can add to but never edit.
 
 ### Memory
 
@@ -239,7 +239,7 @@ It also watches:
 - **File integrity** — once a day, whether packaged files still match their packages
 - **Advisories** — with `MAVIS_SENTINEL_ADVISORIES=1` and `arch-audit` (Arch) or `debsecan` (Debian) installed, new high-risk advisories, reported as that tool's finding
 
-Changes worth knowing are said the next time you speak to MAVIS; anything that gives someone new power over the machine also raises a desktop notification. Ask "what changed recently?" for the rest. Everything since package detection is tested but not yet run on real hardware — see [`PHASES.md` Phase 8.5](PHASES.md#phase-85--system-sentinel).
+Changes worth knowing are said the next time you speak to MAVIS; anything that gives someone new power over the machine also raises a desktop notification. Ask what changed, over whatever stretch of time, for the rest. Everything since package detection is tested but not yet run on real hardware — see [`PHASES.md` Phase 8.5](PHASES.md#phase-85--system-sentinel).
 
 ### Context sources
 
