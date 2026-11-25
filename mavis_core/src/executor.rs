@@ -3,15 +3,6 @@
 // Listens for PlanApproved + TtsInterrupt, emits ActionComplete + UiStateChange.
 // Only approved plans arrive here — the permission gate stands between this
 // and the planner, so nothing runs without being scored and recorded.
-//
-// CHANGELOG 2026-08-25 (Phase 5):
-//   - TTS queue: non-blocking say() with sequential playback
-//   - TTS interruption: kill current playback + drain queue on TtsInterrupt
-//   - Audio playback: pw-play > paplay > aplay (PipeWire-first for Arch)
-//   - Piper model + .onnx.json validated before synthesis
-//   - Kokoro WAV bytes and Piper WAV file both route through unified play_audio()
-//   - spawn_audio_player respects MAVIS_AUDIO_DEVICE env var
-//   - TTS queue emits Celebrating state briefly after the last queued item finishes
 
 use crate::event_bus::EventBus;
 use crate::models::event::{Event, EventType};
@@ -452,9 +443,9 @@ impl Executor {
 /// picked up by the mic, from the user's.
 pub type SpokenLog = Arc<std::sync::Mutex<std::collections::VecDeque<(String, std::time::Instant)>>>;
 
-/// Whether a transcript heard during playback is MAVIS's own words. On
-/// 2026-11-17 "…Ask me what changed to hear about them" came back as the
-/// transcript "Ask me what change...", and MAVIS answered itself.
+/// Whether a transcript heard during playback is MAVIS's own words, picked
+/// up by the mic — often cut short or run together — so it doesn't answer
+/// itself.
 pub fn is_echo(transcript: &str, spoken: &SpokenLog) -> bool {
     let words = |s: &str| -> String {
         s.to_lowercase()
@@ -1073,18 +1064,18 @@ mod tests {
     #[test]
     fn its_own_voice_is_recognised_only_from_what_it_said() {
         let log = SpokenLog::default();
-        log.lock().unwrap().push_back(("There were also 14 earlier changes. Ask me what changed to hear about them.".into(), std::time::Instant::now()));
+        log.lock().unwrap().push_back(("There were also 9 earlier changes. Ask me what changed to hear about them.".into(), std::time::Instant::now()));
         assert!(is_echo("Ask me what change...", &log));
         assert!(!is_echo("What changed on my system?", &log));
         assert!(!is_echo("Ask", &log), "one word says too little");
     }
 
-    /// 2026-11-22: reading "P_RSA3072SHA384.json" came back as "PRSA".
+    /// A file name read out comes back as a piece of itself.
     #[test]
     fn a_piece_of_a_name_it_read_out_is_its_own_voice() {
         let log = SpokenLog::default();
         log.lock().unwrap().push_back((
-            "Today, 3 files match their packages again: P_ECCP384SHA384.json, P_RSA3072SHA384.json and journal. Stop by later.".into(),
+            "Today, 3 files match their packages again: K_ABC123.json, P_RSA4096.json and notes. Stop by later.".into(),
             std::time::Instant::now(),
         ));
         assert!(is_echo("PRSA.", &log));
