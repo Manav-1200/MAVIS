@@ -897,11 +897,11 @@ MAVIS stops matching phrases and lets the model understand. Code keeps what it's
 - [x] **1. DO/SAY** ([`DECISIONS.md` §44](DECISIONS.md#44-the-model-understands-the-code-checks-dosay)). One model call per sentence answers `DO <action>` or `SAY <reply>`, held to that form by a grammar. The actions are a catalogue in code. Removed: the request filter, the command chooser, the examples copied from logs, the command tables on the live path, and the "workspace too" / "all the way up" patches.
 - [x] First hardware run (§45): Phi-3-mini got 3 of 7 decisions right and switched workspace when asked to open Thunar. Fixes: arguments held to their kind by the grammar (levels are numbers, apps are installed or open apps), `open_website` split from `open`, temperature 0.4, clearer instructions, Qwen's chat format supported.
 - [ ] Second run, then Phi-3-mini against Qwen2.5-3B-Instruct.
-- [ ] **2. Sensitive actions warn and ask.** `rm -rf`, `sudo`, deleting files and the session say exactly what they'll do and wait for a yes. Nothing is refused outright. Root goes through `pkexec`, so the system's own password check comes last. Unrecoverable actions ask twice.
+- [ ] **2. Sensitive actions warn and ask.** (Asking twice for high-risk actions is done, §46.) `rm -rf`, `sudo`, deleting files and the session say exactly what they'll do and wait for a yes. Nothing is refused outright. Root goes through `pkexec`, so the system's own password check comes last. Unrecoverable actions ask twice.
 - [ ] **3. Voice match.** Only the enrolled user can authorise sensitive actions; anyone else is told so. Local ECAPA speaker embeddings. Known limit: recordings and cloned voices.
 - [ ] **4. Self-learning.** It learns from the user's own confirmed DOs and daily patterns, never from undone or corrected ones or from other voices. It only gives examples and suggestions, never automatic actions. Everything learned can be read out and forgotten; nothing leaves the machine; the model's weights never change.
 - [ ] **5. Face check** with liveness, only at sensitive moments; infrared if the camera has it.
-- [ ] **6. The remaining phrase lists go:** confirmations (yes/no words), the Sentinel's question grammar, the meta-question deflection, and the output filters, where DO/SAY can replace them.
+- [x] **6. The remaining phrase lists are gone** ([`DECISIONS.md` §46](DECISIONS.md#46-no-phrase-lists-left)). The model answers confirmations (`confirm`/`cancel`), asks the Sentinel (`system_changes`, `update_details`), goes quiet (`stop`), looks back in memory (`look_back`) and keeps facts (`remember`). Removed: the yes/no and repeat-the-request words, the Sentinel's question grammar, time-phrase parsing, the stop, undo and wake-name checks, the meta-question deflection, the command tables and matchers, the self-fact markers, the confidence bypass for commands, the reply filters for action claims and closing offers, and every real app, song and package name in tests and comments.
 - [ ] **7. Files and projects.** Find and read files of any format, summarise them, and build a project from a document with a plan, a time estimate, progress reports and the safety rules above. Which coding model is still open: local, cloud, or both.
 
 ---
@@ -1105,4 +1105,4 @@ MAVIS stops matching phrases and lets the model understand. Code keeps what it's
 
 ---
 
-*Last updated: 2026-11-24*
+*Last updated: 2026-11-25*
