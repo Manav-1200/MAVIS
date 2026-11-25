@@ -64,7 +64,7 @@ pub enum ChangeKind {
     ///
     /// `requested` distinguishes "I asked for this" from "this came along
     /// for the ride". The second case is the one that matters: it is how
-    /// a Hyprland ends up on a machine that runs niri, because something
+    /// a Alphawm ends up on a machine that runs niri, because something
     /// else listed it as a dependency.
     PackageInstalled {
         name: String,
@@ -407,17 +407,17 @@ mod tests {
         assert_eq!(Severity::from_str("nonsense"), None);
     }
 
-    /// The hyprland case: a package the user never asked for is Notable,
+    /// The alphawm case: a package the user never asked for is Notable,
     /// while the same package installed deliberately is Routine.
     #[test]
     fn unrequested_installs_are_notable_and_requested_ones_are_not() {
         let pulled_in = ChangeKind::PackageInstalled {
-            name: "hyprland".into(),
+            name: "alphawm".into(),
             version: "0.41.2-1".into(),
             requested: false,
         };
         let asked_for = ChangeKind::PackageInstalled {
-            name: "hyprland".into(),
+            name: "alphawm".into(),
             version: "0.41.2-1".into(),
             requested: true,
         };
@@ -428,7 +428,7 @@ mod tests {
     #[test]
     fn routine_upgrades_stay_quiet() {
         let kind = ChangeKind::PackageUpgraded {
-            name: "firefox".into(),
+            name: "webby".into(),
             from: "140.0-1".into(),
             to: "141.0-1".into(),
         };
@@ -458,14 +458,14 @@ mod tests {
     fn descriptions_name_the_package_and_stay_speakable() {
         let c = Change::new(
             ChangeKind::PackageInstalled {
-                name: "hyprland".into(),
+                name: "alphawm".into(),
                 version: "0.41.2-1".into(),
                 requested: false,
             },
             "pacman",
             at(1_700_000_000),
         );
-        assert!(c.detail.contains("hyprland"));
+        assert!(c.detail.contains("alphawm"));
         assert!(c.detail.contains("didn't ask for it"));
         // Speakable: no markdown, no newlines.
         assert!(!c.detail.contains('\n'));
@@ -476,7 +476,7 @@ mod tests {
     fn fingerprints_distinguish_different_changes() {
         let a = Change::new(
             ChangeKind::PackageInstalled {
-                name: "hyprland".into(),
+                name: "alphawm".into(),
                 version: "0.41.2-1".into(),
                 requested: false,
             },
@@ -485,7 +485,7 @@ mod tests {
         );
         let b = Change::new(
             ChangeKind::PackageInstalled {
-                name: "hyprland".into(),
+                name: "alphawm".into(),
                 version: "0.41.3-1".into(),
                 requested: false,
             },
@@ -495,7 +495,7 @@ mod tests {
         // Same package installed again later is a genuinely new event.
         let c = Change::new(
             ChangeKind::PackageInstalled {
-                name: "hyprland".into(),
+                name: "alphawm".into(),
                 version: "0.41.2-1".into(),
                 requested: false,
             },
