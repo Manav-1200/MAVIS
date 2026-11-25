@@ -72,7 +72,7 @@ impl Default for SttConfig {
 // Fixed thresholds alone failed the moment the room wasn't quiet: with the
 // mic at 0.6 and fans spinning up while the model loaded, ambient sat
 // above the 0.06 end threshold, so MAVIS never heard the user stop — it
-// recorded to the 45 s hard ceiling and Whisper invented a YouTube outro
+// recorded to the 45 s hard ceiling and Whisper invented a Tube outro
 // from the noise. The old noise floor couldn't follow: it was capped at
 // 0.045 and reset to 0.035 after every utterance.
 //
@@ -144,8 +144,8 @@ const TAIL_PADDING_MS: usize = 300;
 // `MAVIS_BARGE_IN=0` restores the old mute-while-speaking behaviour.
 const BARGE_IN_RATIO: f32 = 1.3;
 /// Loud frames over MAVIS's voice before its playback is paused: 360 ms.
-/// At 150 ms, 9 of 10 pauses in the 2026-10-15 run were noise, each a
-/// stutter. Shorter speech is still heard: a lone "stop" is transcribed
+/// At 150 ms nearly every pause was noise, each a stutter. Shorter speech
+/// is still heard: a lone "stop" is transcribed
 /// and acted on, it just doesn't pause playback on its own.
 const BARGE_IN_CONFIRM_FRAMES: usize = 12;
 /// The echo estimate is the loudest MAVIS has been heard recently, not an
@@ -157,9 +157,8 @@ const ECHO_DECAY: f32 = 0.995;
 /// Frames of *audible* playback spent measuring MAVIS's own voice before
 /// barge-in can trigger. Counted from when sound actually arrives, not
 /// from when playback was requested: synthesis takes about a second, and
-/// in the 2026-09-27 run the whole grace period was spent on that silence,
-/// so the first word out of the speakers tripped the barge-in and MAVIS
-/// cut itself off on every single reply.
+/// spending the grace period on that silence lets the first word out of
+/// the speakers trip the barge-in, so MAVIS cuts itself off.
 /// 25 frames is 750 ms of real sound.
 const PLAYBACK_GRACE_FRAMES: usize = 25;
 
@@ -176,8 +175,7 @@ const STREAM_SETTLE_TIME: Duration = Duration::from_millis(1500);
 /// Shortest utterance worth transcribing. This exists because Whisper
 /// invents fluent text from clicks and door slams — but the worker now
 /// checks for actual speech before transcribing anything, so the bar no
-/// longer has to be high. It was 1.5 s, which threw away four real
-/// utterances in the 2026-09-26 run, including "stop" and "Mavis".
+/// longer has to be high. 1.5 s threw away short real words like "stop".
 const MIN_UTTERANCE_SAMPLES: usize = 12800; // 0.8s at 16kHz
 /// Over MAVIS's voice the pre-roll is shorter, so a lone "stop" comes out
 /// shorter too; it still has to reach the transcriber.
@@ -231,7 +229,7 @@ struct EnergyVad {
     debug_frames: u64,
     debug_window_max: f32,
     /// Sound clearly above the room but under the speech threshold, again
-    /// and again with no speech: the mic is too quiet (2026-11-22, -24).
+    /// and again with no speech: the mic is too quiet.
     frames_seen: u64,
     quiet_run: usize,
     quiet_bursts: VecDeque<u64>,
@@ -523,8 +521,8 @@ impl EnergyVad {
             self.note_quiet(level);
             // Only frames clearly below the speech threshold teach the
             // floor. Counting louder ones let a word's onset, or echo just
-            // after MAVIS spoke, inflate the floor — measured at 0.22 in
-            // the 2026-09-26 run, which then dropped a real utterance.
+            // after MAVIS spoke, inflate the floor until real speech was
+            // dropped.
             if level < self.start_threshold() {
                 let rate = if level < self.noise_floor { FLOOR_FALL_RATE } else { FLOOR_RISE_RATE };
                 self.noise_floor = (self.noise_floor + rate * (level - self.noise_floor))
@@ -572,7 +570,7 @@ impl EnergyVad {
         // that is sent on: the worker checks it for actual speech, and
         // that check is better at this than an energy comparison. The
         // stricter version of this test (loudest ≤ start threshold) threw
-        // away a real utterance in the 2026-09-26 run.
+        // away real utterances.
         let is_noise = loudest <= end;
         let _ = start;
         self.reset();
@@ -658,12 +656,10 @@ fn select_input_device(host: &cpal::Host) -> Option<Device> {
 
     // Prefer the system's own audio server over the raw sound card.
     //
-    // This used to be the other way round — `sysdefault:CARD=Generic` won —
-    // from a 2026-08-15 session where cpal's `default` resolved to a route
-    // with no signal. The cost showed up much later: going straight to the
-    // card bypasses everything PipeWire does, including the source the user
-    // actually chose and any echo cancellation they've set up, which is
-    // what barge-in needs to work with speakers. `MAVIS_AUDIO_DEVICE` still
+    // Going straight to the card bypasses everything PipeWire does,
+    // including the source the user actually chose and any echo
+    // cancellation they've set up, which is what barge-in needs to work
+    // with speakers. `MAVIS_AUDIO_DEVICE` still
     // overrides by exact name if the card really is the better route here.
     let score = |name: &str| {
         let lower = name.to_lowercase();
@@ -1280,8 +1276,7 @@ mod vad_tests {
 
     #[test]
     fn noisy_room_still_ends_promptly() {
-        // Ambient at 0.09 — above the old fixed 0.075 start and 0.06 end,
-        // the situation in the 2026-09-22 log.
+        // Ambient at 0.09 — above the old fixed 0.075 start and 0.06 end.
         let mut s = 2;
         let mut v = vad();
         let mut audio = noise(0.09, 60, &mut s);
@@ -1353,9 +1348,8 @@ mod vad_tests {
         assert!(!got.is_empty() || !got2.is_empty(), "utterance never shipped");
     }
 
-    /// Over MAVIS's voice: a cough doesn't pause it (2026-10-15: 9 of 10
-    /// pauses were noise), a lone "stop" still reaches the transcriber
-    /// (2026-11-01: it never did), and talking at length pauses it.
+    /// Over MAVIS's voice: a cough doesn't pause it, a lone "stop" still
+    /// reaches the transcriber, and talking at length pauses it.
     #[test]
     fn talking_over_mavis() {
         use std::sync::atomic::Ordering;
@@ -1386,9 +1380,8 @@ mod vad_tests {
         assert_eq!(pauses(), 1, "talking over MAVIS didn't pause it");
     }
 
-    /// The 2026-09-27 failure: playback is announced about a second before
-    /// any sound comes out (synthesis), and MAVIS cut itself off on every
-    /// reply because the measuring window was spent on that silence.
+    /// Playback is announced about a second before any sound comes out
+    /// (synthesis); the measuring window must not be spent on that silence.
     #[test]
     fn silence_before_playback_does_not_burn_the_measuring_window() {
         let mut sd = 11;
