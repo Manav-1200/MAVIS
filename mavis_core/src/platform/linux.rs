@@ -80,9 +80,9 @@ impl LinuxWindowTracker {
     ///
     /// Environment variables are used only to decide what to *try first* —
     /// never as proof. `NIRI_SOCKET` and friends leak into other sessions
-    /// (observed: a GNOME login inheriting `NIRI_SOCKET`, which made MAVIS
-    /// commit to niri and then fail every poll forever). Each candidate is
-    /// confirmed by actually running it.
+    /// (a GNOME login can inherit `NIRI_SOCKET`), and trusting them would
+    /// commit to the wrong compositor and fail every poll. Each candidate
+    /// is confirmed by actually running it.
     fn detect(wayland: bool) -> Compositor {
         if wayland {
             // Order the attempts by what the environment hints at, then
@@ -726,7 +726,7 @@ mod tests {
         assert_eq!(category_words("TerminalEmulator"), vec!["terminal", "emulator"]);
         assert_eq!(category_words("WebBrowser"), vec!["web", "browser"]);
         assert!(category_words("GTK").is_empty());
-        let entry = "[Desktop Entry]\nType=Application\nName=kitty\nGenericName=Terminal emulator\nExec=kitty\nCategories=System;TerminalEmulator;\n";
+        let entry = "[Desktop Entry]\nType=Application\nName=termy\nGenericName=Terminal emulator\nExec=termy\nCategories=System;TerminalEmulator;\n";
         let app = parse_desktop_file(entry).unwrap();
         assert!(app.kinds.contains(&"terminal".to_string()));
     }
