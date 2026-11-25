@@ -388,7 +388,7 @@ mod tests {
     #[test]
     fn a_change_round_trips_intact() {
         let s = store();
-        let c = pulled_in("hyprland", 0);
+        let c = pulled_in("alphawm", 0);
         assert!(s.record(&c).unwrap());
 
         let back = s.recent(10).unwrap();
@@ -404,7 +404,7 @@ mod tests {
     #[test]
     fn recording_the_same_change_twice_is_ignored() {
         let s = store();
-        let c = pulled_in("hyprland", 0);
+        let c = pulled_in("alphawm", 0);
         assert!(s.record(&c).unwrap(), "first insert is new");
         assert!(!s.record(&c).unwrap(), "second insert is a duplicate");
         assert_eq!(s.count().unwrap(), 1);
@@ -413,7 +413,7 @@ mod tests {
     #[test]
     fn record_all_returns_only_the_new_ones() {
         let s = store();
-        let a = pulled_in("hyprland", 0);
+        let a = pulled_in("alphawm", 0);
         let b = pulled_in("numactl", 1);
 
         let fresh = s.record_all(&[a.clone()]).unwrap();
@@ -427,13 +427,13 @@ mod tests {
     #[test]
     fn unannounced_filters_by_severity_and_orders_oldest_first() {
         let s = store();
-        s.record(&upgraded("firefox", 10)).unwrap(); // Routine
-        s.record(&pulled_in("hyprland", 0)).unwrap(); // Notable
+        s.record(&upgraded("webby", 10)).unwrap(); // Routine
+        s.record(&pulled_in("alphawm", 0)).unwrap(); // Notable
         s.record(&pulled_in("numactl", 20)).unwrap(); // Notable
 
         let notable = s.unannounced(Severity::Notable).unwrap();
         assert_eq!(notable.len(), 2);
-        assert!(notable[0].detail.contains("hyprland"), "oldest first");
+        assert!(notable[0].detail.contains("alphawm"), "oldest first");
         assert!(notable[1].detail.contains("numactl"));
 
         let everything = s.unannounced(Severity::Routine).unwrap();
@@ -443,7 +443,7 @@ mod tests {
     #[test]
     fn announcing_removes_from_the_pending_list() {
         let s = store();
-        let c = pulled_in("hyprland", 0);
+        let c = pulled_in("alphawm", 0);
         s.record(&c).unwrap();
         assert_eq!(s.unannounced(Severity::Notable).unwrap().len(), 1);
 
@@ -465,7 +465,7 @@ mod tests {
     fn a_silent_import_records_everything_and_leaves_nothing_pending() {
         let s = store();
         let fresh = s
-            .record_all_announced(&[pulled_in("hyprland", 0), upgraded("firefox", 1)])
+            .record_all_announced(&[pulled_in("alphawm", 0), upgraded("webby", 1)])
             .unwrap();
         assert_eq!(fresh.len(), 2, "both are new rows");
         assert_eq!(s.count().unwrap(), 2, "history is on record");
@@ -478,8 +478,8 @@ mod tests {
     #[test]
     fn unannounced_respects_the_critical_threshold() {
         let s = store();
-        s.record(&pulled_in("hyprland", 0)).unwrap();
-        s.record(&upgraded("firefox", 1)).unwrap();
+        s.record(&pulled_in("alphawm", 0)).unwrap();
+        s.record(&upgraded("webby", 1)).unwrap();
         assert!(s.unannounced(Severity::Critical).unwrap().is_empty());
         assert_eq!(s.unannounced(Severity::Notable).unwrap().len(), 1);
     }
@@ -554,7 +554,7 @@ mod tests {
         ));
         {
             let s = SentinelStore::new(&path).unwrap();
-            s.record(&pulled_in("hyprland", 0)).unwrap();
+            s.record(&pulled_in("alphawm", 0)).unwrap();
             s.set_watermark("pacman", at(500)).unwrap();
         }
         let s = SentinelStore::new(&path).unwrap();
