@@ -89,14 +89,14 @@ mod tests {
     use super::*;
     use crate::sentinel::change::Severity;
 
-    // Real output of arch-audit 0.1.20 with ARCH_AUDIT_FORMAT (2026-10-06).
+    // Output format of arch-audit 0.1.20 with ARCH_AUDIT_FORMAT.
     const ARCH_AUDIT: &str = "\
 testpkg\tHigh risk\t\tCVE-2024-0001, CVE-2024-0002
 otherpkg\tLow risk\t2.1-1\tCVE-2024-0003
 ";
 
-    // Real output of debsecan 0.4.20.1 (2026-10-06), package names replaced.
-    // The last line, with no notes, is hand-written.
+    // Output format of debsecan 0.4.20.1. The last line, with no notes,
+    // covers the no-notes case.
     const DEBSECAN: &str = "\
 CVE-2024-0001 pkg-a (fixed, remotely exploitable, high urgency)
 CVE-2024-0002 pkg-a (low urgency)
