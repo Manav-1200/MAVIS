@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn launcher_lines_keep_quoted_words_together() {
-        assert_eq!(split_command_line("firefox --new-window"), ["firefox", "--new-window"]);
+        assert_eq!(split_command_line("webby --new-window"), ["webby", "--new-window"]);
         assert_eq!(
             split_command_line(r#"sh -c "echo hi >> /tmp/x""#),
             ["sh", "-c", "echo hi >> /tmp/x"]
