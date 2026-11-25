@@ -136,8 +136,8 @@ mod tests {
     use super::*;
     use crate::sentinel::change::Severity;
 
-    // Real lines from pacman 6.0.2 against a crafted package, run without
-    // root (2026-10-06). Only the test root's prefix is cut from the paths.
+    // pacman 6.0.2's output against a crafted package, run without root.
+    // Only the test root's prefix is cut from the paths.
     const PACMAN: &str = "\
 backup file: testpkg: /etc/hello.conf (Size mismatch)
 backup file: testpkg: /etc/hello.conf (MD5 checksum mismatch)
@@ -156,7 +156,7 @@ warning: testpkg: /usr/lib/secret/key (Permission denied)
 warning: testpkg: /usr/lib/touched (Modification time mismatch)
 ";
 
-    // Real output of rpm 4.18.2 against a crafted package (2026-10-06).
+    // rpm 4.18.2's output against a crafted package.
     const RPM: &str = "\
 S.5....T.  c /etc/hello.conf
 S.5....T.    /usr/bin/hello
@@ -166,7 +166,7 @@ missing     /usr/lib/t/gone
 .......T.    /usr/lib/t/touched
 ";
 
-    // Real lines from dpkg 1.22.6 --verify (2026-10-06), package name replaced.
+    // dpkg 1.22.6 --verify output format.
     const DPKG: &str = "\
 ??5??????   /usr/bin/example-tool
 ??5?????? c /etc/default/example-tool
