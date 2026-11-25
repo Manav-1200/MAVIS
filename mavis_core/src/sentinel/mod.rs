@@ -523,7 +523,7 @@ mod tests {
         let dir = temp_dir("boundary");
         let store = SentinelStore::new(&dir.join("sentinel.db")).unwrap();
         let source = "pacman";
-        let explicit: HashSet<String> = HashSet::from(["firefox".to_string()]);
+        let explicit: HashSet<String> = HashSet::from(["webby".to_string()]);
 
         let boundary = chrono::DateTime::from_timestamp(1_700_000_100, 0).unwrap();
         let earlier = chrono::DateTime::from_timestamp(1_700_000_000, 0).unwrap();
@@ -537,7 +537,7 @@ mod tests {
         };
 
         // --- Scan 1: lands mid-transaction, sees only part of it. ---
-        let seen = vec![entry("firefox", earlier), entry("hyprland", boundary)];
+        let seen = vec![entry("webby", earlier), entry("alphawm", boundary)];
         let newest = seen.iter().map(|e| e.occurred_at).max().unwrap();
         let changes = packages::to_changes(&seen, &explicit, source);
         let recorded = store.record_all(&changes).unwrap();
@@ -546,9 +546,9 @@ mod tests {
 
         // --- pacman writes one more line, stamped the SAME second. ---
         let all = vec![
-            entry("firefox", earlier),
-            entry("hyprland", boundary),
-            entry("xdg-desktop-portal-hyprland", boundary),
+            entry("webby", earlier),
+            entry("alphawm", boundary),
+            entry("xdg-desktop-portal-alphawm", boundary),
         ];
 
         // --- Scan 2 ---
@@ -572,7 +572,7 @@ mod tests {
             "only the late arrival is new; the fingerprint suppresses the replay"
         );
         assert!(
-            recorded[0].detail.contains("xdg-desktop-portal-hyprland"),
+            recorded[0].detail.contains("xdg-desktop-portal-alphawm"),
             "got: {}",
             recorded[0].detail
         );
@@ -644,7 +644,7 @@ mod tests {
         let store = SentinelStore::new(&dir.join("sentinel.db")).unwrap();
         let change = Change::new(
             ChangeKind::PackageInstalled {
-                name: "hyprland".into(),
+                name: "alphawm".into(),
                 version: "1.0".into(),
                 requested: false,
             },
@@ -660,8 +660,8 @@ mod tests {
     /// Surfaces in a temp dir: one account with wheel membership.
     #[cfg(unix)]
     fn temp_surfaces(dir: &std::path::Path) -> privilege::Surfaces {
-        std::fs::write(dir.join("passwd"), "manav:x:1000:1000::/home/manav:/bin/zsh\n").unwrap();
-        std::fs::write(dir.join("group"), "wheel:x:998:manav\n").unwrap();
+        std::fs::write(dir.join("passwd"), "sam:x:1000:1000::/home/sam:/bin/zsh\n").unwrap();
+        std::fs::write(dir.join("group"), "wheel:x:998:sam\n").unwrap();
         privilege::Surfaces {
             passwd: dir.join("passwd"),
             group: dir.join("group"),
@@ -687,7 +687,7 @@ mod tests {
         assert!(s.scan_privileges(false).await.unwrap().is_empty(), "first read is a baseline");
         assert!(s.scan_privileges(false).await.unwrap().is_empty(), "nothing changed");
 
-        std::fs::write(dir.join("group"), "wheel:x:998:manav,eve\n").unwrap();
+        std::fs::write(dir.join("group"), "wheel:x:998:sam,eve\n").unwrap();
         let found = s.scan_privileges(false).await.unwrap();
         assert_eq!(found.len(), 1, "{:?}", found);
         assert_eq!(found[0].severity, Severity::Critical);
