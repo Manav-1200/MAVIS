@@ -2204,6 +2204,32 @@ So 3 of 9 were right, 3 had the right intent in the wrong form, and 3 were wrong
 - **Proven:** 275 + 277 tests pass. Clippy matches HEAD. Ruff is clean.
 - **Reasoned:** this changes comments and test data only, so behaviour is unchanged.
 
+
+## 48. The vision for MAVIS
+
+**What MAVIS is:** an intelligent desktop companion that runs on the user's own machine. It isn't a browser chatbot or a scripted assistant. It understands whatever the user asks, however they say it, and does it.
+
+**Decisions:**
+- **The model understands; code checks and acts.** Phrase lists, sample sentences, run logs and pre-written replies never decide what MAVIS does or says.
+- **MAVIS speaks in its own words.** Actions report what happened; the model says it.
+- **It holds a conversation** over many turns, and keeps what matters for later.
+- **It learns from use:** the owner's confirmed actions, stated facts and daily patterns. What it learns is data that can be read out and deleted, never code, and never leaves the machine.
+- **It can attempt anything the user asks,** including multi-step tasks and building projects from documents, within the safety rules.
+- **Owner-only actions** are anything that changes the system: root, software, system settings, users and services, anything irreversible, session actions and deleting files. Everyday actions are open to anyone. Locking the screen is open to anyone.
+- **Voice and face confirm the owner.** Both are enrolled during installation.
+  - Voice is checked in whatever is said at the time.
+  - The face scan runs silently, with no camera window, only at owner-only moments.
+  - The camera light is never hidden. Frames are discarded at once.
+  - Only templates are stored, locally. The fallback is `pkexec`.
+- **It's for every machine,** from an old laptop to a high-end one. Models are chosen to fit the hardware. It's local by default; cloud help is optional and off unless the user turns it on.
+- **One install script, built last,** sets everything up.
+- **Fixes improve the ability behind a problem,** not the one case that failed. Run history goes here, never in code.
+
+**Why:** assistants that follow scripts only work for the sentences they were written for. MAVIS should work for the person using it.
+
+**Evidence:**
+- **Reasoned:** this records the direction agreed with the project owner. Each step is proven on hardware as it's built.
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
