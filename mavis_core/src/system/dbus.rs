@@ -137,7 +137,7 @@ fn backlight() -> Option<(String, u64, u64)> {
 }
 
 /// Speaker volume and screen brightness as they are now, for the model,
-/// which otherwise guesses ("a comfortable level", 2026-11-22).
+/// which otherwise guesses.
 pub async fn current_levels() -> Option<String> {
     let mut parts = Vec::new();
     let volume = tokio::time::timeout(
