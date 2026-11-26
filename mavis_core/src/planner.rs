@@ -551,8 +551,8 @@ fn restates(fact: &str, said: &str) -> bool {
     !fact.is_empty() && fact.iter().filter(|w| said.contains(w)).count() * 2 >= fact.len()
 }
 
-/// What a request comes to: actions to run, or, when it can't be done as
-/// asked, the fact of what happened for MAVIS to tell in its own words.
+/// What a request comes to: actions to run, or a fact for MAVIS to tell in
+/// its own words (what couldn't be done, or what was looked up).
 type Step = Result<serde_json::Value, String>;
 
 /// The plan for a close request.
@@ -626,6 +626,7 @@ const ACTIONS: &[Action] = &[
     act("update_details", "", "describe the system update you last mentioned, or the latest one", None, false),
     act("look_back", "<number>", "recall what happened over the last number of days, then answer", None, false),
     act("remember", "<fact>", "keep a lasting fact the user told you about themselves", None, false),
+    act("user_name", "<name>", "the user tells you their name or what to call them", None, false),
 ];
 
 /// The actions as the model is shown them. Confirm and cancel only while
@@ -980,6 +981,11 @@ impl Planner {
                 self.handle_worker_response(event).await?;
             }
             EventType::ActionComplete => self.action_done(&event).await,
+            EventType::Tell => {
+                let fact = event.payload["fact"].as_str().unwrap_or_default().to_string();
+                let said = self.last_said.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                self.report(&said, &fact).await;
+            }
             _ => {}
         }
         Ok(())
@@ -1011,13 +1017,12 @@ impl Planner {
             intent.to_string()
         };
 
-        // Pending system changes are said first; plans are spoken in order.
+        let mut working_memory = self.build_working_memory(intent, event.id, None).await;
+        // Pending system changes reach the model as news, told before the reply.
         if let Some(spoken) = self.sentinel_lead().await {
             info!("Planner: leading with pending system changes");
-            self.say(spoken.text);
+            working_memory.push(serde_json::json!({ "source": "news", "content": spoken.text }));
         }
-
-        let working_memory = self.build_working_memory(intent, event.id, None).await;
         let targets: Vec<String> = {
             let wm = self.working.read().await;
             let mut names: Vec<String> = self.apps.iter().map(|a| a.name.clone()).collect();
@@ -1080,7 +1085,7 @@ impl Planner {
     /// The plan for the model's "DO <action>": actions, Null when it was
     /// handled here, or the fact of why it can't be done, never a guess.
     async fn action_plan(&self, line: &str, said: &str) -> Step {
-        let say = |text: String| Ok(serde_json::json!({"type": "say", "text": text}));
+        let record = |text: String| Err(format!("From the system's record: {}", text));
         // "volume_set <80>." still means 80: the model copies the menu's form.
         let line = line.trim().trim_end_matches(['.', '!']);
         let (name, arg) = match line.split_once(' ') {
@@ -1168,13 +1173,13 @@ impl Planner {
             }
             "system_changes" => match arg.parse::<u64>() {
                 Ok(days) => match self.sentinel_answer(Some(days)).await {
-                    Some(text) => say(text),
+                    Some(text) => record(text),
                     None => Err("Nothing to tell: you aren't watching the system right now.".into()),
                 },
                 Err(_) => Err("Nothing looked up: no number of days was given. Ask over how many days.".into()),
             },
             "update_details" => match self.sentinel_answer(None).await {
-                Some(text) => say(text),
+                Some(text) => record(text),
                 None => Err("Nothing to tell: you aren't watching the system right now.".into()),
             },
             "look_back" => {
@@ -1191,6 +1196,27 @@ impl Planner {
                 match stored {
                     Ok(()) => Ok(serde_json::json!([])),
                     Err(e) => Err(format!("Nothing was stored: {}", e)),
+                }
+            }
+            "user_name" => {
+                // Only a name they actually said, as they said it.
+                let name = said
+                    .split(|c: char| !c.is_alphabetic() && c != '\'' && c != '-')
+                    .find(|w| w.eq_ignore_ascii_case(arg));
+                let stored = match name {
+                    Some(name) => {
+                        let mut name = name.to_string();
+                        if let Some(first) = name.get_mut(0..1) {
+                            first.make_ascii_uppercase();
+                        }
+                        self.working.write().await.set_user_name(name)
+                    }
+                    None => false,
+                };
+                if stored {
+                    Ok(serde_json::json!([]))
+                } else {
+                    Err("Nothing was stored: that isn't a name they said. Ask what to call them.".into())
                 }
             }
             _ => Err(format!("Nothing was done: you can't {} yet.", action.what)),
@@ -1338,22 +1364,9 @@ impl Planner {
                 }
                 Some(spoken.text)
             }
-            Ok(Err(e)) => Some(format!("Sorry, I couldn't read the system's history: {}", e)),
-            Err(e) => Some(format!("Sorry, I couldn't read the system's history: {}", e)),
+            Ok(Err(e)) => Some(format!("You couldn't read the system's history: {}", e)),
+            Err(e) => Some(format!("You couldn't read the system's history: {}", e)),
         }
-    }
-
-    /// Publish a plain spoken reply.
-    fn say(&self, text: String) {
-        self.bus.publish(Event {
-            id: uuid::Uuid::new_v4(),
-            timestamp: chrono::Utc::now(),
-            source: "planner".to_string(),
-            event_type: EventType::PlanReady,
-            payload: serde_json::json!({
-                "plan": {"type": "say", "text": text}
-            }),
-        });
     }
 
     async fn build_working_memory(
@@ -1370,7 +1383,7 @@ impl Planner {
         if let Some(question) = question {
             items.push(serde_json::json!({
                 "source": "waiting",
-                "content": format!("You just asked the user: \"{}\" Their answer decides it.", question),
+                "content": format!("You just asked the user {}. Their answer decides it.", question),
             }));
         }
 
@@ -2281,26 +2294,35 @@ mod tests {
         out
     }
 
+    /// The facts handed to the model with a request, by source.
+    fn facts(request: &Event, source: &str) -> Vec<String> {
+        request.payload["working_memory"]
+            .as_array()
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|i| i["source"] == source)
+                    .filter_map(|i| i["content"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Pending system changes reach the model as news with the request,
+    /// for it to tell first. Once.
     #[tokio::test]
     async fn pending_changes_are_said_before_the_reply() {
         let (planner, mut rx, dir) = planner_with_pending_change("lead");
         planner.handle_event(utterance("open webby")).await.unwrap();
-
-        let plans: Vec<serde_json::Value> = drain(&mut rx)
-            .into_iter()
-            .filter(|e| e.event_type == EventType::PlanReady)
-            .map(|e| e.payload["plan"].clone())
-            .collect();
-        assert_eq!(plans.len(), 1, "the lead: {:#?}", plans);
-        let lead = plans[0]["text"].as_str().unwrap();
-        assert!(lead.contains("alphawm"), "{}", lead);
-
-        // Told once; the request itself goes to the model both times.
-        planner.handle_event(utterance("open webby")).await.unwrap();
         let events = drain(&mut rx);
-        assert_eq!(events.iter().filter(|e| e.event_type == EventType::PlanReady).count(), 0);
+        assert!(!events.iter().any(|e| e.event_type == EventType::PlanReady), "nothing said in fixed words");
         let asked = events.iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
-        assert!(asked.payload["actions"].as_array().is_some_and(|a| !a.is_empty()));
+        let news = facts(asked, "news");
+        assert!(news.len() == 1 && news[0].contains("alphawm"), "{:?}", news);
+
+        planner.handle_event(utterance("open webby")).await.unwrap();
+        let asked = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
+        assert!(facts(&asked, "news").is_empty(), "told once");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2493,8 +2515,8 @@ mod tests {
         let said = |rx: &mut tokio::sync::broadcast::Receiver<Event>| -> Vec<String> {
             drain(rx)
                 .into_iter()
-                .filter(|e| e.event_type == EventType::PlanReady)
-                .map(|e| plan_says(&e.payload["plan"]))
+                .filter(|e| e.event_type == EventType::WorkerRequest)
+                .flat_map(|e| facts(&e, "result"))
                 .collect()
         };
         planner.handle_event(model_did("system_changes 7", "what changed lately")).await.unwrap();
@@ -2523,7 +2545,8 @@ mod tests {
         let asked = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
         let actions = asked.payload["actions"].to_string();
         assert!(actions.contains("confirm") && actions.contains("cancel"), "{}", actions);
-        assert!(asked.payload["working_memory"].to_string().contains("Shall I run rm notes.txt"));
+        let waiting = facts(&asked, "waiting");
+        assert!(waiting.len() == 1 && waiting[0].contains("run rm notes.txt"), "{:?}", waiting);
 
         planner.handle_event(model_did("confirm", "yeah go on")).await.unwrap();
         let answer = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::Confirmation).unwrap();
@@ -2592,6 +2615,41 @@ mod tests {
         assert!(told(6).contains("isn't one of your actions"));
         assert!(told(7).contains("isn't a form"), "an argument it doesn't take");
         assert_eq!(plan(8)[0]["value"].as_u64(), Some(80), "the menu's form is read too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// What other parts of MAVIS need said (a question, a warning) goes to
+    /// the model to tell, never as a fixed sentence.
+    #[tokio::test]
+    async fn a_fact_from_elsewhere_is_told_by_the_model() {
+        let (planner, mut rx, dir) = planner_with_pending_change("tell");
+        let tell = Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "stt".into(),
+            event_type: EventType::Tell,
+            payload: serde_json::json!({"fact": "the mic is too quiet"}),
+        };
+        planner.handle_event(tell).await.unwrap();
+        let events = drain(&mut rx);
+        assert!(!events.iter().any(|e| e.event_type == EventType::PlanReady));
+        let asked = events.iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
+        assert_eq!(facts(asked, "result"), ["the mic is too quiet"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A name is learned when the model hears one given, and only a name
+    /// that was actually said.
+    #[tokio::test]
+    async fn a_name_is_learned_only_as_said() {
+        let (planner, mut rx, dir) = planner_with_pending_change("name");
+        planner.handle_event(model_did("user_name robin", "you can call me robin")).await.unwrap();
+        assert_eq!(planner.working.read().await.user_name.as_deref(), Some("Robin"));
+        drain(&mut rx);
+        planner.handle_event(model_did("user_name Alex", "you can call me whatever")).await.unwrap();
+        assert_eq!(planner.working.read().await.user_name.as_deref(), Some("Robin"), "never invented");
+        let asked = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
+        assert!(facts(&asked, "result")[0].contains("isn't a name they said"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
