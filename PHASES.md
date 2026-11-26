@@ -905,6 +905,9 @@ Done:
 Next, in order:
 
 - [ ] **1. Natural replies and a long conversation.** Every word MAVIS says comes from the model: actions report what happened and MAVIS says it its own way. The fixed reply strings go. Conversation is held over many turns; older turns are summarised, not dropped, and what matters is kept for later. Qwen2.5-3B becomes the default model.
+  - [x] Actions speak in the model's words; what couldn't be done, and failures, are told by the model from the facts ([§49](DECISIONS.md#49-mavis-says-it-in-its-own-words)).
+  - [ ] The Sentinel's answers, the gate's questions, "didn't catch that" and the mic warnings in the model's words; the name learned through the model.
+  - [ ] A long conversation on Qwen2.5-3B, with older turns summarised.
 - [ ] **2. The open action.** Beyond the catalogue, the model can propose its own command for anything the catalogue doesn't cover. Everything goes through the risk gate: harmless commands run, risky ones are explained in plain words and wait for a yes, root goes through `pkexec`, irreversible ones are asked twice. Then multi-step tasks: plan, act, read the result, carry on.
 - [ ] **3. Learning from use.** From the owner's confirmed actions, stated facts and daily patterns, never from undone or corrected ones or other voices. Stored as data that can be read out and forgotten; nothing leaves the machine; the model's weights never change.
 - [ ] **4. Voice and face for owner-only actions.** See the rules below. Enrollment is a separate command until the install script exists.
@@ -1139,4 +1142,4 @@ Other machines get models that fit them; see Phase 8.6, models by machine.
 
 ---
 
-*Last updated: 2026-11-25*
+*Last updated: 2026-11-26*
