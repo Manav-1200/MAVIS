@@ -170,7 +170,7 @@ What MAVIS can do. Say it however you like: the model works out what you mean, s
 | "open <music app> and play lofi" | Plays it in the app just opened, if that app can play anything |
 | "brighter", "dim the screen" | Adjusts brightness |
 
-Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. Everything you say goes to the local model once, with the conversation, what's on screen and the list of MAVIS's actions. It answers either `DO <action>` or `SAY <reply>`, and llama.cpp's grammar allows nothing else. No phrase lists decide what you meant. Before a `DO` runs, the code checks it: the action must be on the list, levels must be 0–100, and an app or site must be one you mentioned or described ("the browser"). Closing apps, logging out and shutting down still ask "Shall I…?" first. A reply that claims an action it didn't take ("closing the terminal now") is replaced with "I can't do that yet." If an action fails, MAVIS says so and why.
+Applications are discovered from what's actually installed, so this tracks your setup rather than a fixed list. Everything you say goes to the local model once, with the conversation, what's on screen and the list of MAVIS's actions. It answers either `DO <action> | <what it says>` or `SAY <reply>`, and llama.cpp's grammar allows nothing else. No phrase lists decide what you meant. Before a `DO` runs, the code checks it: the action must be on the list, levels must be 0–100, and an app or site must be one you mentioned or described ("the browser"). Closing apps, logging out and shutting down still ask first. MAVIS says everything in its own words: what it's doing, what it couldn't do and why, and what failed.
 
 An utterance that starts with an explicit action is never treated as system control — "google how to mute a tab" searches rather than muting your machine.
 
@@ -204,7 +204,7 @@ Every plan is scored for risk before anything runs:
 | Risk | What happens |
 |------|--------------|
 | 0–2 | Runs silently — speaking, notifications, volume, launching an app |
-| 3–7 | "Shall I run …?" or "Shall I close …?" — reads out what it would do and waits up to 20 seconds for your answer, or a tap on the orb |
+| 3–7 | Asks first, saying what it would do, and waits up to 20 seconds for your answer, or a tap on the orb |
 | 8+ | Asked twice, the second time saying it can't be undone. Only a spoken answer counts; a tap is not enough |
 | Irreversible | Refused, whatever you say |
 
@@ -294,7 +294,7 @@ MAVIS_VAD_DEBUG=1 cargo run               # logs levels every ~3 s
 
 `VAD: calibrated — noise_floor=…` shows what MAVIS measured. While you talk, `peak=` should clearly exceed `start=`; while you're silent, `level=` should sit below `end=`. If speech barely clears `start=`, raise the mic (`wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 0.5`, say). If the room alone is near `start=`, lower it or reduce the noise — MAVIS can follow a noisy room, but it can't hear speech that isn't much louder than it. `room got louder mid-utterance` in the log means it caught itself listening to the room and recovered. `No speech in N s of audio` means the worker's speech detector heard only noise, so nothing was transcribed — which is how MAVIS avoids inventing words.
 
-**MAVIS often says "Sorry, I didn't catch that."** The English-only `small.en` is the default (a one-time download of about 460 MB on first start); `medium.en` hears better but is about 3× slower on CPU. Also check the microphone level, below.
+**MAVIS often says it didn't catch what you said.** The English-only `small.en` is the default (a one-time download of about 460 MB on first start); `medium.en` hears better but is about 3× slower on CPU. Also check the microphone level, below.
 
 **A video opens but doesn't start.** Some browsers block videos with sound from starting on their own. Allow autoplay for the site in your browser's site settings.
 
