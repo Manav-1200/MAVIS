@@ -91,7 +91,7 @@ Full roadmap in [`PHASES.md`](PHASES.md). **Why** each thing is built the way it
 | Runtime | Rust, tokio, serde, rusqlite |
 | UI | minifb |
 | System | DBus, inotify, global hotkeys |
-| AI | Python, llama-cpp-python (Q4_K_M) |
+| AI | Python, llama-cpp-python, Qwen2.5-3B-Instruct (Q4_K_M) |
 | STT | faster-whisper `small.en` (CPU int8) |
 | TTS | piper, kokoro |
 | Audio | cpal |
@@ -113,6 +113,14 @@ source .venv/bin/activate
 pip install -e .
 python -m mavis
 ```
+
+The language model is Qwen2.5-3B-Instruct. Download it once (about 2 GB):
+
+```bash
+huggingface-cli download Qwen/Qwen2.5-3B-Instruct-GGUF qwen2.5-3b-instruct-q4_k_m.gguf --local-dir ~/.local/share/mavis/models
+```
+
+Without it, the worker falls back to a Phi-3 or TinyLlama file in the same folder, with less conversation in view. `n_ctx` and `n_gpu_layers` under `[model]` set how much conversation the model sees and how much of it runs on the graphics card.
 
 `cargo test` runs the unit tests. `cargo clippy` passes with warnings — mostly Sentinel code waiting for its next step, and platform stubs.
 
