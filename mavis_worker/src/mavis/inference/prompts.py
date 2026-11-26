@@ -90,56 +90,48 @@ def build_chat_messages(
     """
     Build the message list for the LLM.
 
-    Working memory is merged INTO the system prompt so models like Phi-3
-    receive a single coherent system context block.
+    Facts and memory go into the system prompt; the conversation so far
+    goes in as real turns, user and assistant, before the current message.
     """
-    # Separate user_profile items from general working memory
     profile_lines: list[str] = []
     context_lines: list[str] = []
     # What the screen shows now. Kept apart from the conversation: mixed in,
     # the model repeats its last reply instead of reading the screen.
     live_lines: list[str] = []
+    turns: list[dict[str, str]] = []
 
-    if working_memory:
-        for item in working_memory:
-            content = item.get("content", "")
-            source = item.get("source", "memory")
-            if not content:
-                continue
-            if source == "user_profile":
-                # Inject profile facts directly into the system prompt body
-                profile_lines.append(content)
-            elif source in LIVE_SOURCES:
-                live_lines.append(f"- {content}")
+    for item in working_memory or []:
+        content = item.get("content", "")
+        source = item.get("source", "memory")
+        if not content:
+            continue
+        if source == "user_profile":
+            profile_lines.append(content)
+        elif source in LIVE_SOURCES:
+            live_lines.append(f"- {content}")
+        elif source in ("user", "mavis"):
+            role = "assistant" if source == "mavis" else "user"
+            # The mic picking up MAVIS's own voice isn't the user speaking.
+            if role == "user" and turns and turns[-1]["role"] == "assistant":
+                said, last = content.strip().lower(), turns[-1]["content"].strip().lower()
+                if said and (said in last or last in said):
+                    continue
+            if turns and turns[-1]["role"] == role:
+                turns[-1]["content"] += " " + content
             else:
-                context_lines.append(f"- [{source}] {content}")
-
-    # Echo deduplication: if a [user] line is contained in or very similar to
-    # the most recent [mavis] line, it's STT picking up TTS output — drop it.
-    filtered_context: list[str] = []
-    last_mavis: str | None = None
-    for line in context_lines:
-        if line.startswith("- [mavis]"):
-            last_mavis = line[len("- [mavis] ") :].strip().lower()
-            filtered_context.append(line)
-        elif line.startswith("- [user]") and last_mavis is not None:
-            user_text = line[len("- [user] ") :].strip().lower()
-            # Drop if the user "message" is substantially the same as MAVIS's last output
-            if user_text in last_mavis or last_mavis in user_text:
-                continue
-            filtered_context.append(line)
+                turns.append({"role": role, "content": content})
         else:
-            filtered_context.append(line)
+            context_lines.append(f"- [{source}] {content}")
 
-    # Assemble the system prompt: rules, then working memory, then the
-    # profile facts LAST.
-    #
-    # Before the memory, the facts sit far from the question and a small
-    # model copies its own earlier answers out of the conversation instead.
-    # Last means closest to the question, and hardest to ignore.
+    # The conversation starts with the user.
+    while turns and turns[0]["role"] == "assistant":
+        turns.pop(0)
+
+    # Assemble the system prompt: rules, then memory, then the facts LAST,
+    # closest to the question and hardest to ignore.
     system = system_prompt
-    if filtered_context:
-        system += "\n\nWorking Memory:\n" + "\n".join(filtered_context)
+    if context_lines:
+        system += "\n\nWorking Memory:\n" + "\n".join(context_lines)
     if profile_lines:
         system += "\n\nFacts (these are current and correct):\n" + "\n".join(
             f"- {line}" for line in profile_lines
@@ -150,19 +142,32 @@ def build_chat_messages(
             "disagrees, this is correct):\n" + "\n".join(live_lines)
         )
 
-    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
-
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}, *turns]
     for msg in user_messages:
         role = msg.get("role", "user")
         content = msg.get("content", "")
-        # Defensive: skip any system messages from callers — we already built
-        # the canonical system prompt above with working memory merged in.
-        if role == "system":
+        # Callers' system messages are skipped: the one above is canonical.
+        if role == "system" or not content:
             continue
-        if content:
+        if messages[-1]["role"] == role:
+            messages[-1] = {"role": role, "content": messages[-1]["content"] + " " + content}
+        else:
             messages.append({"role": role, "content": content})
 
     return messages
+
+
+SUMMARY_PROMPT = """You keep notes on a conversation between a user and MAVIS, their desktop companion, so MAVIS can carry it on. Combine the earlier notes and the new lines into one short summary: who said what that matters, names, facts, decisions, and anything still unresolved. Write plainly in the third person, at most five sentences. Reply with the summary only."""
+
+
+def summary_messages(summary: str, lines: list[str]) -> list[dict[str, str]]:
+    """The request for folding new lines into the running summary."""
+    earlier = summary.strip() or "(none yet)"
+    new = "\n".join(lines)
+    return [
+        {"role": "system", "content": SUMMARY_PROMPT},
+        {"role": "user", "content": f"Earlier notes: {earlier}\n\nNew lines:\n{new}"},
+    ]
 
 
 # How the model answers when it can act. The actions come from the core.
