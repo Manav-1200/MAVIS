@@ -412,30 +412,20 @@ fn edit_distance(a: &str, b: &str) -> usize {
     row[b.len()]
 }
 
-/// Most earlier lines put in a prompt.
-const EARLIER_IN_PROMPT: usize = 5;
+/// Lines waiting before they are folded into the summary.
+const SUMMARISE_AT: usize = 8;
 
-/// Context compression (7.1): what the user said earlier this session,
-/// beyond the last few exchanges, as one short line. Only their words —
-/// MAVIS's own replies in a prompt are what a small model copies.
-fn earlier_in_conversation(older: &[String], current: &str) -> Option<String> {
-    let mut picked: Vec<&str> = Vec::new();
-    for line in older.iter().rev() {
-        let line = line.trim();
-        if line.is_empty() || line == current.trim() || picked.contains(&line) {
-            continue;
-        }
-        picked.push(line);
-        if picked.len() == EARLIER_IN_PROMPT {
-            break;
-        }
+/// What came before the recent turns: the model's summary, then the lines
+/// not yet folded into it.
+fn earlier_in_conversation(summary: &str, waiting: &[String]) -> Option<String> {
+    let mut parts = Vec::new();
+    if !summary.trim().is_empty() {
+        parts.push(summary.trim().to_string());
     }
-    if picked.is_empty() {
-        return None;
+    if !waiting.is_empty() {
+        parts.push(format!("Then: {}", waiting.join(" / ")));
     }
-    picked.reverse();
-    let quoted: Vec<String> = picked.iter().map(|l| format!("\"{}\"", l)).collect();
-    Some(format!("Earlier in this conversation the user said: {}.", quoted.join("; ")))
+    (!parts.is_empty()).then(|| format!("Earlier in this conversation: {}", parts.join(" ")))
 }
 
 /// "tube.test", "docs.rs/serde": one word, a dot, letters after it.
@@ -483,7 +473,7 @@ fn app_owns(app: Option<&AppEntry>, words: &str, w: &WindowInfo) -> bool {
 }
 
 /// Everything a plan says aloud, whether it's one action or a list.
-fn plan_says(plan: &serde_json::Value) -> String {
+pub(crate) fn plan_says(plan: &serde_json::Value) -> String {
     let actions = plan.as_array().cloned().unwrap_or_else(|| vec![plan.clone()]);
     actions
         .iter()
@@ -900,6 +890,8 @@ pub struct Planner {
     last_opened: std::sync::Mutex<Option<String>>,
     /// What the user said last, for telling how its actions went.
     last_said: std::sync::Mutex<String>,
+    /// Lines of conversation sent to be summarised, while that's under way.
+    summarising: std::sync::Mutex<Option<usize>>,
 }
 
 impl Planner {
@@ -930,6 +922,7 @@ impl Planner {
             spared: own_process_tree(),
             last_opened: std::sync::Mutex::new(None),
             last_said: std::sync::Mutex::new(String::new()),
+            summarising: std::sync::Mutex::new(None),
         }
     }
 
@@ -1240,6 +1233,37 @@ impl Planner {
         };
         let said = self.last_said.lock().unwrap_or_else(|p| p.into_inner()).clone();
         self.report(&said, &fact).await;
+    }
+
+    /// Once enough of the conversation has left the recent turns, have the
+    /// model fold it into the running summary. One request at a time.
+    async fn maybe_summarise(&self) {
+        let (summary, lines) = {
+            let wm = self.working.read().await;
+            if wm.earlier.len() < SUMMARISE_AT {
+                return;
+            }
+            (wm.summary.clone(), wm.earlier.iter().cloned().collect::<Vec<_>>())
+        };
+        {
+            let mut busy = self.summarising.lock().unwrap_or_else(|p| p.into_inner());
+            if busy.is_some() {
+                return;
+            }
+            *busy = Some(lines.len());
+        }
+        info!("Planner: summarising {} earlier lines", lines.len());
+        self.bus.publish(Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "planner".to_string(),
+            event_type: EventType::WorkerRequest,
+            payload: serde_json::json!({
+                "request_type": "summarise",
+                "summary": summary,
+                "lines": lines,
+            }),
+        });
     }
 
     /// Have the model tell what happened, in its own words.
@@ -1646,43 +1670,22 @@ impl Planner {
             }
         }
 
-        // Conversation so far — the last three exchanges.
+        // Conversation so far: everything still in the event ring. The
+        // worker keeps as much of it as fits the model's context, newest
+        // first; what came before is in the summary.
         //
-        // More history makes a small model repeat itself: it copies its
-        // own earlier replies, wrong ones included, over facts the system
-        // prompt states. Less history to copy from, and the current
-        // turn's facts carry more weight.
-        //
-        // What MAVIS said comes from PlanReady only. WorkerResponse carries
-        // the same text for LLM replies, and including both put every reply
-        // in the prompt twice — which nudges a small model to repeat itself.
-        // PlanReady also covers the deterministic replies ("Opening
-        // Webby") that never pass through the worker.
+        // What MAVIS said comes from PlanReady only: WorkerResponse carries
+        // the same text, and both would put every reply in twice.
         //
         // The current utterance is skipped: it's the user message itself,
         // and depending on which task ran first it could also already be in
         // the ring.
-        // 12 events ≈ three exchanges: each turn puts a UserIntent, a
-        // WorkerResponse, a PlanReady and an ActionComplete in the ring,
-        // and only the first and third become prompt lines.
-        // Older than those exchanges: compressed, not dropped.
-        let recent_from = snapshot.events.len().saturating_sub(12);
-        let older: Vec<String> = snapshot
-            .earlier
-            .iter()
-            .cloned()
-            .chain(snapshot.events.iter().take(recent_from).filter_map(|e| {
-                (e.event_type == EventType::UserIntent)
-                    .then(|| e.payload.get("text").and_then(|t| t.as_str()))
-                    .flatten()
-                    .map(|t| crate::util::truncate_bytes(t, 80).to_string())
-            }))
-            .collect();
-        if let Some(line) = earlier_in_conversation(&older, current_intent) {
+        let waiting: Vec<String> = snapshot.earlier.iter().cloned().collect();
+        if let Some(line) = earlier_in_conversation(&snapshot.summary, &waiting) {
             items.push(serde_json::json!({ "source": "earlier", "content": line }));
         }
 
-        for event in snapshot.recent_events(12) {
+        for event in snapshot.recent_events(snapshot.events.len()) {
             if event.id == current_id {
                 continue;
             }
@@ -1736,6 +1739,7 @@ impl Planner {
                     }),
                 };
                 self.bus.publish(plan_event);
+                self.maybe_summarise().await;
             }
             "command" => {
                 let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or_default();
@@ -1743,6 +1747,21 @@ impl Planner {
                 let words = payload.get("words").and_then(|v| v.as_str()).unwrap_or_default();
                 info!("Planner: model chose \"{}\" for \"{}\"", action, text);
                 self.carry_out(action, text, words).await;
+                self.maybe_summarise().await;
+            }
+            "summary" => {
+                let sent = self.summarising.lock().unwrap_or_else(|p| p.into_inner()).take().unwrap_or(0);
+                let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or_default().trim();
+                if !text.is_empty() {
+                    let mut wm = self.working.write().await;
+                    wm.summary = text.to_string();
+                    let folded = sent.min(wm.earlier.len());
+                    wm.earlier.drain(..folded);
+                    info!("Planner: conversation summary updated ({} lines folded in)", folded);
+                }
+            }
+            "summary_failed" => {
+                self.summarising.lock().unwrap_or_else(|p| p.into_inner()).take();
             }
             "error" => {
                 let error_msg = payload
@@ -2453,46 +2472,50 @@ mod tests {
     }
 
     #[test]
-    fn earlier_turns_are_compressed_to_one_line() {
-        let older: Vec<String> = ["my sister is visiting", "what's the weather", "book a table", "what's the weather"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let line = earlier_in_conversation(&older, "and tomorrow?").unwrap();
+    fn what_came_before_is_the_summary_then_the_lines_after_it() {
+        let waiting = vec!["User: ccc".to_string(), "MAVIS: ddd".to_string()];
         assert_eq!(
-            line,
-            "Earlier in this conversation the user said: \"my sister is visiting\"; \"book a table\"; \"what's the weather\"."
+            earlier_in_conversation("aaa bbb.", &waiting).unwrap(),
+            "Earlier in this conversation: aaa bbb. Then: User: ccc / MAVIS: ddd"
         );
-        assert_eq!(earlier_in_conversation(&[], "hi"), None);
-        assert_eq!(earlier_in_conversation(&["hi".to_string()], "hi"), None, "not the utterance being answered");
+        assert_eq!(earlier_in_conversation("aaa.", &[]).unwrap(), "Earlier in this conversation: aaa.");
+        assert_eq!(earlier_in_conversation("", &[]), None);
     }
 
-    #[test]
-    fn only_the_latest_few_earlier_turns_are_kept() {
-        let older: Vec<String> = (0..20).map(|i| format!("turn {}", i)).collect();
-        let line = earlier_in_conversation(&older, "now").unwrap();
-        assert!(line.contains("\"turn 15\"") && line.contains("\"turn 19\""), "{}", line);
-        assert!(!line.contains("\"turn 14\""), "{}", line);
-    }
-
-    /// The ring holds 50 events; past that, the user's words are kept short
-    /// instead of vanishing.
+    /// The ring holds 50 events. Turns that leave it are folded into a
+    /// summary by the model, so the conversation carries on.
     #[tokio::test]
-    async fn turns_that_leave_the_ring_still_reach_the_prompt() {
-        let (planner, _rx, dir) = planner_with_pending_change("compression");
+    async fn turns_that_leave_the_ring_are_summarised_not_dropped() {
+        let (planner, mut rx, dir) = planner_with_pending_change("compression");
         {
             let mut wm = planner.working.write().await;
-            wm.push_event(utterance("remember the dentist on friday"));
-            for i in 0..55 {
+            wm.push_event(utterance("aaa bbb"));
+            for i in 0..60 {
                 wm.push_event(utterance(&format!("filler {}", i)));
             }
             assert_eq!(wm.events.len(), 50);
+            assert_eq!(wm.earlier.front().map(String::as_str), Some("User: aaa bbb"), "kept for the summary");
         }
+        drain(&mut rx);
+        planner.maybe_summarise().await;
+        let asked = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
+        assert_eq!(asked.payload["request_type"], "summarise");
+        assert_eq!(asked.payload["lines"][0], "User: aaa bbb");
+        planner.maybe_summarise().await;
+        assert!(drain(&mut rx).is_empty(), "one summary at a time");
+
+        let summary = Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "worker".into(),
+            event_type: EventType::WorkerResponse,
+            payload: serde_json::json!({"type": "summary", "text": "The user said aaa bbb."}),
+        };
+        planner.handle_event(summary).await.unwrap();
+        assert!(planner.working.read().await.earlier.is_empty(), "folded in");
         let items = planner.build_working_memory("what was I saying?", uuid::Uuid::new_v4(), None).await;
-        let earlier = items.iter().find(|i| i["source"] == "earlier").expect("an earlier line");
-        assert!(earlier["content"].as_str().unwrap().contains("filler"), "{}", earlier);
-        let wm = planner.working.read().await;
-        assert!(wm.earlier.iter().any(|l| l == "remember the dentist on friday"), "kept, compressed");
+        let earlier = items.iter().find(|i| i["source"] == "earlier").expect("the summary");
+        assert!(earlier["content"].as_str().unwrap().contains("The user said aaa bbb."), "{}", earlier);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
