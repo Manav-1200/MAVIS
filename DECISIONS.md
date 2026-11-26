@@ -2257,6 +2257,37 @@ So 3 of 9 were right, 3 had the right intent in the wrong form, and 3 were wrong
 - **Reasoned:** a failure or a deviation costs one more short model call. Success costs nothing extra, because the words come in the same call that chose the action.
 - **Not run on hardware.**
 
+
+## 50. The rest of MAVIS's voice, and its name, through the model
+
+**Problem:** after §49, some sentences were still written in code:
+- the permission gate's "Shall I …? It …", "This can't be undone. Are you sure…", "Cancelled." and "This one needs a spoken answer.";
+- the Sentinel's answers;
+- "Sorry, I didn't catch that.";
+- the microphone warning.
+
+And the user's name was learned from fixed sentence patterns ("my name is …", "call me …").
+
+**Decision:**
+- **A new `Tell` event.** Any part of MAVIS can hand the planner a fact (`{"fact": …}`), and the model tells it as a `result`.
+  - The gate's questions are facts like "Ask the user whether you should run X, since it Y". Refusals and cancellations are told the same way.
+  - "Didn't catch that" is a fact that includes what it sounded like. The mic warning is a fact too.
+- **The Sentinel's record is a fact, not a sentence.** Answers to "what changed?" go to the model as "From the system's record: …". Pending changes reach the model as `news` with the request, and rule 20 says to tell them first, keeping names and numbers exact.
+- **The waiting fact describes the question** ("You just asked the user whether you should …"), not a sentence MAVIS said.
+- **Names through the model.** A new `user_name <name>` action, for when the user gives their name or what to call them. It's stored only if that word was actually said; otherwise the model is told to ask. The pattern matcher in `context_engine.rs` is removed.
+
+**Kept, deliberately:** two lines are still written in code, because they're said when the worker that runs the model has failed, so there is no model to ask. These are the hearing-failure lines in `main.rs` and the worker-error line in the planner.
+
+**Evidence:**
+- **Proven** (277 + 279 tests):
+  - Gate questions, second asks, refusals and tap refusals reach the model as facts.
+  - The Sentinel's answers and news reach the model with the record intact.
+  - A `Tell` produces a model request and never a fixed sentence.
+  - A name is stored only as said.
+  - Clippy is unchanged.
+- **Reasoned:** each told fact costs one short model call. Questions and warnings are rare, so speed is unaffected in ordinary use.
+- **Not run on hardware.**
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
