@@ -303,14 +303,10 @@ fn apps_of_kind<'a>(spoken: &str, apps: &'a [AppEntry]) -> Vec<&'a AppEntry> {
         .collect()
 }
 
-/// "Which one: Surfy, Webby or Netty?"
+/// The fact that several apps fit, for MAVIS to ask which.
 fn which_one(names: &[String]) -> String {
     let names: Vec<&str> = names.iter().take(3).map(String::as_str).collect();
-    match names.as_slice() {
-        [] => "Which one?".to_string(),
-        [one] => format!("Which one: {}?", one),
-        [rest @ .., last] => format!("Which one: {} or {}?", rest.join(", "), last),
-    }
+    format!("Nothing was done: more than one app fits ({}). Ask which one they mean.", names.join(", "))
 }
 
 /// A one-word name Whisper got slightly wrong: "tuner" for Filey. Matched
@@ -497,6 +493,37 @@ fn plan_says(plan: &serde_json::Value) -> String {
         .join(" ")
 }
 
+/// The plan with the model's words spoken alongside it, and any note from
+/// the plan: something that didn't go as asked, which the model tells
+/// instead of the words it chose before knowing.
+fn with_words(plan: serde_json::Value, words: &str) -> (serde_json::Value, Option<String>) {
+    let mut actions = plan.as_array().cloned().unwrap_or_else(|| vec![plan]);
+    let notes: Vec<String> = actions
+        .iter()
+        .filter(|a| a["type"] == "note")
+        .filter_map(|a| a["text"].as_str().map(String::from))
+        .collect();
+    actions.retain(|a| a["type"] != "note");
+    // Undo's result is told once it's known; a plan that already speaks
+    // (the Sentinel's answer) needs no words before it.
+    let quiet = actions.iter().any(|a| a["type"] == "undo" || a["type"] == "say");
+    if !notes.is_empty() {
+        return (serde_json::Value::Array(actions), Some(notes.join(" ")));
+    }
+    if !words.trim().is_empty() && !quiet {
+        let spoken = serde_json::json!({"type": "say", "text": words.trim()});
+        // Ending the session: said first, since nothing is heard after.
+        let ends_session =
+            actions.iter().any(|a| matches!(a["op"].as_str(), Some("lock" | "logout" | "suspend" | "poweroff" | "reboot")));
+        if ends_session {
+            actions.insert(0, spoken);
+        } else {
+            actions.push(spoken);
+        }
+    }
+    (serde_json::Value::Array(actions), None)
+}
+
 /// The last `days` days, from local midnight, and how to name them.
 fn days_window(days: u64) -> (chrono::DateTime<chrono::Local>, chrono::DateTime<chrono::Local>, String) {
     let now = chrono::Local::now();
@@ -524,22 +551,22 @@ fn restates(fact: &str, said: &str) -> bool {
     !fact.is_empty() && fact.iter().filter(|w| said.contains(w)).count() * 2 >= fact.len()
 }
 
+/// What a request comes to: actions to run, or, when it can't be done as
+/// asked, the fact of what happened for MAVIS to tell in its own words.
+type Step = Result<serde_json::Value, String>;
+
 /// The plan for a close request.
-fn close_plan(close: Close) -> serde_json::Value {
-    let say = |text: String| serde_json::json!({"type": "say", "text": text});
+fn close_plan(close: Close) -> Step {
     match close {
         Close::Windows { app, ids } => {
             info!("Planner: close request — {} ({} window(s))", app, ids.len());
-            serde_json::json!([
-                {"type": "close", "app": app, "windows": ids},
-                {"type": "say", "text": format!("Closed {}.", app)},
-            ])
+            Ok(serde_json::json!([{"type": "close", "app": app, "windows": ids}]))
         }
-        Close::NotOpen(app) => say(format!("{} isn't open.", app)),
-        Close::Unsupported => say("I can't close windows on this desktop yet.".into()),
-        Close::NoFocus => say("I can't tell which window is focused. Which app should I close?".into()),
-        Close::Mine(app) => say(format!("That {} window is the one I'm running in, so I won't close it.", app)),
-        Close::Which(names) => say(which_one(&names)),
+        Close::NotOpen(app) => Err(format!("Nothing was closed: {} isn't open.", app)),
+        Close::Unsupported => Err("Nothing was closed: you can't close windows on this desktop yet.".into()),
+        Close::NoFocus => Err("Nothing was closed: you can't tell which window is focused. Ask which app to close.".into()),
+        Close::Mine(app) => Err(format!("Nothing was closed: that {} window is the one you run in.", app)),
+        Close::Which(names) => Err(which_one(&names)),
     }
 }
 
@@ -551,55 +578,54 @@ struct Action {
     what: &'static str,
     /// A system op runs as is; None means a planner builds it.
     op: Option<&'static str>,
-    says: &'static str,
     /// The argument names an app or site, so it must come from the user.
     names_target: bool,
 }
 
-const fn act(name: &'static str, args: &'static str, what: &'static str, op: Option<&'static str>, says: &'static str, names_target: bool) -> Action {
-    Action { name, args, what, op, says, names_target }
+const fn act(name: &'static str, args: &'static str, what: &'static str, op: Option<&'static str>, names_target: bool) -> Action {
+    Action { name, args, what, op, names_target }
 }
 
 const ACTIONS: &[Action] = &[
-    act("open", "<app>", "open an installed app", None, "", true),
-    act("open_website", "<website>", "open a website in the browser", None, "", true),
-    act("close", "<app>", "close an app's windows", None, "", true),
-    act("close_focused", "", "close the window in front", None, "", false),
-    act("close_last_opened", "", "close the app you opened last", None, "", false),
-    act("workspace", "<number>", "switch to a workspace", None, "", false),
-    act("fullscreen", "<app>", "make an app's window full screen", None, "", true),
-    act("fullscreen_focused", "", "make the window in front full screen", None, "", false),
-    act("volume_set", "<0-100>", "set the speaker volume in percent", Some("volume_set"), "Volume {}%.", false),
-    act("volume_up", "", "turn the volume up a step", Some("volume_up"), "Volume up.", false),
-    act("volume_down", "", "turn the volume down a step", Some("volume_down"), "Volume down.", false),
-    act("mute", "", "mute or unmute the speakers", Some("volume_mute"), "Done.", false),
-    act("brightness_set", "<0-100>", "set the screen brightness in percent", Some("brightness_set"), "Brightness {}%.", false),
-    act("brightness_up", "", "make the screen brighter a step", Some("brightness_up"), "Brightness up.", false),
-    act("brightness_down", "", "make the screen dimmer a step", Some("brightness_down"), "Brightness down.", false),
-    act("bluetooth_on", "", "turn Bluetooth on", Some("bluetooth_on"), "Bluetooth on.", false),
-    act("bluetooth_off", "", "turn Bluetooth off", Some("bluetooth_off"), "Bluetooth off.", false),
-    act("wifi_on", "", "turn Wi-Fi on", Some("wifi_on"), "Wi-Fi on.", false),
-    act("wifi_off", "", "turn Wi-Fi off", Some("wifi_off"), "Wi-Fi off.", false),
-    act("lock", "", "lock the screen", Some("lock"), "Locking.", false),
-    act("logout", "", "log the user out", Some("logout"), "Logging out.", false),
-    act("suspend", "", "put the computer to sleep", Some("suspend"), "Going to sleep.", false),
-    act("poweroff", "", "shut the computer down", Some("poweroff"), "Shutting down.", false),
-    act("reboot", "", "restart the computer", Some("reboot"), "Restarting.", false),
-    act("play", "<what> [on <site or app>]", "play music or a video", None, "", false),
-    act("search", "<what> [on <site or app>]", "search a site or app without playing anything", None, "", false),
-    act("web_search", "<what>", "search the web", None, "", false),
-    act("pause", "", "pause what's playing", Some("media_pause"), "Paused.", false),
-    act("resume", "", "resume what was playing", Some("media_play"), "Resuming.", false),
-    act("next", "", "skip to the next track", Some("media_next"), "Next track.", false),
-    act("previous", "", "go back a track", Some("media_previous"), "Previous track.", false),
-    act("undo", "", "undo your last action", None, "", false),
-    act("stop", "", "stop talking, or pause what's playing if you're quiet", None, "", false),
-    act("confirm", "", "yes to the question you just asked", None, "", false),
-    act("cancel", "", "no to the question you just asked", None, "", false),
-    act("system_changes", "<number>", "tell what changed on the system in the last number of days", None, "", false),
-    act("update_details", "", "describe the system update you last mentioned, or the latest one", None, "", false),
-    act("look_back", "<number>", "recall what happened over the last number of days, then answer", None, "", false),
-    act("remember", "<fact>", "keep a lasting fact the user told you about themselves", None, "", false),
+    act("open", "<app>", "open an installed app", None, true),
+    act("open_website", "<website>", "open a website in the browser", None, true),
+    act("close", "<app>", "close an app's windows", None, true),
+    act("close_focused", "", "close the window in front", None, false),
+    act("close_last_opened", "", "close the app you opened last", None, false),
+    act("workspace", "<number>", "switch to a workspace", None, false),
+    act("fullscreen", "<app>", "make an app's window full screen", None, true),
+    act("fullscreen_focused", "", "make the window in front full screen", None, false),
+    act("volume_set", "<0-100>", "set the speaker volume in percent", Some("volume_set"), false),
+    act("volume_up", "", "turn the volume up a step", Some("volume_up"), false),
+    act("volume_down", "", "turn the volume down a step", Some("volume_down"), false),
+    act("mute", "", "mute or unmute the speakers", Some("volume_mute"), false),
+    act("brightness_set", "<0-100>", "set the screen brightness in percent", Some("brightness_set"), false),
+    act("brightness_up", "", "make the screen brighter a step", Some("brightness_up"), false),
+    act("brightness_down", "", "make the screen dimmer a step", Some("brightness_down"), false),
+    act("bluetooth_on", "", "turn Bluetooth on", Some("bluetooth_on"), false),
+    act("bluetooth_off", "", "turn Bluetooth off", Some("bluetooth_off"), false),
+    act("wifi_on", "", "turn Wi-Fi on", Some("wifi_on"), false),
+    act("wifi_off", "", "turn Wi-Fi off", Some("wifi_off"), false),
+    act("lock", "", "lock the screen", Some("lock"), false),
+    act("logout", "", "log the user out", Some("logout"), false),
+    act("suspend", "", "put the computer to sleep", Some("suspend"), false),
+    act("poweroff", "", "shut the computer down", Some("poweroff"), false),
+    act("reboot", "", "restart the computer", Some("reboot"), false),
+    act("play", "<what> [on <site or app>]", "play music or a video", None, false),
+    act("search", "<what> [on <site or app>]", "search a site or app without playing anything", None, false),
+    act("web_search", "<what>", "search the web", None, false),
+    act("pause", "", "pause what's playing", Some("media_pause"), false),
+    act("resume", "", "resume what was playing", Some("media_play"), false),
+    act("next", "", "skip to the next track", Some("media_next"), false),
+    act("previous", "", "go back a track", Some("media_previous"), false),
+    act("undo", "", "undo your last action", None, false),
+    act("stop", "", "stop talking, or pause what's playing if you're quiet", None, false),
+    act("confirm", "", "yes to the question you just asked", None, false),
+    act("cancel", "", "no to the question you just asked", None, false),
+    act("system_changes", "<number>", "tell what changed on the system in the last number of days", None, false),
+    act("update_details", "", "describe the system update you last mentioned, or the latest one", None, false),
+    act("look_back", "<number>", "recall what happened over the last number of days, then answer", None, false),
+    act("remember", "<fact>", "keep a lasting fact the user told you about themselves", None, false),
 ];
 
 /// The actions as the model is shown them. Confirm and cancel only while
@@ -637,18 +663,13 @@ fn grounded(target: &str, said: &str, apps: &[AppEntry]) -> bool {
 }
 
 /// Open an app (by name, or by kind when only one fits) or a website.
-fn open_plan(target: &str, apps: &[AppEntry]) -> serde_json::Value {
-    let open = |spoken: String, target: String, args: Vec<String>| {
-        serde_json::json!([
-            {"type": "say", "text": spoken},
-            {"type": "app", "target": target, "args": args},
-        ])
-    };
+fn open_plan(target: &str, apps: &[AppEntry]) -> Step {
+    let open = |target: String, args: Vec<String>| Ok(serde_json::json!([{"type": "app", "target": target, "args": args}]));
     if target.contains("://") {
-        return open(format!("Opening {}.", target), target.to_string(), vec![]);
+        return open(target.to_string(), vec![]);
     }
     if looks_like_domain(target) {
-        return open(format!("Opening {}.", target), format!("https://{}", target), vec![]);
+        return open(format!("https://{}", target), vec![]);
     }
     let of_kind = apps_of_kind(target, apps);
     let app = find_named_app(target, apps).or(match of_kind.as_slice() {
@@ -658,13 +679,13 @@ fn open_plan(target: &str, apps: &[AppEntry]) -> serde_json::Value {
     if let Some(app) = app {
         let mut parts = crate::util::split_command_line(&app.exec).into_iter();
         let bin = parts.next().unwrap_or_default();
-        return open(format!("Opening {}.", app.name), bin, parts.collect());
+        return open(bin, parts.collect());
     }
     if of_kind.len() > 1 {
         let names: Vec<String> = of_kind.iter().map(|a| a.name.clone()).collect();
-        return serde_json::json!({"type": "say", "text": which_one(&names)});
+        return Err(which_one(&names));
     }
-    serde_json::json!({"type": "say", "text": format!("I couldn't find an app called {}.", target)})
+    Err(format!("Nothing was opened: no installed app is called {}.", target))
 }
 
 /// Close an app's windows, never MAVIS's own; "this window" is the focused one.
@@ -673,7 +694,7 @@ fn close_target(
     windows: &[WindowInfo],
     apps: &[AppEntry],
     spared: &std::collections::HashSet<u32>,
-) -> serde_json::Value {
+) -> Step {
     close_plan(close_app(Some(target), windows, apps, spared))
 }
 
@@ -731,7 +752,7 @@ fn close_app(
 }
 
 /// Full screen for an app's window, or with None the focused one.
-fn fullscreen_plan(target: Option<&str>, windows: &[WindowInfo], apps: &[AppEntry]) -> serde_json::Value {
+fn fullscreen_plan(target: Option<&str>, windows: &[WindowInfo], apps: &[AppEntry]) -> Step {
     let window = match target {
         None => windows.iter().find(|w| w.is_focused),
         Some(t) => {
@@ -740,14 +761,11 @@ fn fullscreen_plan(target: Option<&str>, windows: &[WindowInfo], apps: &[AppEntr
         }
     };
     match window.and_then(|w| w.id) {
-        Some(id) => serde_json::json!([
-            {"type": "fullscreen", "window": id},
-            {"type": "say", "text": "Full screen."},
-        ]),
-        None => serde_json::json!({"type": "say", "text": match target {
-            None => "I can't tell which window you mean.".to_string(),
-            Some(t) => format!("{} isn't open.", t),
-        }}),
+        Some(id) => Ok(serde_json::json!([{"type": "fullscreen", "window": id}])),
+        None => Err(match target {
+            None => "Nothing changed: you can't tell which window they mean.".to_string(),
+            Some(t) => format!("Nothing changed: {} isn't open.", t),
+        }),
     }
 }
 
@@ -879,6 +897,8 @@ pub struct Planner {
     spared: std::collections::HashSet<u32>,
     /// The app MAVIS last opened, for "close what you just opened".
     last_opened: std::sync::Mutex<Option<String>>,
+    /// What the user said last, for telling how its actions went.
+    last_said: std::sync::Mutex<String>,
 }
 
 impl Planner {
@@ -908,6 +928,7 @@ impl Planner {
             media: Media::default(),
             spared: own_process_tree(),
             last_opened: std::sync::Mutex::new(None),
+            last_said: std::sync::Mutex::new(String::new()),
         }
     }
 
@@ -958,6 +979,7 @@ impl Planner {
                 info!("Planner: received WorkerResponse");
                 self.handle_worker_response(event).await?;
             }
+            EventType::ActionComplete => self.action_done(&event).await,
             _ => {}
         }
         Ok(())
@@ -975,6 +997,7 @@ impl Planner {
             "" => intent,
             rest => rest,
         };
+        *self.last_said.lock().unwrap_or_else(|p| p.into_inner()) = intent.to_string();
 
         let source = event
             .payload
@@ -1029,10 +1052,35 @@ impl Planner {
         Ok(())
     }
 
-    /// The plan for the model's "DO <action>". Always a plan: an action that
-    /// can't be done becomes a sentence saying why, never a guess.
-    async fn action_plan(&self, line: &str, said: &str) -> serde_json::Value {
-        let say = |text: String| serde_json::json!({"type": "say", "text": text});
+    /// Carry out the model's "DO <action>", with `words` as what it says
+    /// while doing it. When the action can't be done as asked, what
+    /// happened goes back to the model to tell instead.
+    async fn carry_out(&self, line: &str, said: &str, words: &str) {
+        match self.action_plan(line, said).await {
+            Ok(plan) if plan.is_null() => {}
+            Ok(plan) => {
+                let (plan, note) = with_words(plan, words);
+                if plan.as_array().is_some_and(|a| !a.is_empty()) {
+                    self.bus.publish(Event {
+                        id: uuid::Uuid::new_v4(),
+                        timestamp: chrono::Utc::now(),
+                        source: "planner".to_string(),
+                        event_type: EventType::PlanReady,
+                        payload: serde_json::json!({ "plan": plan }),
+                    });
+                }
+                if let Some(note) = note {
+                    self.report(said, &note).await;
+                }
+            }
+            Err(fact) => self.report(said, &fact).await,
+        }
+    }
+
+    /// The plan for the model's "DO <action>": actions, Null when it was
+    /// handled here, or the fact of why it can't be done, never a guess.
+    async fn action_plan(&self, line: &str, said: &str) -> Step {
+        let say = |text: String| Ok(serde_json::json!({"type": "say", "text": text}));
         // "volume_set <80>." still means 80: the model copies the menu's form.
         let line = line.trim().trim_end_matches(['.', '!']);
         let (name, arg) = match line.split_once(' ') {
@@ -1040,28 +1088,21 @@ impl Planner {
             None => (line, ""),
         };
         let Some(action) = ACTIONS.iter().find(|a| a.name == name) else {
-            return say("Sorry, I'm not sure what you want me to do.".into());
+            return Err(format!("Nothing was done: \"{}\" isn't one of your actions. Ask what they want.", line));
         };
         if action.args.is_empty() != arg.is_empty() {
-            return say("Sorry, I'm not sure what you want me to do.".into());
+            return Err(format!("Nothing was done: \"{}\" isn't a form your actions take. Ask what they want.", line));
         }
         // An app or site the user never mentioned is the model's invention.
         if action.names_target && !grounded(arg, said, &self.apps) {
             info!("Planner: model chose \"{}\", naming something never said — ignored", line);
-            return say("Sorry, I'm not sure which one you mean.".into());
+            return Err(format!("Nothing was done: they never named {}. Ask which one they mean.", arg));
         }
         if let Some(op) = action.op {
-            let act = match (arg.parse::<u64>(), action.args) {
-                (Ok(n), "<0-100>") if n <= 100 => serde_json::json!({"type": "system", "op": op, "value": n}),
-                (_, "<0-100>") => return say("That level has to be between 0 and 100.".into()),
-                _ => serde_json::json!({"type": "system", "op": op}),
-            };
-            let spoken = say(action.says.replace("{}", arg));
-            // Ending the session: said first, since nothing is heard after.
-            return if matches!(op, "lock" | "logout" | "suspend" | "poweroff" | "reboot") {
-                serde_json::json!([spoken, act])
-            } else {
-                serde_json::json!([act, spoken])
+            return match (arg.parse::<u64>(), action.args) {
+                (Ok(n), "<0-100>") if n <= 100 => Ok(serde_json::json!([{"type": "system", "op": op, "value": n}])),
+                (_, "<0-100>") => Err("Nothing changed: a level has to be between 0 and 100.".into()),
+                _ => Ok(serde_json::json!([{"type": "system", "op": op}])),
             };
         }
         let windows = {
@@ -1070,26 +1111,23 @@ impl Planner {
         };
         match name {
             "open" | "open_website" => {
-                let plan = open_plan(arg, &self.apps);
+                let plan = open_plan(arg, &self.apps)?;
                 if let Some(app) = launched_app(&plan, &self.apps) {
                     if let Ok(mut last) = self.last_opened.lock() {
                         *last = Some(app);
                     }
                 }
-                plan
+                Ok(plan)
             }
             "close" => close_target(arg, &windows, &self.apps, &self.spared),
             "close_focused" => close_plan(close_app(None, &windows, &self.apps, &self.spared)),
             "close_last_opened" => match self.last_opened.lock().ok().and_then(|n| n.clone()) {
                 Some(app) => close_target(&app, &windows, &self.apps, &self.spared),
-                None => say("I haven't opened anything yet.".into()),
+                None => Err("Nothing was closed: you haven't opened anything yet.".into()),
             },
             "workspace" => match arg.parse::<u64>() {
-                Ok(n) if n >= 1 => serde_json::json!([
-                    {"type": "workspace", "index": n},
-                    {"type": "say", "text": format!("Workspace {}.", n)},
-                ]),
-                _ => say("Which workspace number?".into()),
+                Ok(n) if n >= 1 => Ok(serde_json::json!([{"type": "workspace", "index": n}])),
+                _ => Err("Nothing changed: no workspace number was given. Ask which one.".into()),
             },
             "fullscreen" => fullscreen_plan(Some(arg), &windows, &self.apps),
             "fullscreen_focused" => fullscreen_plan(None, &windows, &self.apps),
@@ -1109,13 +1147,14 @@ impl Planner {
                     "search_only": name == "search",
                 }]);
                 resolve_media(&mut plan, &self.apps, &self.media).await;
-                plan
+                Ok(plan)
             }
-            "web_search" => serde_json::json!([{"type": "search", "query": arg, "app": null}]),
-            "undo" => serde_json::json!({"type": "undo"}),
+            "web_search" => Ok(serde_json::json!([{"type": "search", "query": arg, "app": null}])),
+            // Its result is told when it's known.
+            "undo" => Ok(serde_json::json!([{"type": "undo"}])),
             "stop" => {
                 self.stop();
-                serde_json::Value::Null
+                Ok(serde_json::Value::Null)
             }
             "confirm" | "cancel" => {
                 self.bus.publish(Event {
@@ -1125,37 +1164,77 @@ impl Planner {
                     event_type: EventType::Confirmation,
                     payload: serde_json::json!({ "approved": name == "confirm" }),
                 });
-                serde_json::Value::Null
+                Ok(serde_json::Value::Null)
             }
             "system_changes" => match arg.parse::<u64>() {
                 Ok(days) => match self.sentinel_answer(Some(days)).await {
                     Some(text) => say(text),
-                    None => say("I'm not watching the system right now.".into()),
+                    None => Err("Nothing to tell: you aren't watching the system right now.".into()),
                 },
-                Err(_) => say("Over how many days?".into()),
+                Err(_) => Err("Nothing looked up: no number of days was given. Ask over how many days.".into()),
             },
             "update_details" => match self.sentinel_answer(None).await {
                 Some(text) => say(text),
-                None => say("I'm not watching the system right now.".into()),
+                None => Err("Nothing to tell: you aren't watching the system right now.".into()),
             },
             "look_back" => {
                 let days = arg.parse::<u64>().unwrap_or(1).clamp(1, 365);
                 self.answer_from_memory(said, days).await;
-                serde_json::Value::Null
+                Ok(serde_json::Value::Null)
             }
             "remember" => {
                 if !restates(arg, said) {
                     info!("Planner: model wanted to remember \"{}\", which wasn't said", arg);
-                    return say("Sorry, what should I remember?".into());
+                    return Err("Nothing was stored: the fact you chose wasn't what they said. Ask what to remember.".into());
                 }
                 let stored = self.recall.lock().await.remember(arg, &chrono::Utc::now().to_rfc3339());
                 match stored {
-                    Ok(()) => say("I'll remember that.".into()),
-                    Err(e) => say(format!("Sorry, I couldn't remember that: {}", e)),
+                    Ok(()) => Ok(serde_json::json!([])),
+                    Err(e) => Err(format!("Nothing was stored: {}", e)),
                 }
             }
-            _ => say("Sorry, I can't do that yet.".into()),
+            _ => Err(format!("Nothing was done: you can't {} yet.", action.what)),
         }
+    }
+
+    /// An action has run. Its result is told when it failed, or when it is
+    /// undo's, whose result isn't known until it runs.
+    async fn action_done(&self, event: &Event) {
+        let p = &event.payload;
+        let kind = p["action_type"].as_str().unwrap_or_default();
+        let ok = p["success"].as_bool().unwrap_or(true);
+        let fact = match (kind, ok) {
+            ("say" | "notify", _) => return,
+            ("undo", true) => format!("Undo ran: {}", p["output"].as_str().unwrap_or_default()),
+            (_, true) => return,
+            (_, false) => {
+                let reason = p["error"].as_str().unwrap_or_default().lines().next().unwrap_or_default().to_string();
+                format!("That didn't work, so it didn't happen: {}", crate::util::truncate_bytes(&reason, 160))
+            }
+        };
+        let said = self.last_said.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        self.report(&said, &fact).await;
+    }
+
+    /// Have the model tell what happened, in its own words.
+    async fn report(&self, said: &str, fact: &str) {
+        info!("Planner: telling the outcome — {}", fact);
+        let mut working_memory = self.build_working_memory(said, uuid::Uuid::new_v4(), None).await;
+        working_memory.push(serde_json::json!({ "source": "result", "content": fact }));
+        self.bus.publish(Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "planner".to_string(),
+            event_type: EventType::WorkerRequest,
+            payload: serde_json::json!({
+                "request_type": "chat",
+                "text": said,
+                "messages": [{"role": "user", "content": said}],
+                "max_tokens": 96,
+                "temperature": 0.6,
+                "working_memory": working_memory,
+            }),
+        });
     }
 
     /// Whether the permission gate is waiting for an answer.
@@ -1648,18 +1727,9 @@ impl Planner {
             "command" => {
                 let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or_default();
                 let action = payload.get("command").and_then(|v| v.as_str()).unwrap_or_default();
+                let words = payload.get("words").and_then(|v| v.as_str()).unwrap_or_default();
                 info!("Planner: model chose \"{}\" for \"{}\"", action, text);
-                let plan = self.action_plan(action, text).await;
-                if plan.is_null() {
-                    return Ok(());
-                }
-                self.bus.publish(Event {
-                    id: uuid::Uuid::new_v4(),
-                    timestamp: chrono::Utc::now(),
-                    source: "planner".to_string(),
-                    event_type: EventType::PlanReady,
-                    payload: serde_json::json!({ "plan": plan }),
-                });
+                self.carry_out(action, text, words).await;
             }
             "error" => {
                 let error_msg = payload
@@ -1857,8 +1927,8 @@ pub async fn resolve_media(plan: &mut serde_json::Value, apps: &[AppEntry], medi
 
     let concrete = if step["type"] == "search" {
         match &media.web_site {
-            Some(site) => in_browser(site.search(query), format!("Searching for {}", query), named),
-            None => spoken("No search site is set. Add one under [web] in config.toml."),
+            Some(site) => in_browser(site.search(query), named),
+            None => note("Nothing was searched: no search site is set. It goes under [web] in config.toml."),
         }
     } else {
         let search_only = step["search_only"].as_bool() == Some(true);
@@ -1874,8 +1944,8 @@ pub async fn resolve_media(plan: &mut serde_json::Value, apps: &[AppEntry], medi
             // site and not an app, so a web search.
             (None, Some(o)) if !media.play_site.as_ref().is_some_and(|s| s.named(o)) => {
                 let found = match &media.web_site {
-                    Some(site) => in_browser(site.search(query), format!("Searching for {}", query), None),
-                    None => spoken(&format!("I don't know how to search {}.", o)),
+                    Some(site) => in_browser(site.search(query), None),
+                    None => note(&format!("Nothing was searched: you don't know how to search {}.", o)),
                 };
                 return splice(actions, at, found);
             }
@@ -1905,8 +1975,9 @@ fn splice(actions: &mut Vec<serde_json::Value>, at: usize, with: Vec<serde_json:
     }
 }
 
-fn spoken(text: &str) -> Vec<serde_json::Value> {
-    vec![serde_json::json!({"type": "say", "text": text})]
+/// Something that didn't go as asked, for MAVIS to tell.
+fn note(text: &str) -> Vec<serde_json::Value> {
+    vec![serde_json::json!({"type": "note", "text": text})]
 }
 
 /// Launch `app`, with a link or a file after its own arguments.
@@ -1918,10 +1989,10 @@ fn launch_with(app: &AppEntry, arg: Option<String>) -> serde_json::Value {
     serde_json::json!({"type": "app", "target": bin, "args": args})
 }
 
-fn in_browser(url: String, said: String, app: Option<&AppEntry>) -> Vec<serde_json::Value> {
+fn in_browser(url: String, app: Option<&AppEntry>) -> Vec<serde_json::Value> {
     match app {
-        Some(app) => vec![serde_json::json!({"type": "say", "text": format!("{} in {}.", said, app.name)}), launch_with(app, Some(url))],
-        None => vec![serde_json::json!({"type": "say", "text": format!("{}.", said)}), serde_json::json!({"type": "app", "target": url})],
+        Some(app) => vec![launch_with(app, Some(url))],
+        None => vec![serde_json::json!({"type": "app", "target": url})],
     }
 }
 
@@ -1931,16 +2002,19 @@ async fn play_in(query: &str, app: Option<&AppEntry>, search_only: bool, media: 
     // A browser, or no app at all: the configured site.
     if app.is_none_or(|a| a.opens_links) {
         let Some(site) = &media.play_site else {
-            return (spoken("No site is set for playing. Add one under [media] in config.toml."), false);
+            return (note("Nothing was played: no site is set for playing. It goes under [media] in config.toml."), false);
         };
         let search = site.search(query);
         if !search_only {
             if let Some(link) = site.top_result(&search).await {
                 info!("Media: playing {}", link);
-                return (in_browser(link, format!("Playing {}", query), app), true);
+                return (in_browser(link, app), true);
             }
+            let mut opened = in_browser(search, app);
+            opened.extend(note(&format!("Nothing could be played straight away, so {}'s search for {} was opened instead.", site.name, query)));
+            return (opened, true);
         }
-        return (in_browser(search, format!("Searching {} for {}", site.name, query), app), true);
+        return (in_browser(search, app), true);
     }
     let app = app.expect("checked above");
 
@@ -1948,30 +2022,23 @@ async fn play_in(query: &str, app: Option<&AppEntry>, search_only: bool, media: 
     if plays_files(app) && !search_only {
         if let Some(file) = find_media_file(query, &media_dirs()) {
             let title = file.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            return (
-                vec![
-                    serde_json::json!({"type": "say", "text": format!("Playing {} in {}.", title, app.name)}),
-                    launch_with(app, Some(file.to_string_lossy().into_owned())),
-                ],
-                true,
-            );
+            info!("Media: playing {} in {}", title, app.name);
+            return (vec![launch_with(app, Some(file.to_string_lossy().into_owned()))], true);
         }
     }
 
     // An app with its own link type: hand it a search.
     if let Some(scheme) = own_scheme(app) {
         let uri = format!("{}:search:{}", scheme, crate::util::urlencode(query).replace('+', "%20"));
-        return (
-            vec![serde_json::json!({"type": "say", "text": format!("Searching {} for {}.", app.name, query)}), launch_with(app, Some(uri))],
-            true,
-        );
+        return (vec![launch_with(app, Some(uri))], true);
     }
 
     if plays_files(app) {
-        return (spoken(&format!("I couldn't find {} in your music or videos.", query)), false);
+        return (note(&format!("Nothing was played: {} isn't in their music or videos.", query)), false);
     }
-    let said = format!("I opened {}, but I can't search inside it.", app.name);
-    (vec![serde_json::json!({"type": "say", "text": said}), launch_with(app, None)], false)
+    let mut opened = vec![launch_with(app, None)];
+    opened.extend(note(&format!("{} was opened, but you can't search inside it, so nothing is playing.", app.name)));
+    (opened, false)
 }
 
 /// The user's Music and Videos folders, from user-dirs.dirs, else ~/Music
@@ -2413,7 +2480,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             source: "worker".into(),
             event_type: EventType::WorkerResponse,
-            payload: serde_json::json!({ "type": "command", "command": action, "text": said }),
+            payload: serde_json::json!({ "type": "command", "command": action, "text": said, "words": "Sure." }),
         }
     }
 
@@ -2427,7 +2494,7 @@ mod tests {
             drain(rx)
                 .into_iter()
                 .filter(|e| e.event_type == EventType::PlanReady)
-                .filter_map(|e| e.payload["plan"]["text"].as_str().map(String::from))
+                .map(|e| plan_says(&e.payload["plan"]))
                 .collect()
         };
         planner.handle_event(model_did("system_changes 7", "what changed lately")).await.unwrap();
@@ -2479,6 +2546,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Whatever the model picks is checked before anything runs. What can't
+    /// be done goes back to the model as a result to tell.
     #[tokio::test]
     async fn the_models_action_is_checked_before_it_runs() {
         let (planner, mut rx, dir) = planner_with_pending_change("act");
@@ -2493,22 +2562,58 @@ mod tests {
             ("volume_up 5", "louder"),
             ("volume_set <80>.", "turn it down to 80"),
         ];
-        let mut plans = Vec::new();
+        // Each turn: the plan that runs, or the result handed back to the model.
+        let mut turns: Vec<Result<serde_json::Value, String>> = Vec::new();
         for (action, said) in cases {
             planner.handle_event(model_did(action, said)).await.unwrap();
-            let plan = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::PlanReady).unwrap();
-            plans.push(plan.payload["plan"].clone());
+            let events = drain(&mut rx);
+            let result = events.iter().find(|e| e.event_type == EventType::WorkerRequest).and_then(|e| {
+                e.payload["working_memory"]
+                    .as_array()?
+                    .iter()
+                    .find(|i| i["source"] == "result")
+                    .and_then(|i| i["content"].as_str().map(String::from))
+            });
+            let plan = events.iter().find(|e| e.event_type == EventType::PlanReady).map(|e| e.payload["plan"].clone());
+            turns.push(match (plan, result) {
+                (Some(plan), None) => Ok(plan),
+                (None, Some(result)) => Err(result),
+                other => panic!("{}: {:?}", action, other),
+            });
         }
-        let text = |p: &serde_json::Value| p["text"].as_str().unwrap_or_default().to_string();
-        assert_eq!(plans[0]["type"], "undo");
-        assert_eq!((plans[1][0]["op"].as_str(), plans[1][1]["text"].as_str()), (Some("bluetooth_off"), Some("Bluetooth off.")));
-        assert_eq!(plans[2][0]["type"], "say", "said before the session ends");
-        assert_eq!((plans[3][0]["value"].as_u64(), plans[3][1]["text"].as_str()), (Some(40), Some("Volume 40%.")));
-        assert!(text(&plans[4]).contains("between 0 and 100"));
-        assert!(text(&plans[5]).contains("which one"), "an app nobody named");
-        assert!(text(&plans[6]).contains("not sure"), "not an action");
-        assert!(text(&plans[7]).contains("not sure"), "an argument it doesn't take");
-        assert_eq!(plans[8][0]["value"].as_u64(), Some(80), "the menu's form is read too");
+        let plan = |i: usize| turns[i].clone().unwrap();
+        let told = |i: usize| turns[i].clone().unwrap_err();
+        assert_eq!(plan(0), serde_json::json!([{"type": "undo"}]), "undo's result is told once known");
+        assert_eq!((plan(1)[0]["op"].as_str(), plan(1)[1]["text"].as_str()), (Some("bluetooth_off"), Some("Sure.")));
+        assert_eq!(plan(2)[0]["type"], "say", "said before the session ends");
+        assert_eq!((plan(3)[0]["value"].as_u64(), plan(3)[1]["text"].as_str()), (Some(40), Some("Sure.")));
+        assert!(told(4).contains("between 0 and 100"));
+        assert!(told(5).contains("never named"), "an app nobody named");
+        assert!(told(6).contains("isn't one of your actions"));
+        assert!(told(7).contains("isn't a form"), "an argument it doesn't take");
+        assert_eq!(plan(8)[0]["value"].as_u64(), Some(80), "the menu's form is read too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A failed action is told by the model, with the reason.
+    #[tokio::test]
+    async fn a_failure_is_told_in_the_models_words() {
+        let (planner, mut rx, dir) = planner_with_pending_change("failed");
+        planner.handle_event(utterance("brighter please")).await.unwrap();
+        drain(&mut rx);
+        let done = Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "executor".into(),
+            event_type: EventType::ActionComplete,
+            payload: serde_json::json!({"action_type": "system", "success": false, "error": "no backlight found\ndetails"}),
+        };
+        planner.handle_event(done).await.unwrap();
+        let request = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
+        assert_eq!(request.payload["text"], "brighter please");
+        assert!(request.payload.get("actions").is_none(), "only a reply");
+        let wm = request.payload["working_memory"].to_string();
+        assert!(wm.contains("no backlight found") && !wm.contains("details"), "{}", wm);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2579,29 +2684,30 @@ mod tests {
             let (video, web) = sites();
             let media = Media::with_sites(Some(video), Some(web), None);
             let plan = resolved(serde_json::json!([{"type": "play", "query": "sunbeam on tube", "app": "Webby"}]), &media).await;
-            assert_eq!(plan[0]["text"], "Searching Tube for sunbeam in Webby.");
-            assert_eq!(plan[1]["target"], "webby");
-            assert_eq!(plan[1]["args"], serde_json::json!(["--new", "https://tube.test/results?q=sunbeam"]));
+            assert_eq!(plan[0]["target"], "webby");
+            assert_eq!(plan[0]["args"], serde_json::json!(["--new", "https://tube.test/results?q=sunbeam"]));
+            assert_eq!(plan[1]["type"], "note", "the search page instead of playing is told");
 
             // No app, nothing remembered: the default browser.
             let plan = resolved(serde_json::json!([{"type": "play", "query": "sunbeam"}]), &media).await;
-            assert_eq!(plan[1]["target"], "https://tube.test/results?q=sunbeam");
+            assert_eq!(plan[0]["target"], "https://tube.test/results?q=sunbeam");
 
             let plan = resolved(serde_json::json!([{"type": "search", "query": "rust traits"}]), &media).await;
-            assert_eq!(plan[1]["target"], "https://find.test/?q=rust+traits");
+            assert_eq!(plan[0]["target"], "https://find.test/?q=rust+traits");
+            assert_eq!(plan.as_array().unwrap().len(), 1, "a search as asked has nothing to tell");
         }
 
         #[tokio::test]
         async fn an_app_with_its_own_link_type_gets_a_search() {
             let media = Media::with_sites(Some(sites().0), None, None);
             let plan = resolved(serde_json::json!([{"type": "play", "query": "sunbeam by the band", "app": "Tunes"}]), &media).await;
-            assert_eq!(plan[0]["text"], "Searching Tunes for sunbeam by the band.");
-            assert_eq!(plan[1]["args"], serde_json::json!(["tunes:search:sunbeam%20by%20the%20band"]));
+            assert_eq!(plan[0]["args"], serde_json::json!(["tunes:search:sunbeam%20by%20the%20band"]));
             // Named the way a site would be: "search tunes for sunbeam".
             let plan = resolved(serde_json::json!([{"type": "play", "query": "sunbeam", "on": "tunes", "search_only": true}]), &media).await;
-            assert_eq!(plan[1]["target"], "tunes");
+            assert_eq!(plan[0]["target"], "tunes");
             let plan = resolved(serde_json::json!([{"type": "play", "query": "sunbeam", "on": "elsewhere", "search_only": true}]), &media).await;
-            assert_eq!(plan[0]["text"], "I don't know how to search elsewhere.");
+            assert_eq!(plan[0]["type"], "note");
+            assert!(plan[0]["text"].as_str().unwrap().contains("elsewhere"));
         }
 
         #[tokio::test]
@@ -2613,10 +2719,10 @@ mod tests {
             resolved(serde_json::json!([{"type": "play", "query": "sunbeam", "app": "Tunes"}]), &media).await;
             // Tunes is remembered, but "on tube" means the site, in a browser.
             let plan = resolved(serde_json::json!([{"type": "play", "query": "sunrise on tube"}]), &media).await;
-            assert_eq!(plan[1]["target"], "https://tube.test/results?q=sunrise", "{}", plan);
+            assert_eq!(plan[0]["target"], "https://tube.test/results?q=sunrise", "{}", plan);
             // "search the web for X": a web search, not "I don't know how".
             let plan = resolved(serde_json::json!([{"type": "play", "query": "cats", "on": "the web", "search_only": true}]), &media).await;
-            assert_eq!(plan[1]["target"], "https://find.test/?q=cats");
+            assert_eq!(plan[0]["target"], "https://find.test/?q=cats");
             let _ = std::fs::remove_dir_all(&dir);
         }
 
@@ -2631,8 +2737,9 @@ mod tests {
         async fn an_app_that_cannot_search_is_opened_and_says_so() {
             let media = Media::with_sites(Some(sites().0), None, None);
             let plan = resolved(serde_json::json!([{"type": "play", "query": "sunbeam", "app": "Notes"}]), &media).await;
-            assert_eq!(plan[0]["text"], "I opened Notes, but I can't search inside it.");
-            assert_eq!(plan[1]["args"], serde_json::json!([]));
+            assert_eq!(plan[0]["args"], serde_json::json!([]));
+            assert_eq!(plan[1]["type"], "note");
+            assert!(plan[1]["text"].as_str().unwrap().contains("Notes"));
         }
 
         #[tokio::test]
@@ -2642,11 +2749,11 @@ mod tests {
             let media = Media::with_sites(Some(sites().0), None, Some(dir.join("media_app")));
             resolved(serde_json::json!([{"type": "play", "query": "sunbeam", "app": "Webby"}]), &media).await;
             let plan = resolved(serde_json::json!([{"type": "play", "query": "sunrise"}]), &media).await;
-            assert_eq!(plan[1]["target"], "webby", "{}", plan);
+            assert_eq!(plan[0]["target"], "webby", "{}", plan);
             // An app that couldn't play it isn't remembered.
             resolved(serde_json::json!([{"type": "play", "query": "x", "app": "Notes"}]), &media).await;
             let plan = resolved(serde_json::json!([{"type": "play", "query": "sunrise"}]), &media).await;
-            assert_eq!(plan[1]["target"], "webby");
+            assert_eq!(plan[0]["target"], "webby");
             let _ = std::fs::remove_dir_all(&dir);
         }
 
@@ -2695,18 +2802,14 @@ mod tests {
         names.sort();
         names.dedup();
         assert_eq!(names.len(), ACTIONS.len(), "names are unique");
-        for a in ACTIONS {
-            assert!(a.op.is_some() || a.says.is_empty(), "{}: built actions say their own lines", a.name);
-            assert_eq!(a.args == "<0-100>", a.says.contains("{}"), "{}: levels say their level", a.name);
-        }
     }
 
     #[test]
     fn opening_by_name_by_kind_or_not_at_all() {
         let apps = desktop_apps();
-        assert_eq!(open_plan("webby", &apps)[1]["target"], "webby");
-        assert_eq!(open_plan("tube.test", &apps)[1]["target"], "https://tube.test");
-        assert!(open_plan("zqxw", &apps)["text"].as_str().unwrap().starts_with("I couldn't find"));
+        assert_eq!(open_plan("webby", &apps).unwrap()[0]["target"], "webby");
+        assert_eq!(open_plan("tube.test", &apps).unwrap()[0]["target"], "https://tube.test");
+        assert!(open_plan("zqxw", &apps).unwrap_err().contains("zqxw"), "what wasn't found is told");
     }
 
     #[test]
@@ -2719,8 +2822,8 @@ mod tests {
         assert!(matches!(close_app(Some("Webby"), &open, &apps, &spared), Close::Windows { .. }));
         assert!(matches!(close_app(None, &open, &apps, &spared), Close::Mine(_)), "never MAVIS's own window");
         assert!(matches!(close_app(Some("nothing here"), &open, &apps, &spared), Close::NotOpen(_)));
-        assert_eq!(fullscreen_plan(Some("webby"), &open, &apps)[0]["type"], "fullscreen");
-        assert_eq!(fullscreen_plan(None, &open, &apps)[0]["window"], ours.id.unwrap());
+        assert_eq!(fullscreen_plan(Some("webby"), &open, &apps).unwrap()[0]["type"], "fullscreen");
+        assert_eq!(fullscreen_plan(None, &open, &apps).unwrap()[0]["window"], ours.id.unwrap());
     }
 
     #[test]
