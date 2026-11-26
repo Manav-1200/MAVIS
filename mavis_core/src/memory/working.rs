@@ -35,15 +35,19 @@ pub struct WorkingMemory {
     #[serde(default)]
     pub user_name_verified: bool,
     pub browser_tab: Option<BrowserTab>,
-    /// What the user said earlier this session, kept short once the event
-    /// ring has moved past it — compressed rather than forgotten.
+    /// Lines of this session's conversation that have left the event ring
+    /// and are waiting to be folded into `summary`.
     #[serde(default)]
     pub earlier: VecDeque<String>,
+    /// This session's conversation beyond the recent turns, summarised by
+    /// the model so it is carried on rather than dropped.
+    #[serde(default)]
+    pub summary: String,
 }
 
-/// Earlier lines kept, and how long each may be.
-const EARLIER_KEPT: usize = 10;
-const EARLIER_BYTES: usize = 80;
+/// Earlier lines kept until summarised, and how long each may be.
+const EARLIER_KEPT: usize = 40;
+const EARLIER_BYTES: usize = 200;
 
 /// A name is one word of letters (apostrophes and hyphens allowed, as in
 /// O'Neil or Anne-Marie) under 30 bytes. Whether a word is being given as
@@ -69,19 +73,23 @@ impl WorkingMemory {
         }
     }
 
-    /// Keep a short form of what the user said in an event leaving the ring.
-    /// Only the user's words: MAVIS's own replies, kept, are what it learns
-    /// to copy.
+    /// Keep a short form of a turn leaving the ring, for the summary.
     fn remember_earlier(&mut self, event: &Event) {
-        if event.event_type != crate::models::event::EventType::UserIntent {
+        use crate::models::event::EventType;
+        let (who, text) = match event.event_type {
+            EventType::UserIntent => ("User", event.payload.get("text").and_then(|t| t.as_str()).unwrap_or_default().to_string()),
+            EventType::PlanReady => ("MAVIS", event.payload.get("plan").map(crate::planner::plan_says).unwrap_or_default()),
+            _ => return,
+        };
+        let text = crate::util::truncate_bytes(text.trim(), EARLIER_BYTES);
+        if text.is_empty() {
             return;
         }
-        let Some(text) = event.payload.get("text").and_then(|t| t.as_str()) else { return };
-        let short = crate::util::truncate_bytes(text.trim(), EARLIER_BYTES).to_string();
-        if short.is_empty() || self.earlier.back() == Some(&short) {
+        let line = format!("{}: {}", who, text);
+        if self.earlier.back() == Some(&line) {
             return;
         }
-        self.earlier.push_back(short);
+        self.earlier.push_back(line);
         if self.earlier.len() > EARLIER_KEPT {
             self.earlier.pop_front();
         }
@@ -117,6 +125,7 @@ impl WorkingMemory {
         let dropped = self.events.len();
         self.events.clear();
         self.earlier.clear();
+        self.summary.clear();
         self.current_intent = None;
         self.active_plan = None;
         self.ui_state = None;
