@@ -71,16 +71,8 @@ impl ContextEngine {
                     .or_else(|| event.payload.get("intent").and_then(|v| v.as_str()))
                     .unwrap_or("unknown");
 
-                {
-                    let mut wm = self.memory.working.write().await;
-                    wm.set_intent(intent.to_string());
-
-                    if let Some(name) = extract_user_name(intent) {
-                        if wm.user_name.as_ref() != Some(&name) && wm.set_user_name(name.clone()) {
-                            info!("ContextEngine: stored user name: {}", name);
-                        }
-                    }
-                }
+                // The user's name is learned by the model (`user_name`).
+                self.memory.working.write().await.set_intent(intent.to_string());
 
                 // Persist to searchable memory. Low-importance chatter is
                 // dropped inside record() rather than filtered here.
@@ -241,7 +233,7 @@ impl ContextEngine {
             // evict the actual conversation from the ring, which is the
             // exact failure the polling filter above exists to prevent.
             // Listening controls, not conversation.
-            EventType::OrbTap | EventType::ListenToggle | EventType::Confirmation => {}
+            EventType::OrbTap | EventType::ListenToggle | EventType::Confirmation | EventType::Tell => {}
 
             EventType::SystemChange => {
                 let count = event
@@ -361,78 +353,4 @@ impl ContextEngine {
             *last = Instant::now();
         }
     }
-}
-
-// ---------------------------------------------------------------------
-// Name extraction — simple pattern matching, no NLP dependency.
-// ---------------------------------------------------------------------
-
-/// Learn a name only when it is unmistakably being given.
-///
-/// No list of "words that aren't names": such a list grows with every false
-/// match and is never finished. Instead, the *shape* of the sentence decides:
-///
-/// 1. An explicit introduction: "my name is X", "call me X", "I'm called X".
-///    "I'm X" / "I am X" don't count — they introduce a state ("I'm using
-///    the terminal") far more often than a name.
-/// 2. X ends its clause: followed by nothing, punctuation, or "and". Names
-///    come last ("my name is Sam", "call me Robin, please");
-///    other words keep going ("call me back later", "my name is not
-///    important").
-/// 3. Not a question: "what's my name is what I asked?" introduces nothing.
-/// 4. For "call me", X must be capitalised as said. Whisper capitalises
-///    proper nouns; "call me maybe" / "call me back" come out lowercase.
-///    "my name is" is unambiguous enough to accept lowercase, which matters
-///    for typed input.
-///
-/// MAVIS then addresses the user by it, so a wrong one is heard and can be
-/// corrected by saying it again.
-fn extract_user_name(text: &str) -> Option<String> {
-    // Work on the clause containing the phrase, so a question elsewhere in
-    // the utterance doesn't disqualify an introduction.
-    for sentence in text.split_inclusive(['.', '!', '?']) {
-        if sentence.trim_end().ends_with('?') {
-            continue;
-        }
-        let words: Vec<&str> = sentence.split_whitespace().collect();
-        let lower: Vec<String> = words
-            .iter()
-            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'').to_lowercase())
-            .collect();
-
-        for i in 0..words.len() {
-            let (next, needs_capital) = match lower[i].as_str() {
-                "my" if lower.get(i + 1).is_some_and(|w| w == "name")
-                    && lower.get(i + 2).is_some_and(|w| w == "is") =>
-                {
-                    (i + 3, false)
-                }
-                "call" if lower.get(i + 1).is_some_and(|w| w == "me") => (i + 2, true),
-                "called" if i > 0 && matches!(lower[i - 1].as_str(), "i'm" | "am") => {
-                    (i + 1, false)
-                }
-                _ => continue,
-            };
-            let Some(raw) = words.get(next) else { continue };
-            let name = raw.trim_matches(|c: char| !c.is_alphabetic() && c != '\'' && c != '-');
-            if !crate::memory::working::is_plausible_name(name) {
-                continue;
-            }
-            // Clause end: last word, trailing punctuation, or "and" next.
-            let ends_clause = next + 1 == words.len()
-                || raw.ends_with([',', '.', '!', ';', ':'])
-                || lower.get(next + 1).is_some_and(|w| w == "and");
-            if !ends_clause {
-                continue;
-            }
-            let capitalised = name.chars().next().is_some_and(|c| c.is_uppercase());
-            if needs_capital && !capitalised {
-                continue;
-            }
-            let mut chars = name.chars();
-            let first = chars.next()?;
-            return Some(first.to_uppercase().collect::<String>() + chars.as_str());
-        }
-    }
-    None
 }
