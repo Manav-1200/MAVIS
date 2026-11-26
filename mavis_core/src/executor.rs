@@ -128,7 +128,6 @@ impl Executor {
                 tts_queued = true;
                 self.run_say(action).await
             } else if action_type == "undo" {
-                tts_queued = true;
                 self.run_undo().await
             } else {
                 self.execute_action(action).await
@@ -160,12 +159,9 @@ impl Executor {
 
             if !success {
                 self.emit_ui_state("error").await;
+                // Words said for it are cut off; the planner has MAVIS tell
+                // what went wrong.
                 self.tts_queue.interrupt().await;
-                // Whatever was announced before it ("Volume down.") didn't
-                // happen; say so, and why.
-                if action_type != "say" {
-                    let _ = self.run_say_text(&failure_line(&error_msg)).await;
-                }
                 return Ok(());
             }
         }
@@ -335,20 +331,19 @@ impl Executor {
     async fn run_undo(&self) -> Result<String> {
         let rollback = self.rollback.clone();
         let restored = tokio::task::spawn_blocking(move || rollback.undo()).await?;
-        let message = match restored.as_deref() {
-            Ok([]) => "There's nothing I can undo.".to_string(),
+        // What happened, for the planner to have MAVIS tell.
+        match restored.as_deref() {
+            Ok([]) => Ok("there was nothing to undo".to_string()),
             Ok([one]) => {
                 let name = Path::new(one).file_name().map(|n| n.to_string_lossy().to_string());
-                format!("Restored {}.", name.unwrap_or_else(|| one.clone()))
+                Ok(format!("restored {}", name.unwrap_or_else(|| one.clone())))
             }
-            Ok(many) => format!("Restored {} items.", many.len()),
+            Ok(many) => Ok(format!("restored {} items", many.len())),
             Err(e) => {
                 warn!("Executor: undo failed: {}", e);
-                "I couldn't undo that.".to_string()
+                Err(anyhow::anyhow!("the undo failed: {}", e))
             }
-        };
-        self.run_say_text(&message).await?;
-        Ok(message)
+        }
     }
 
     async fn run_app(&self, target: &str, args: Vec<String>) -> Result<String> {
@@ -1046,17 +1041,6 @@ async fn synthesize_via_worker(text: &str) -> Result<Vec<u8>> {
         .map_err(|e| anyhow::anyhow!("failed to decode TTS audio: {}", e))
 }
 
-/// "Sorry, that didn't work: brightnessctl isn't installed." The reason
-/// is the error's first line, kept short enough to say.
-fn failure_line(error: &str) -> String {
-    let reason = error.lines().next().unwrap_or("").trim().trim_end_matches('.');
-    if reason.is_empty() || reason.len() > 90 {
-        "Sorry, that didn't work.".to_string()
-    } else {
-        format!("Sorry, that didn't work: {}.", reason)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1081,12 +1065,6 @@ mod tests {
         assert!(is_echo("PRSA.", &log));
         assert!(!is_echo("Stop", &log), "a word it said whole may still be the user");
         assert!(!is_echo("Mavis", &log));
-    }
-
-    #[test]
-    fn a_failure_is_said_in_short() {
-        assert_eq!(failure_line("brightnessctl isn't installed"), "Sorry, that didn't work: brightnessctl isn't installed.");
-        assert_eq!(failure_line(&"x".repeat(200)), "Sorry, that didn't work.");
     }
 
     #[test]
@@ -1150,9 +1128,9 @@ mod tests {
         executor.run_shell(&format!("rm '{}'", file.display())).await.unwrap();
         assert!(!file.exists(), "the command really ran");
 
-        assert_eq!(executor.run_undo().await.unwrap(), "Restored notes.txt.");
+        assert_eq!(executor.run_undo().await.unwrap(), "restored notes.txt");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "important");
-        assert_eq!(executor.run_undo().await.unwrap(), "There's nothing I can undo.");
+        assert_eq!(executor.run_undo().await.unwrap(), "there was nothing to undo");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
