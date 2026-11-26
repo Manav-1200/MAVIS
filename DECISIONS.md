@@ -2232,6 +2232,31 @@ So 3 of 9 were right, 3 had the right intent in the wrong form, and 3 were wrong
 **Evidence:**
 - **Reasoned:** this records the direction agreed with the project owner. Each step is proven on hardware as it's built.
 
+
+## 49. MAVIS says it in its own words
+
+**Problem:** every action came with a sentence written in code, like "Volume 40%.", "Closed Surfy.", "I couldn't find an app called …", "Sorry, that didn't work: …". MAVIS understood through the model but answered in lines written in advance.
+
+**Decision:**
+- **The model says what it's doing.** It answers `DO <action> | <words>`, and the words are whatever it chooses to say as it acts. The grammar requires them. Free-text arguments stop before the `|`.
+- **Actions report facts, not sentences.** When a request can't be done as asked, the code produces the fact of what happened, and the model tells it in its own words. Examples: the app isn't open, several apps fit, the level is out of range, or the model named something never said. The fact reaches the model as a `result`, and new rule 19 tells it to report briefly and keep names exact.
+- **Failures are told the same way.** When an action fails, the executor stops the words and reports the error, and the planner hands the reason to the model. Undo's outcome is told the same way once it's known.
+- **Media notes:** playing falls back to a search page, an app can't search inside itself, or nothing is found. Each is a note on the plan that the model tells, in place of the words it chose before knowing.
+- **Removed:** the `says` column of the action catalogue, every fixed reply in the planner's action paths, the media sentences and the executor's `failure_line`.
+
+**Still fixed text, for step 1's next parts:** the Sentinel's answers, the permission gate's questions, "didn't catch that", the microphone warnings, and the line used when the model itself fails.
+
+**Evidence:**
+- **Proven** (275 + 277 tests):
+  - Successful actions carry the model's words.
+  - Refused choices reach the model as a result, never as a fixed sentence.
+  - A failed action's reason goes back to the model.
+  - Undo isn't spoken over.
+  - Session actions speak first.
+  - Clippy is unchanged. Ruff is clean. The grammar compiles.
+- **Reasoned:** a failure or a deviation costs one more short model call. Success costs nothing extra, because the words come in the same call that chose the action.
+- **Not run on hardware.**
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
