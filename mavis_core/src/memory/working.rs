@@ -46,9 +46,8 @@ const EARLIER_KEPT: usize = 10;
 const EARLIER_BYTES: usize = 80;
 
 /// A name is one word of letters (apostrophes and hyphens allowed, as in
-/// O'Neil or Anne-Marie) under 30 bytes. What makes a word a *name* is how
-/// it was said — see `extract_user_name` — not whether it's missing from a
-/// list of words that aren't names.
+/// O'Neil or Anne-Marie) under 30 bytes. Whether a word is being given as
+/// a name is the model's judgement (`user_name`), not a list of words.
 pub fn is_plausible_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() < 30
