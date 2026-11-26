@@ -2288,6 +2288,31 @@ And the user's name was learned from fixed sentence patterns ("my name is …", 
 - **Reasoned:** each told fact costs one short model call. Questions and warnings are rare, so speed is unaffected in ordinary use.
 - **Not run on hardware.**
 
+
+## 51. Holding a long conversation
+
+**Problem:** MAVIS saw the last three exchanges, with MAVIS's lines and the user's mixed into the system prompt as notes, plus a line quoting up to five older things the user said. That was a limit of Phi-3-mini's 4,096-token context, and its habit of copying its own earlier replies. A conversation of any length was lost.
+
+**Decision:**
+- **Qwen2.5-3B-Instruct is the default model,** with a 16,384-token context, the whole model on the graphics card.
+  - If the full offload doesn't fit, the worker retries with 20 layers on the card.
+  - The context is capped at what a model was trained for (Phi-3 mini 4,096, TinyLlama 2,048), so the fallbacks still work.
+- **The conversation goes in as real turns.** User and assistant messages come before the current one, not notes in the system prompt. The echo check stays: a "user" turn that repeats MAVIS's last reply is the mic hearing MAVIS.
+- **The core sends everything in the event ring,** and the worker keeps as much as fits the model's context, newest first. The oldest turns are dropped only when they don't fit, so a bigger model on a bigger machine sees more.
+- **Older turns are summarised, not dropped.** Turns leaving the ring are kept as "User: …" / "MAVIS: …" lines.
+  - Once eight are waiting, after a reply, the model folds them into a running summary.
+  - The summary, plus any lines not yet folded in, goes to the model as what came earlier.
+  - Summaries never go through the reply clean-up, are never spoken, and a failed one is retried later.
+  - A restart starts a new conversation. Facts the user told MAVIS are kept in their own stores.
+
+**Evidence:**
+- **Proven:**
+  - 276 + 278 tests pass. Clippy is unchanged. Ruff is clean.
+  - Turns leaving the ring are kept, sent to be summarised once enough wait, one request at a time, and folded in when the summary comes back.
+  - Checked directly in Python: the message builder makes alternating turns and drops the echo, and the fitting drops the oldest turns first and keeps the conversation starting with the user.
+- **Measured** (sizes): Qwen2.5-3B Q4_K_M is about 2 GB. Its key-value cache is about 36 KB per token, so about 0.6 GB at 16,384 tokens.
+- **Not run on hardware.** It needs the Qwen download.
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
