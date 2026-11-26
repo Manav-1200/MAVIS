@@ -50,13 +50,15 @@ search_url = "https://www.google.com/search?q={query}"
 provider = "local"
 
 [model]
-# What has actually been running. If the file is missing, the worker tries
-# the Phi-3 and TinyLlama files in the same folder.
-path = "~/.local/share/mavis/models/Phi-3-mini-4k-instruct-Q4_K_M.gguf"
-# Qwen2.5-3B-Instruct (Q4_K_M, about 2 GB) is the candidate for choosing
-# actions; any file with "qwen" in its name uses its chat format.
-n_ctx = 4096
-n_gpu_layers = 20        # full offload (-1) failed on 6 GB
+# Qwen2.5-3B-Instruct, Q4_K_M (about 2 GB). If the file is missing, the
+# worker tries Qwen, Phi-3 and TinyLlama files in the same folder.
+path = "~/.local/share/mavis/models/qwen2.5-3b-instruct-q4_k_m.gguf"
+# How much conversation the model can see at once, in tokens. Capped at
+# what the model was trained for (Phi-3 mini: 4096).
+n_ctx = 16384
+# -1: the whole model on the graphics card. If it doesn't fit, the worker
+# retries with 20 layers there and the rest on the processor.
+n_gpu_layers = -1
 verbose = false
 
 [worker]
