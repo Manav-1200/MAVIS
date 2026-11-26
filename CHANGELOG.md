@@ -39,6 +39,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Changed
+- **MAVIS says it in its own words.** Actions no longer come with fixed sentences: the model says what it's doing as it acts, and when something can't be done or fails, MAVIS tells you what happened in its own words.
 - **Code comments without test history:** dates, run references and quoted transcripts moved out of the code. The reasons stay; the history lives in `DECISIONS.md`.
 - **No phrase lists left.** MAVIS's answers to "Shall I…?", questions about system changes, "stop", looking back over past days and remembering facts all go through the model as actions (`confirm`, `cancel`, `system_changes`, `update_details`, `stop`, `look_back`, `remember`). The word lists, the Sentinel's question grammar, time-phrase parsing, the command tables, the reply filters and the real names in tests and comments are gone.
 - **High-risk actions are asked twice,** the second time saying they can't be undone, instead of needing "yes, administrator". A tap on the orb never answers them.
