@@ -897,14 +897,14 @@ impl Capture {
         });
     }
 
-    /// Something MAVIS should say about its own hearing.
-    fn publish_say(&self, text: &str) {
+    /// Something about its own hearing, for MAVIS to tell in its own words.
+    fn publish_tell(&self, fact: &str) {
         self.bus.publish(Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
             source: "stt".to_string(),
-            event_type: EventType::PlanReady,
-            payload: serde_json::json!({ "plan": { "type": "say", "text": text } }),
+            event_type: EventType::Tell,
+            payload: serde_json::json!({ "fact": fact }),
         });
     }
 
@@ -1049,7 +1049,7 @@ impl Capture {
                 "VAD: sound keeps arriving below the speech threshold — the mic is probably too quiet \
                  (wpctl set-volume @DEFAULT_AUDIO_SOURCE@ 5%+)"
             );
-            self.publish_say("I can hear sound, but it's too quiet for me to make out words. Your microphone level may be too low.");
+            self.publish_tell("You can hear sound, but it's too quiet to make out words: their microphone level is probably too low.");
         }
 
         // Someone has talked over MAVIS long enough to be the user, not a
