@@ -171,8 +171,8 @@ impl PermissionGate {
                     "PermissionGate: holding action (risk {}, {})",
                     assessment.score, assessment.reason
                 );
-                // Say what would run, not only why it needs asking.
-                let question = format!("Shall I {}? It {}.", assessment.what, assessment.reason);
+                // What would run, not only why it needs asking.
+                let question = format!("whether you should {}, since it {}", assessment.what, assessment.reason);
                 let asked_at = Instant::now();
                 self.pending = Some(Pending {
                     plan,
@@ -185,11 +185,11 @@ impl PermissionGate {
                 });
                 self.set_awaiting(Some(asked_at), Some(&question));
                 self.show("asking");
-                self.speak(question);
+                self.tell(format!("Nothing has run yet. Ask the user {}.", question));
             }
             Verdict::Deny(why) => {
                 warn!("PermissionGate: denied — {}", why);
-                self.speak("I won't do that. It's not reversible.".to_string());
+                self.tell(format!("You won't do that, and nothing ran: {}.", why));
             }
         }
     }
@@ -219,16 +219,16 @@ impl PermissionGate {
             self.set_awaiting(None, None);
             self.show("answered");
             self.record(&pending, "declined", "user did not confirm").await;
-            self.speak("Cancelled.".to_string());
+            self.tell("They said no, so it was cancelled and nothing ran.".to_string());
             return;
         }
         if pending.requires_explicit && !pending.asked_twice {
-            let question = format!("This can't be undone. Are you sure you want me to {}?", pending.what);
+            let question = format!("whether they're sure you should {}, since it can't be undone", pending.what);
             pending.asked_twice = true;
             pending.asked_at = Instant::now();
             self.set_awaiting(Some(pending.asked_at), Some(&question));
             self.pending = Some(pending);
-            self.speak(question);
+            self.tell(format!("Nothing has run yet. Ask the user once more {}.", question));
             return;
         }
         info!("PermissionGate: confirmed by user, executing");
@@ -266,7 +266,7 @@ impl PermissionGate {
     /// click must not run that.
     async fn tapped(&mut self, _tap: &Event) {
         match &self.pending {
-            Some(p) if p.requires_explicit => self.speak("This one needs a spoken answer.".to_string()),
+            Some(p) if p.requires_explicit => self.tell("A tap isn't enough for this one. Ask them to answer out loud.".to_string()),
             Some(_) => {
                 info!("PermissionGate: answered by a tap on the orb");
                 self.answered(true).await;
@@ -300,15 +300,14 @@ impl PermissionGate {
         });
     }
 
-    /// Refusals still reach the user as speech, via an already-approved plan
-    /// so they don't loop back through this gate.
-    fn speak(&self, text: String) {
+    /// Questions and refusals are told by the model, in its own words.
+    fn tell(&self, fact: String) {
         self.bus.publish(Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
             source: "permission_gate".to_string(),
-            event_type: EventType::PlanApproved,
-            payload: serde_json::json!({ "plan": {"type": "say", "text": text} }),
+            event_type: EventType::Tell,
+            payload: serde_json::json!({ "fact": fact }),
         });
     }
 }
@@ -426,8 +425,8 @@ mod tests {
         event(EventType::Confirmation, serde_json::json!({ "approved": approved }))
     }
 
-    /// Everything the gate published since the last call: (spoken lines,
-    /// shell commands approved to run, orb states).
+    /// Everything the gate published since the last call: (facts handed to
+    /// the model to tell, shell commands approved to run, orb states).
     fn published(rx: &mut tokio::sync::broadcast::Receiver<Event>) -> (Vec<String>, Vec<String>, Vec<String>) {
         let (mut spoken, mut approved, mut shown) = (Vec::new(), Vec::new(), Vec::new());
         while let Ok(e) = rx.try_recv() {
@@ -442,6 +441,7 @@ mod tests {
                         }
                     }
                 }
+                EventType::Tell => spoken.push(e.payload["fact"].as_str().unwrap_or("").to_string()),
                 EventType::UiStateChange => shown.push(e.payload["state"].as_str().unwrap_or("").to_string()),
                 _ => {}
             }
@@ -462,7 +462,8 @@ mod tests {
         r.gate.review(plan_ready("rm notes.txt")).await;
 
         let (spoken, approved, shown) = published(&mut r.rx);
-        assert_eq!(spoken, ["Shall I run rm notes.txt? It modifies or deletes data."]);
+        assert_eq!(spoken.len(), 1);
+        assert!(spoken[0].contains("run rm notes.txt, since it modifies or deletes data"), "{}", spoken[0]);
         assert!(approved.is_empty(), "nothing runs before the answer");
         assert_eq!(shown, ["asking"]);
     }
@@ -473,7 +474,7 @@ mod tests {
         r.gate.review(plan_ready("rm notes.txt")).await;
         published(&mut r.rx);
 
-        assert!(r.awaiting.lock().unwrap().question().unwrap().starts_with("Shall I run rm notes.txt"));
+        assert!(r.awaiting.lock().unwrap().question().unwrap().contains("run rm notes.txt"));
         r.gate.answered(true).await;
 
         let (_, approved, shown) = published(&mut r.rx);
@@ -492,7 +493,8 @@ mod tests {
 
         let (spoken, approved, _) = published(&mut r.rx);
         assert!(approved.is_empty());
-        assert_eq!(spoken, ["Cancelled."]);
+        assert_eq!(spoken.len(), 1);
+        assert!(spoken[0].contains("cancelled"), "{}", spoken[0]);
         assert_eq!(outcomes(&r.audit).await, ["held_for_confirmation", "declined"]);
     }
 
@@ -501,11 +503,11 @@ mod tests {
         let mut r = rig("admin");
         r.gate.review(plan_ready("sudo pacman -Syu")).await;
         let (spoken, _, _) = published(&mut r.rx);
-        assert!(spoken[0].contains("Shall I run sudo pacman -Syu"), "{}", spoken[0]);
+        assert!(spoken[0].contains("run sudo pacman -Syu"), "{}", spoken[0]);
         r.gate.answered(true).await;
         let (spoken, approved, _) = published(&mut r.rx);
         assert!(approved.is_empty(), "one yes is not enough");
-        assert!(spoken[0].starts_with("This can't be undone."), "{}", spoken[0]);
+        assert!(spoken[0].contains("once more") && spoken[0].contains("can't be undone"), "{}", spoken[0]);
         r.gate.answered(true).await;
         assert_eq!(published(&mut r.rx).1, ["sudo pacman -Syu"]);
     }
@@ -615,7 +617,8 @@ mod tests {
         r.gate.tapped(&event(EventType::OrbTap, serde_json::json!({}))).await;
         let (spoken, approved, _) = published(&mut r.rx);
         assert!(approved.is_empty());
-        assert_eq!(spoken, ["This one needs a spoken answer."]);
+        assert_eq!(spoken.len(), 1);
+        assert!(spoken[0].contains("out loud"), "{}", spoken[0]);
         assert!(r.awaiting.lock().unwrap().question().is_some(), "still open for a spoken answer");
     }
 
@@ -634,7 +637,7 @@ mod tests {
         let plan = serde_json::json!({ "actions": [{ "type": "shell", "command": "rm -rf /" }] });
         r.gate.review(event(EventType::PlanReady, serde_json::json!({ "plan": plan }))).await;
         let (spoken, approved, _) = published(&mut r.rx);
-        assert_eq!(spoken, ["I won't do that. It's not reversible."]);
+        assert_eq!(spoken, ["You won't do that, and nothing ran: recursive deletion rooted at /."]);
         assert!(approved.is_empty());
         r.gate.answered(true).await;
         assert!(published(&mut r.rx).1.is_empty(), "there is nothing to say yes to");
