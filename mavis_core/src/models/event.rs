@@ -57,6 +57,9 @@ pub enum EventType {
     /// The answer to an open "Shall I…?", as the model understood it:
     /// `{"approved": true|false}`. Published by the planner.
     Confirmation,
+    /// Something for MAVIS to tell the user in its own words:
+    /// `{"fact": "..."}`. The planner hands it to the model.
+    Tell,
 }
 
 #[cfg(test)]
