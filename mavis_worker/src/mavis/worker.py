@@ -20,6 +20,7 @@ from mavis.inference import (
     answer_grammar,
     build_chat_messages,
     drop_name,
+    summary_messages,
     user_name,
     with_actions,
 )
@@ -81,6 +82,7 @@ class WorkerServer:
         self.engine = LlamaEngine(
             model_path=self.config.get("model.path"),
             n_gpu_layers=self.config.get("model.n_gpu_layers", 20),
+            n_ctx=self.config.get("model.n_ctx", 4096),
         )
         # [stt] in config.toml. "small.en" hears English better than
         # "small" at the same speed.
@@ -180,6 +182,8 @@ class WorkerServer:
             return await self._health()
         elif req_type == "chat":
             return await self._chat(payload)
+        elif req_type == "summarise":
+            return await self._summarise(payload)
         elif req_type == "generate":
             return await self._generate(payload)
         elif req_type == "stt":
@@ -284,6 +288,23 @@ class WorkerServer:
                     "error": f"Inference failed: {e!s}",
                 }
             )
+
+    async def _summarise(self, payload: dict) -> dict:
+        """Fold new lines of the conversation into the running summary."""
+        messages = summary_messages(payload.get("summary", ""), payload.get("lines") or [])
+        try:
+            loop = asyncio.get_event_loop()
+            result = await loop.run_in_executor(
+                self.llm_executor,
+                lambda: self.engine.chat(
+                    messages=messages, max_tokens=200, temperature=0.2, raw=True
+                ),
+            )
+            text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            return _make_event({"type": "summary", "text": text})
+        except (RuntimeError, OSError, ValueError) as e:
+            # Quietly: a summary that didn't happen is tried again later.
+            return _make_event({"type": "summary_failed", "error": str(e)})
 
     async def _generate(self, payload: dict) -> dict:
         prompt = payload.get("prompt", "")
