@@ -30,7 +30,8 @@ CRITICAL RULES — violations break the user experience:
 15. If the user asks you to repeat, or says they didn't hear you, say your last reply again. Otherwise never repeat a reply you already gave: if the message is unclear or looks garbled, say you didn't catch it and ask what they meant, rather than answering the previous question again.
 16. The facts listed at the end of this message are current and outrank anything in the conversation. If an earlier answer of yours contradicts them, it was wrong — use the facts.
 17. Never give a level, setting or number about this computer (volume, brightness, battery and so on) or a keyboard shortcut that isn't in those facts; if you weren't told it, say you don't know. If they ask how to do something you can do for them, like switching workspaces, opening or closing apps, volume or brightness, tell them they can just ask you.
-18. If the facts say you just asked the user something, decide from their reply whether it's a yes or a no to it; anything else is a new message."""
+18. If the facts say you just asked the user something, decide from their reply whether it's a yes or a no to it; anything else is a new message.
+19. If the facts give the result of something you tried, tell the user what happened in your own words, briefly, keeping names exactly as given. If it needs an answer from them, ask for it."""
 
 
 def user_name(working_memory: list[dict[str, Any]] | None) -> str | None:
@@ -68,6 +69,7 @@ LIVE_SOURCES = {
     "datetime",
     "levels",
     "waiting",
+    "result",
     "active_window",
     "open_windows",
     "desktop",
@@ -165,7 +167,7 @@ def build_chat_messages(
 ACTIONS_PROMPT = """
 
 HOW YOU ANSWER: write DO followed by one action, or SAY followed by what you say out loud.
-Use DO only when the user asks you to do something now and one of your actions does exactly that. Write the action's name, then its value in place of the <part>, without the angle brackets.
+Use DO only when the user asks you to do something now and one of your actions does exactly that. Write the action's name, then its value in place of the <part>, without the angle brackets. Then write " | " and a few words you say out loud as you do it, in your own way.
 Use SAY for everything else: questions (even about things an action could change), conversation, and requests you can't carry out or can't make sense of, in which case ask.
 Never SAY what the user should do or what you will do instead of acting: if an action does it, use DO. A SAY never says you did, are doing or will do something.
 
@@ -183,8 +185,9 @@ def with_actions(system_prompt: str, actions: list[str], apps: list[str]) -> str
 
 
 def answer_grammar(actions: list[str], targets: list[str] | None = None) -> str:
-    """GBNF allowing only "SAY <text>" or "DO <action>" with arguments of the
-    right kind: a level is a number 0-100, an app is one of `targets`."""
+    """GBNF allowing only "SAY <text>" or "DO <action> | <words>", with
+    arguments of the right kind: a level is a number 0-100, an app is one
+    of `targets`, and free text stops before the words."""
 
     def literal(text: str) -> str:
         return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -202,18 +205,19 @@ def answer_grammar(actions: list[str], targets: list[str] | None = None) -> str:
         if not args:
             branches.append(literal(name))
         else:
-            branches.append(f"{literal(name + ' ')} {kinds.get(args, 'text')}")
+            branches.append(f"{literal(name + ' ')} {kinds.get(args, 'free')}")
     names = [t for t in dict.fromkeys(targets or []) if t.strip()]
-    app = " | ".join(literal(t) for t in names) if names else "text"
+    app = " | ".join(literal(t) for t in names) if names else "free"
     return "\n".join(
         [
-            'root ::= "DO " action | "SAY " text',
+            'root ::= "DO " action " | " text | "SAY " text',
             "action ::= " + " | ".join(branches),
             'level ::= "100" | [1-9] [0-9] | [0-9]',
             "number ::= [1-9] [0-9]?",
             f"app ::= {app}",
             'website ::= [a-zA-Z0-9-]+ ("." [a-zA-Z0-9-]+)+',
             "text ::= [^\\n]+",
+            "free ::= [^|\\n]+",
             "",
         ]
     )
