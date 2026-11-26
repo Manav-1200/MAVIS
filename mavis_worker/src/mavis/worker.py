@@ -255,6 +255,7 @@ class WorkerServer:
                     {
                         "type": "command",
                         "command": result["action"],
+                        "words": result.get("words", ""),
                         "text": payload.get("text", ""),
                     }
                 )
