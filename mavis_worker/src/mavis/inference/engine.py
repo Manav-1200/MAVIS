@@ -341,8 +341,8 @@ class LlamaEngine:
         temperature: float = 0.7,
         grammar: str | None = None,
     ) -> dict[str, Any]:
-        """A reply. With a grammar the model answers "DO …" or "SAY …";
-        a DO comes back as "action", untouched by the reply clean-up."""
+        """A reply. With a grammar the model answers "DO … | words" or
+        "SAY …"; a DO comes back as "action", with its spoken "words"."""
         self.load_model()
         started = time.perf_counter()
         extra = {"grammar": self._grammar(grammar)} if grammar else {}
@@ -386,15 +386,18 @@ class LlamaEngine:
         )
 
         action = None
+        words = ""
         if grammar:
             kind, _, body = raw_text.strip().partition(" ")
             if kind == "DO":
-                action = body.strip()
+                action, _, words = body.partition(" | ")
+                action, words = action.strip(), self._post_process(words)
             raw_text = body if kind in ("DO", "SAY") else raw_text
         text = "" if action else self._post_process(raw_text)
 
         return {
             "action": action,
+            "words": words,
             "choices": [
                 {
                     "message": {"content": text, "role": "assistant"},
