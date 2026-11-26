@@ -22,10 +22,22 @@ MAX_SENTENCES = 3
 MAX_CHARS = 320
 
 
+# The most context each model was trained for; more than that only confuses it.
+TRAINED_CONTEXT = {"phi3": 4096, "tinyllama": 2048}
+
+# Fallback layers on the graphics card for a model other than the one
+# configured, which a full offload might not fit.
+FALLBACK_GPU_LAYERS = 20
+
+# Room kept free in the context beyond the reply.
+CONTEXT_MARGIN = 64
+
+
 class LlamaEngine:
-    def __init__(self, model_path: str | None = None, n_gpu_layers: int = 20):
+    def __init__(self, model_path: str | None = None, n_gpu_layers: int = 20, n_ctx: int = 4096):
         self._model_path = model_path
         self._n_gpu_layers = n_gpu_layers
+        self._n_ctx = n_ctx
         self._llm: Llama | None = None
         self._model_name_hint: str = ""
 
@@ -35,7 +47,13 @@ class LlamaEngine:
             if configured.exists():
                 return str(configured)
 
+        self._n_gpu_layers = (
+            min(self._n_gpu_layers, FALLBACK_GPU_LAYERS)
+            if self._n_gpu_layers >= 0
+            else FALLBACK_GPU_LAYERS
+        )
         candidates = [
+            Path.home() / ".local/share/mavis/models/qwen2.5-3b-instruct-q4_k_m.gguf",
             Path.home() / ".local/share/mavis/models/Phi-3-mini-4k-instruct-Q4_K_M.gguf",
             Path.home() / ".local/share/mavis/models/tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf",
         ]
@@ -64,14 +82,33 @@ class LlamaEngine:
 
         path = self._resolve_model_path()
         self._model_name_hint = self._detect_model_type(path)
-        print(f"[engine] Loading model: {path} (type={self._model_name_hint})")
-
-        self._llm = Llama(
-            model_path=path,
-            n_ctx=4096,
-            n_gpu_layers=self._n_gpu_layers,
-            verbose=False,
+        self._n_ctx = min(self._n_ctx, TRAINED_CONTEXT.get(self._model_name_hint, self._n_ctx))
+        print(
+            f"[engine] Loading model: {path} (type={self._model_name_hint}, context={self._n_ctx})"
         )
+
+        try:
+            self._llm = Llama(
+                model_path=path,
+                n_ctx=self._n_ctx,
+                n_gpu_layers=self._n_gpu_layers,
+                verbose=False,
+            )
+        except ValueError:
+            if self._n_gpu_layers < 0 or self._n_gpu_layers > FALLBACK_GPU_LAYERS:
+                # Didn't fit on the graphics card whole: keep part on the processor.
+                print(
+                    f"[engine] Loading failed; retrying with {FALLBACK_GPU_LAYERS} layers on the GPU"
+                )
+                self._n_gpu_layers = FALLBACK_GPU_LAYERS
+                self._llm = Llama(
+                    model_path=path,
+                    n_ctx=self._n_ctx,
+                    n_gpu_layers=self._n_gpu_layers,
+                    verbose=False,
+                )
+            else:
+                raise
         print("[engine] Model loaded.")
 
     def unload(self):
@@ -194,6 +231,30 @@ class LlamaEngine:
             return "\n".join(parts)
 
         return None
+
+    def _tokens(self, messages: list[dict[str, str]]) -> int:
+        prompt = self._format_chat_prompt(messages)
+        if prompt is None:
+            prompt = "\n".join(m.get("content", "") for m in messages)
+        return len(self._llm.tokenize(prompt.encode("utf-8"), add_bos=False, special=True))
+
+    def _fit(self, messages: list[dict[str, str]], max_tokens: int) -> list[dict[str, str]]:
+        """Drop the oldest turns of the conversation until the prompt fits the
+        context with room for the reply. The system prompt and the current
+        message always stay."""
+        budget = self._n_ctx - max_tokens - CONTEXT_MARGIN
+        fitted = list(messages)
+        dropped = 0
+        while len(fitted) > 2 and self._tokens(fitted) > budget:
+            del fitted[1]
+            dropped += 1
+            # The conversation still starts with the user.
+            while len(fitted) > 2 and fitted[1].get("role") == "assistant":
+                del fitted[1]
+                dropped += 1
+        if dropped:
+            print(f"[engine] Context: {dropped} oldest turn(s) left out to fit", flush=True)
+        return fitted
 
     def _get_stop_tokens(self) -> list[str]:
         """Return model-specific stop tokens to prevent runaway generation."""
@@ -340,12 +401,15 @@ class LlamaEngine:
         max_tokens: int = 256,
         temperature: float = 0.7,
         grammar: str | None = None,
+        raw: bool = False,
     ) -> dict[str, Any]:
         """A reply. With a grammar the model answers "DO … | words" or
-        "SAY …"; a DO comes back as "action", with its spoken "words"."""
+        "SAY …"; a DO comes back as "action", with its spoken "words".
+        `raw` keeps the text whole, for notes rather than speech."""
         self.load_model()
         started = time.perf_counter()
         extra = {"grammar": self._grammar(grammar)} if grammar else {}
+        messages = self._fit(messages, max_tokens)
 
         manual_prompt = self._format_chat_prompt(messages)
         if manual_prompt is not None:
@@ -393,7 +457,12 @@ class LlamaEngine:
                 action, _, words = body.partition(" | ")
                 action, words = action.strip(), self._post_process(words)
             raw_text = body if kind in ("DO", "SAY") else raw_text
-        text = "" if action else self._post_process(raw_text)
+        if raw:
+            for stop in self._get_stop_tokens():
+                raw_text = raw_text.split(stop, 1)[0]
+            text = raw_text.strip()
+        else:
+            text = "" if action else self._post_process(raw_text)
 
         return {
             "action": action,
