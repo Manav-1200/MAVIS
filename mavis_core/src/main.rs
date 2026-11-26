@@ -570,9 +570,12 @@ async fn main() -> Result<()> {
                         id: uuid::Uuid::new_v4(),
                         timestamp: chrono::Utc::now(),
                         source: "stt".to_string(),
-                        event_type: EventType::PlanReady,
+                        event_type: EventType::Tell,
                         payload: serde_json::json!({
-                            "plan": {"type": "say", "text": "Sorry, I didn't catch that."}
+                            "fact": format!(
+                                "The user said something too unclear to make out (it sounded like \"{}\"). Ask them to say it again.",
+                                text
+                            )
                         }),
                     });
                 } else {
