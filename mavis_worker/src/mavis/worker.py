@@ -15,15 +15,15 @@ from pathlib import Path
 from mavis.core.config import load_config
 from mavis.core.logger import setup_logging
 from mavis.inference import (
-    SAY_PROMPT,
+    REPLY_GRAMMAR,
     SYSTEM_PROMPT,
     LlamaEngine,
-    answer_grammar,
     build_chat_messages,
     drop_name,
     summary_messages,
+    tool_grammar,
     user_name,
-    with_actions,
+    with_tools,
 )
 from mavis.stt.engine import STTEngine
 from mavis.tts.engine import TTSEngine
@@ -232,12 +232,13 @@ class WorkerServer:
                 }
             )
 
-        # Always DO/SAY form, so replies match the conversation they follow.
+        # With actions, a reply or one tool call; without, a reply only.
         if actions:
-            system_prompt = with_actions(SYSTEM_PROMPT, actions, payload.get("apps") or [])
+            system_prompt = with_tools(SYSTEM_PROMPT, actions, payload.get("apps") or [])
+            grammar = tool_grammar(actions, payload.get("targets") or [])
         else:
-            system_prompt = SYSTEM_PROMPT + SAY_PROMPT
-        grammar = answer_grammar(actions, payload.get("targets") or [])
+            system_prompt = SYSTEM_PROMPT
+            grammar = REPLY_GRAMMAR
         self.system_prompt = system_prompt
         chat_messages = build_chat_messages(
             user_messages=messages,
@@ -261,7 +262,7 @@ class WorkerServer:
                     {
                         "type": "command",
                         "command": result["action"],
-                        "words": result.get("words", ""),
+                        "call": result.get("call", ""),
                         "text": payload.get("text", ""),
                     }
                 )
