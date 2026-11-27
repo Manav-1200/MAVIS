@@ -2313,6 +2313,35 @@ And the user's name was learned from fixed sentence patterns ("my name is …", 
 - **Measured** (sizes): Qwen2.5-3B Q4_K_M is about 2 GB. Its key-value cache is about 36 KB per token, so about 0.6 GB at 16,384 tokens.
 - **Not run on hardware.** It needs the Qwen download.
 
+
+## 52. The first Qwen run (2026-11-27)
+
+**What happened** (four minutes, Sentinel off):
+- **Speed was good:** the first token came in 0.1–0.5 s and replies took under a second.
+- **Replies turned into narration and echoes.**
+  - The words after a DO came out as descriptions of the action: "setting the volume to 40", "switching to workspace 3".
+  - With those in the conversation as MAVIS's turns, later answers copied the pattern. One reply was "| asking what you see". "What's my name?" got "what's your name?" back, and the answer came one turn late.
+  - One SAY carried an action inside it: "volume up | turning the volume up a step" was spoken aloud.
+- **Questions were acted on.**
+  - "What's my volume at?" set the volume to 100.
+  - "Are you online?" chose to open a made-up website. Grounding refused it, so nothing opened.
+- **"What am I looking at?"** picked `look_back`, misled by the name, and the answer said MAVIS couldn't see the screen, even though the focused window is among its facts.
+- **"What changed recently?"** couldn't be answered, because the Sentinel wasn't switched on for the run (`MAVIS_SENTINEL=1`).
+- **Not reached:** asking first, a long conversation, the summary, media.
+
+**Decision** (the abilities behind these, not the sentences):
+- **MAVIS's turns go to the model in its own answer form.** "DO volume_set 40 | Done." or "SAY …", instead of bare words. The model sees what it did and what it said, so its history no longer teaches narration. The planner sends the action line with each plan (`did`).
+- **Every reply is held to the DO/SAY form,** including results and memory answers, which allow only SAY. Spoken text can't contain the `|` that ends an action, so an action can't be read aloud.
+- **The words after a DO** are one short sentence to the user in MAVIS's own voice, never a description of the action.
+- **The question rule is plainer:** a question is answered from the facts and changes nothing, even when an action could change what it asks about.
+- **`look_back` is now `user_history`,** described as being for questions about what the user did in the past.
+- **Acting calls use temperature 0.3** (was 0.4) for steadier choices.
+
+**Evidence:**
+- **Proven:** 277 + 279 tests pass. The turn form is tested. Both grammars compile. Clippy is unchanged. Ruff is clean.
+- **Reasoned:** the echoes and narration followed from MAVIS's own narrated turns in the conversation, and appeared only after them.
+- **Not yet run again on hardware.**
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
