@@ -1,5 +1,6 @@
 # mavis_worker/src/mavis/inference/engine.py
 import gc
+import json
 import os
 import re
 import subprocess
@@ -232,6 +233,18 @@ class LlamaEngine:
 
         return None
 
+    @staticmethod
+    def _read_call(call: str) -> str | None:
+        """'<tool_call>{"name": "volume_set", "arguments": {"level": 40}}</tool_call>'
+        -> "volume_set 40"."""
+        body = call.removeprefix("<tool_call>").split("</tool_call>")[0].strip()
+        try:
+            parsed = json.loads(body)
+        except json.JSONDecodeError:
+            return None
+        args = [str(v) for v in (parsed.get("arguments") or {}).values()]
+        return " ".join([str(parsed.get("name", "")), *args]).strip() or None
+
     def _tokens(self, messages: list[dict[str, str]]) -> int:
         prompt = self._format_chat_prompt(messages)
         if prompt is None:
@@ -403,9 +416,10 @@ class LlamaEngine:
         grammar: str | None = None,
         raw: bool = False,
     ) -> dict[str, Any]:
-        """A reply. With a grammar the model answers "DO … | words" or
-        "SAY …"; a DO comes back as "action", with its spoken "words".
-        `raw` keeps the text whole, for notes rather than speech."""
+        """A reply, or a tool call. A call comes back as "action" (the
+        action's name and argument, as the core reads them) and "call" (as
+        the model wrote it). `raw` keeps the text whole, for notes rather
+        than speech."""
         self.load_model()
         started = time.perf_counter()
         extra = {"grammar": self._grammar(grammar)} if grammar else {}
@@ -449,14 +463,10 @@ class LlamaEngine:
             flush=True,
         )
 
-        action = None
-        words = ""
-        if grammar:
-            kind, _, body = raw_text.strip().partition(" ")
-            if kind == "DO":
-                action, _, words = body.partition(" | ")
-                action, words = action.strip(), self._post_process(words)
-            raw_text = body if kind in ("DO", "SAY") else raw_text
+        action, call = None, ""
+        if raw_text.strip().startswith("<tool_call>"):
+            call = raw_text.strip()
+            action = self._read_call(call)
         if raw:
             for stop in self._get_stop_tokens():
                 raw_text = raw_text.split(stop, 1)[0]
@@ -466,7 +476,7 @@ class LlamaEngine:
 
         return {
             "action": action,
-            "words": words,
+            "call": call,
             "choices": [
                 {
                     "message": {"content": text, "role": "assistant"},
