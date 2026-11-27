@@ -174,14 +174,22 @@ def summary_messages(summary: str, lines: list[str]) -> list[dict[str, str]]:
 ACTIONS_PROMPT = """
 
 HOW YOU ANSWER: write DO followed by one action, or SAY followed by what you say out loud.
-Use DO only when the user asks you to do something now and one of your actions does exactly that. Write the action's name, then its value in place of the <part>, without the angle brackets. Then write " | " and a few words you say out loud as you do it, in your own way.
-Use SAY for everything else: questions (even about things an action could change), conversation, and requests you can't carry out or can't make sense of, in which case ask.
+Use DO only when the user asks you to do something now and one of your actions does exactly that. Write the action's name, then its value in place of the <part>, without the angle brackets. Then write " | " and one short sentence spoken to the user in your own voice, the way you'd answer a friend; never a description of what you're doing.
+Use SAY for everything else: any question, even one about something an action could change (answer it from the facts and change nothing), conversation, and requests you can't carry out or can't make sense of, in which case ask.
 Never SAY what the user should do or what you will do instead of acting: if an action does it, use DO. A SAY never says you did, are doing or will do something.
+Your earlier answers appear in the conversation in the same DO and SAY form.
 
 Your actions:
 {actions}
 
 Installed apps: {apps}"""
+
+
+# How the model answers when there's nothing to act on (telling a result).
+SAY_PROMPT = """
+
+HOW YOU ANSWER: write SAY followed by what you say out loud, to the user, in your own voice.
+Your earlier answers appear in the conversation as DO (something you did) or SAY."""
 
 
 def with_actions(system_prompt: str, actions: list[str], apps: list[str]) -> str:
@@ -194,7 +202,8 @@ def with_actions(system_prompt: str, actions: list[str], apps: list[str]) -> str
 def answer_grammar(actions: list[str], targets: list[str] | None = None) -> str:
     """GBNF allowing only "SAY <text>" or "DO <action> | <words>", with
     arguments of the right kind: a level is a number 0-100, an app is one
-    of `targets`, and free text stops before the words."""
+    of `targets`, and free text stops before the words. Without actions,
+    only SAY. Spoken text never contains the "|" that ends an action."""
 
     def literal(text: str) -> str:
         return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
@@ -215,6 +224,8 @@ def answer_grammar(actions: list[str], targets: list[str] | None = None) -> str:
             branches.append(f"{literal(name + ' ')} {kinds.get(args, 'free')}")
     names = [t for t in dict.fromkeys(targets or []) if t.strip()]
     app = " | ".join(literal(t) for t in names) if names else "free"
+    if not branches:
+        return 'root ::= "SAY " text\ntext ::= [^|\\n]+\n'
     return "\n".join(
         [
             'root ::= "DO " action " | " text | "SAY " text',
@@ -223,7 +234,7 @@ def answer_grammar(actions: list[str], targets: list[str] | None = None) -> str:
             "number ::= [1-9] [0-9]?",
             f"app ::= {app}",
             'website ::= [a-zA-Z0-9-]+ ("." [a-zA-Z0-9-]+)+',
-            "text ::= [^\\n]+",
+            "text ::= [^|\\n]+",
             "free ::= [^|\\n]+",
             "",
         ]
