@@ -483,21 +483,19 @@ pub(crate) fn plan_says(plan: &serde_json::Value) -> String {
         .join(" ")
 }
 
-/// A turn of MAVIS's in the DO/SAY form the model answers in.
+/// A turn of MAVIS's as the model wrote it: the tool call it made, or
+/// what it said.
 fn mavis_turn(payload: &serde_json::Value) -> String {
-    let said = payload.get("plan").map(plan_says).unwrap_or_default();
-    match (payload["did"].as_str(), said.is_empty()) {
-        (Some(did), true) => format!("DO {}", did),
-        (Some(did), false) => format!("DO {} | {}", did, said),
-        (None, false) => format!("SAY {}", said),
-        (None, true) => String::new(),
+    match payload["did"].as_str() {
+        Some(did) => did.to_string(),
+        None => payload.get("plan").map(plan_says).unwrap_or_default(),
     }
 }
 
-/// The plan with the model's words spoken alongside it, and any note from
-/// the plan: something that didn't go as asked, which the model tells
-/// instead of the words it chose before knowing.
-fn with_words(plan: serde_json::Value, words: &str) -> (serde_json::Value, Option<String>) {
+/// The plan with what happened told at its end, once everything before it
+/// has worked: a note when something didn't go as asked, or that it was
+/// done. The model says it in its own words.
+fn with_tell(plan: serde_json::Value, line: &str) -> serde_json::Value {
     let mut actions = plan.as_array().cloned().unwrap_or_else(|| vec![plan]);
     let notes: Vec<String> = actions
         .iter()
@@ -505,24 +503,21 @@ fn with_words(plan: serde_json::Value, words: &str) -> (serde_json::Value, Optio
         .filter_map(|a| a["text"].as_str().map(String::from))
         .collect();
     actions.retain(|a| a["type"] != "note");
-    // Undo's result is told once it's known; a plan that already speaks
-    // (the Sentinel's answer) needs no words before it.
-    let quiet = actions.iter().any(|a| a["type"] == "undo" || a["type"] == "say");
-    if !notes.is_empty() {
-        return (serde_json::Value::Array(actions), Some(notes.join(" ")));
+    // Undo's result is told once it's known.
+    if actions.iter().any(|a| a["type"] == "undo") {
+        return serde_json::Value::Array(actions);
     }
-    if !words.trim().is_empty() && !quiet {
-        let spoken = serde_json::json!({"type": "say", "text": words.trim()});
-        // Ending the session: said first, since nothing is heard after.
-        let ends_session =
-            actions.iter().any(|a| matches!(a["op"].as_str(), Some("lock" | "logout" | "suspend" | "poweroff" | "reboot")));
-        if ends_session {
-            actions.insert(0, spoken);
-        } else {
-            actions.push(spoken);
-        }
+    let fact = if notes.is_empty() { format!("Done: {}", line) } else { notes.join(" ") };
+    let tell = serde_json::json!({"type": "tell", "fact": fact});
+    // Ending the session: told first, since nothing is heard after.
+    let ends_session =
+        actions.iter().any(|a| matches!(a["op"].as_str(), Some("lock" | "logout" | "suspend" | "poweroff" | "reboot")));
+    if ends_session {
+        actions.insert(0, tell);
+    } else {
+        actions.push(tell);
     }
-    (serde_json::Value::Array(actions), None)
+    serde_json::Value::Array(actions)
 }
 
 /// The last `days` days, from local midnight, and how to name them.
@@ -1061,26 +1056,19 @@ impl Planner {
         Ok(())
     }
 
-    /// Carry out the model's "DO <action>", with `words` as what it says
-    /// while doing it. When the action can't be done as asked, what
-    /// happened goes back to the model to tell instead.
-    async fn carry_out(&self, line: &str, said: &str, words: &str) {
+    /// Carry out the action the model called (`line`; `call` is the call
+    /// as it wrote it). What happened goes back to the model to tell.
+    async fn carry_out(&self, line: &str, said: &str, call: &str) {
         match self.action_plan(line, said).await {
             Ok(plan) if plan.is_null() => {}
             Ok(plan) => {
-                let (plan, note) = with_words(plan, words);
-                if plan.as_array().is_some_and(|a| !a.is_empty()) {
-                    self.bus.publish(Event {
-                        id: uuid::Uuid::new_v4(),
-                        timestamp: chrono::Utc::now(),
-                        source: "planner".to_string(),
-                        event_type: EventType::PlanReady,
-                        payload: serde_json::json!({ "plan": plan, "did": line.trim() }),
-                    });
-                }
-                if let Some(note) = note {
-                    self.report(said, &note).await;
-                }
+                self.bus.publish(Event {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    source: "planner".to_string(),
+                    event_type: EventType::PlanReady,
+                    payload: serde_json::json!({ "plan": with_tell(plan, line.trim()), "did": call.trim() }),
+                });
             }
             Err(fact) => self.report(said, &fact).await,
         }
@@ -1234,7 +1222,7 @@ impl Planner {
         let kind = p["action_type"].as_str().unwrap_or_default();
         let ok = p["success"].as_bool().unwrap_or(true);
         let fact = match (kind, ok) {
-            ("say" | "notify", _) => return,
+            ("say" | "notify" | "tell", _) => return,
             ("undo", true) => format!("Undo ran: {}", p["output"].as_str().unwrap_or_default()),
             (_, true) => return,
             (_, false) => {
@@ -1708,8 +1696,8 @@ impl Planner {
                 EventType::PlanReady => ("mavis", ""),
                 _ => continue,
             };
-            // MAVIS's turns in the form it answers in: what it did, and what
-            // it said. Plain words would teach it to narrate instead of act.
+            // MAVIS's turns as it wrote them: tool calls stay tool calls, so
+            // the model sees what it did apart from what it said.
             let said;
             let content = if source == "mavis" {
                 said = mavis_turn(&event.payload);
@@ -1756,9 +1744,9 @@ impl Planner {
             "command" => {
                 let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or_default();
                 let action = payload.get("command").and_then(|v| v.as_str()).unwrap_or_default();
-                let words = payload.get("words").and_then(|v| v.as_str()).unwrap_or_default();
+                let call = payload.get("call").and_then(|v| v.as_str()).unwrap_or(action);
                 info!("Planner: model chose \"{}\" for \"{}\"", action, text);
-                self.carry_out(action, text, words).await;
+                self.carry_out(action, text, call).await;
                 self.maybe_summarise().await;
             }
             "summary" => {
@@ -2483,16 +2471,29 @@ mod tests {
         assert_eq!(a.what, "close Surfy Web Browser");
     }
 
-    /// MAVIS's earlier turns reach the model in the form it answers in.
+    /// MAVIS's earlier turns reach the model as it wrote them: a tool call
+    /// stays a tool call, a reply stays a reply.
     #[test]
-    fn earlier_turns_are_in_do_and_say_form() {
-        let did = serde_json::json!({"plan": [{"type": "system"}, {"type": "say", "text": "Done."}], "did": "volume_set 40"});
-        assert_eq!(mavis_turn(&did), "DO volume_set 40 | Done.");
-        let quiet = serde_json::json!({"plan": [{"type": "undo"}], "did": "undo"});
-        assert_eq!(mavis_turn(&quiet), "DO undo");
+    fn earlier_turns_are_as_the_model_wrote_them() {
+        let call = "<tool_call>\n{\"name\": \"undo\", \"arguments\": {}}\n</tool_call>";
+        let did = serde_json::json!({"plan": [{"type": "undo"}], "did": call});
+        assert_eq!(mavis_turn(&did), call);
         let said = serde_json::json!({"plan": {"type": "say", "text": "Hello."}});
-        assert_eq!(mavis_turn(&said), "SAY Hello.");
+        assert_eq!(mavis_turn(&said), "Hello.");
         assert_eq!(mavis_turn(&serde_json::json!({"plan": []})), "");
+    }
+
+    /// What happened is told at the end of the plan, once the rest worked;
+    /// first when the session is about to end.
+    #[test]
+    fn the_outcome_is_told_after_the_plan() {
+        let plan = with_tell(serde_json::json!([{"type": "system", "op": "volume_up"}]), "volume_up");
+        assert_eq!(plan[1], serde_json::json!({"type": "tell", "fact": "Done: volume_up"}));
+        let plan = with_tell(serde_json::json!([{"type": "system", "op": "logout"}]), "logout");
+        assert_eq!(plan[0]["type"], "tell");
+        let plan = with_tell(serde_json::json!([{"type": "app"}, {"type": "note", "text": "Only the search page."}]), "play x");
+        assert_eq!(plan[1]["fact"], "Only the search page.", "a note is told instead of done");
+        assert_eq!(with_tell(serde_json::json!([{"type": "undo"}]), "undo"), serde_json::json!([{"type": "undo"}]));
     }
 
     #[test]
@@ -2549,7 +2550,7 @@ mod tests {
             timestamp: chrono::Utc::now(),
             source: "worker".into(),
             event_type: EventType::WorkerResponse,
-            payload: serde_json::json!({ "type": "command", "command": action, "text": said, "words": "Sure." }),
+            payload: serde_json::json!({ "type": "command", "command": action, "text": said }),
         }
     }
 
@@ -2654,9 +2655,9 @@ mod tests {
         let plan = |i: usize| turns[i].clone().unwrap();
         let told = |i: usize| turns[i].clone().unwrap_err();
         assert_eq!(plan(0), serde_json::json!([{"type": "undo"}]), "undo's result is told once known");
-        assert_eq!((plan(1)[0]["op"].as_str(), plan(1)[1]["text"].as_str()), (Some("bluetooth_off"), Some("Sure.")));
-        assert_eq!(plan(2)[0]["type"], "say", "said before the session ends");
-        assert_eq!((plan(3)[0]["value"].as_u64(), plan(3)[1]["text"].as_str()), (Some(40), Some("Sure.")));
+        assert_eq!((plan(1)[0]["op"].as_str(), plan(1)[1]["type"].as_str()), (Some("bluetooth_off"), Some("tell")));
+        assert_eq!(plan(2)[0]["type"], "tell", "told before the session ends");
+        assert_eq!((plan(3)[0]["value"].as_u64(), plan(3)[1]["fact"].as_str()), (Some(40), Some("Done: volume_set 40")));
         assert!(told(4).contains("between 0 and 100"));
         assert!(told(5).contains("never named"), "an app nobody named");
         assert!(told(6).contains("isn't one of your actions"));
