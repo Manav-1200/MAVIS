@@ -2342,6 +2342,30 @@ And the user's name was learned from fixed sentence patterns ("my name is …", 
 - **Reasoned:** the echoes and narration followed from MAVIS's own narrated turns in the conversation, and appeared only after them.
 - **Not yet run again on hardware.**
 
+
+## 53. Acting through Qwen's own tool calls
+
+**Problem:** the second Qwen run (2026-11-27, three minutes) was worse than the first.
+- **Almost every reply was a fragment.** "What is my name?" got "your name." six times. "What changed on my system?" got the words "system_changes 1." spoken aloud. "What am I looking at?" got "what am I looking at."
+- **Only the plain reply calls were fluent.** These are the ones without the action menu, like "I didn't catch that. Could you please say it again?"
+- **The Sentinel was off again** (the log says `Sentinel: disabled`).
+
+**Cause:** the DO/SAY format. With an action menu and "DO …" / "SAY …" to write, a 3B model treats its answer as a command language. "SAY your name." reads as an order, and when it meant to act, it wrote the action after SAY. §52 made MAVIS's history match that format, which made the habit stronger. The format was ours, not one the model learned.
+
+**Decision:**
+- **Use the format Qwen was trained on.** The actions go into the system prompt as function signatures in `<tools>`, written exactly as Qwen's chat template writes them. The model either replies in plain words or writes one `<tool_call>{"name": …, "arguments": …}</tool_call>`.
+- **The grammar still holds every call to the catalogue and to the right kinds.** A level is 0–100, an app is an installed app, a site is a domain. Replies can't contain `<`. Calls with no menu (results, memory answers) allow only a reply.
+- **What happened is told after the action, not before.** A plan ends with a `tell` step, reached only if every step before it worked. The executor hands its fact ("Done: volume_set 40", or a note such as "only the search page opened") to the planner, and the model says it in its own words. A failure stops the plan and is told instead. Actions that need a yes are told only once they've actually run. For session actions, the tell comes first.
+- **MAVIS's history keeps tool calls as tool calls,** and its replies as plain words. That is the shape Qwen expects.
+- **Removed:** DO/SAY and its words (§44's form, §49's `DO … | words`, §52's turn form). The checks, grounding, risk gate and catalogue from §44 all stay.
+
+**Evidence:**
+- **Proven:**
+  - 278 + 280 tests pass, including the new tell step and the executor handing it on. Clippy is unchanged. Ruff is clean.
+  - Both grammars compile with llama-cpp-python. Calls read back to the planner's form, for example "volume_set 40" and "play sunbeam on tube".
+- **Reasoned:** an action now costs a second, short model call for its reply. In both runs that took 0.25–0.5 s, and it starts while the action runs.
+- **Not run on hardware yet.**
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
