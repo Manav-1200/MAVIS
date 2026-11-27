@@ -1,6 +1,7 @@
 # mavis_worker/src/mavis/inference/__init__.py
 from .engine import LlamaEngine
 from .prompts import (
+    SAY_PROMPT,
     SYSTEM_PROMPT,
     answer_grammar,
     build_chat_messages,
@@ -11,6 +12,7 @@ from .prompts import (
 )
 
 __all__ = [
+    "SAY_PROMPT",
     "SYSTEM_PROMPT",
     "LlamaEngine",
     "answer_grammar",
