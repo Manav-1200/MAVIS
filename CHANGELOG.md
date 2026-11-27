@@ -39,6 +39,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Changed
+- **MAVIS acts through its model's own tool calls** and tells you what happened after it's done, in its own words. Replies are full sentences again.
 - **Long conversations.** Qwen2.5-3B is now the default model and sees far more of the conversation; older parts are summarised instead of forgotten.
 - **Questions, warnings and system news in MAVIS's own words,** and your name is learned from what you say, not from fixed phrases.
 - **MAVIS says it in its own words.** Actions no longer come with fixed sentences: the model says what it's doing as it acts, and when something can't be done or fails, MAVIS tells you what happened in its own words.
