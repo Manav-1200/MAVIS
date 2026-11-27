@@ -15,6 +15,7 @@ from pathlib import Path
 from mavis.core.config import load_config
 from mavis.core.logger import setup_logging
 from mavis.inference import (
+    SAY_PROMPT,
     SYSTEM_PROMPT,
     LlamaEngine,
     answer_grammar,
@@ -231,11 +232,12 @@ class WorkerServer:
                 }
             )
 
-        system_prompt = SYSTEM_PROMPT
-        grammar = None
+        # Always DO/SAY form, so replies match the conversation they follow.
         if actions:
             system_prompt = with_actions(SYSTEM_PROMPT, actions, payload.get("apps") or [])
-            grammar = answer_grammar(actions, payload.get("targets") or [])
+        else:
+            system_prompt = SYSTEM_PROMPT + SAY_PROMPT
+        grammar = answer_grammar(actions, payload.get("targets") or [])
         self.system_prompt = system_prompt
         chat_messages = build_chat_messages(
             user_messages=messages,
