@@ -693,7 +693,7 @@ Two deliberate departures from the original plan, both made to avoid dependencie
 - [x] **Forgetting / decay** — retention scales with importance rather than a flat 30 days: MAVIS's own replies 7 days, questions 30, statements 90, stated facts never. Purged once at startup.
 - [x] **Automatic summaries** — consolidation task runs hourly, looking back 7 days for any completed day not yet summarized. Hourly rather than a fixed-time cron because MAVIS isn't guaranteed to be running at 3am; "check whether yesterday still needs doing" is more robust. Skips already-summarized days without an LLM call, and skips days with fewer than 3 meaningful memories.
 - [x] **Long-term consolidation** — summaries stored in `long_term.db` with FTS5 search. No vector embeddings (see 7.2).
-- [x] **Episodic replay** — "what was I doing yesterday?" is answered from memory of that period. The model works out how far back to look (`look_back <days>`); the code fetches that window. *(The fixed time-phrase list was removed in Phase 8.6, §46.)*
+- [x] **Episodic replay** — "what was I doing yesterday?" is answered from memory of that period. The model works out how far back to look (`user_history <days>`); the code fetches that window. *(The fixed time-phrase list was removed in Phase 8.6, §46.)*
 - [x] **Context compression** *(2026-10-08)* — the prompt carries the last 12 events in full. Anything older, including what has already left the 50-event ring, becomes one line: "Earlier in this conversation the user said: …" — the last five things the user said, 80 bytes each. User words only, for the reason recall keeps only them (§7.4). No LLM summary: that would cost a model call per turn.
 
 ### 7.2 Advanced Memory
@@ -908,7 +908,8 @@ Next, in order:
   - [x] Actions speak in the model's words; what couldn't be done, and failures, are told by the model from the facts ([§49](DECISIONS.md#49-mavis-says-it-in-its-own-words)).
   - [x] The Sentinel's answers, the gate's questions, "didn't catch that" and the mic warnings in the model's words; the name learned through the model ([§50](DECISIONS.md#50-the-rest-of-maviss-voice-and-its-name-through-the-model)).
   - [x] A long conversation on Qwen2.5-3B, with older turns summarised ([§51](DECISIONS.md#51-holding-a-long-conversation)).
-  - [ ] Hardware run: speak in your own words, check replies sound natural, and hold a long conversation.
+  - [x] First hardware run on Qwen ([§52](DECISIONS.md#52-the-first-qwen-run-2026-11-27)): fast, but replies narrated and echoed, and questions were acted on. Fixed by giving MAVIS's turns in DO/SAY form.
+  - [ ] Second hardware run: replies, asking first, a long conversation, media, and the Sentinel switched on.
 - [ ] **2. The open action.** Beyond the catalogue, the model can propose its own command for anything the catalogue doesn't cover. Everything goes through the risk gate: harmless commands run, risky ones are explained in plain words and wait for a yes, root goes through `pkexec`, irreversible ones are asked twice. Then multi-step tasks: plan, act, read the result, carry on.
 - [ ] **3. Learning from use.** From the owner's confirmed actions, stated facts and daily patterns, never from undone or corrected ones or other voices. Stored as data that can be read out and forgotten; nothing leaves the machine; the model's weights never change.
 - [ ] **4. Voice and face for owner-only actions.** See the rules below. Enrollment is a separate command until the install script exists.
@@ -1143,4 +1144,4 @@ Other machines get models that fit them; see Phase 8.6, models by machine.
 
 ---
 
-*Last updated: 2026-11-26*
+*Last updated: 2026-11-27*
