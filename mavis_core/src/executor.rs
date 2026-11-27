@@ -211,6 +211,19 @@ impl Executor {
                     .unwrap_or_default();
                 self.close_windows(ids).await
             }
+            // What happened, for the planner to have MAVIS tell; reached
+            // only when everything before it in the plan worked.
+            "tell" => {
+                let fact = action.get("fact").and_then(|v| v.as_str()).unwrap_or_default();
+                self.bus.publish(Event {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    source: "executor".to_string(),
+                    event_type: EventType::Tell,
+                    payload: serde_json::json!({ "fact": fact }),
+                });
+                Ok(String::new())
+            }
             "notify" => {
                 let title = action.get("title").and_then(|v| v.as_str()).unwrap_or("MAVIS");
                 let message = action.get("message").and_then(|v| v.as_str()).unwrap_or("");
@@ -1109,6 +1122,18 @@ mod tests {
     }
 
     /// A destructive command run through the executor can be undone.
+    /// A plan's outcome is handed on to be told, not spoken from here.
+    #[tokio::test]
+    async fn an_outcome_is_handed_on_to_be_told() {
+        let bus = Arc::new(EventBus::new());
+        let mut rx = bus.subscribe();
+        let executor = Executor::new(bus, Arc::new(AtomicBool::new(false)), std::env::temp_dir().join("mavis_exec_tell"));
+        executor.execute_action(&serde_json::json!({"type": "tell", "fact": "Done: x"})).await.unwrap();
+        let told = rx.try_recv().unwrap();
+        assert_eq!(told.event_type, EventType::Tell);
+        assert_eq!(told.payload["fact"], "Done: x");
+    }
+
     #[tokio::test]
     async fn a_deleted_file_is_restored_by_undo() {
         let dir = std::env::temp_dir().join(format!(
