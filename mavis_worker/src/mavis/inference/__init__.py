@@ -1,24 +1,24 @@
 # mavis_worker/src/mavis/inference/__init__.py
 from .engine import LlamaEngine
 from .prompts import (
-    SAY_PROMPT,
+    REPLY_GRAMMAR,
     SYSTEM_PROMPT,
-    answer_grammar,
     build_chat_messages,
     drop_name,
     summary_messages,
+    tool_grammar,
     user_name,
-    with_actions,
+    with_tools,
 )
 
 __all__ = [
-    "SAY_PROMPT",
+    "REPLY_GRAMMAR",
     "SYSTEM_PROMPT",
     "LlamaEngine",
-    "answer_grammar",
     "build_chat_messages",
     "drop_name",
     "summary_messages",
+    "tool_grammar",
     "user_name",
-    "with_actions",
+    "with_tools",
 ]
