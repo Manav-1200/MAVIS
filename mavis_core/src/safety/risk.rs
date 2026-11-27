@@ -137,8 +137,8 @@ pub fn assess(action: &serde_json::Value) -> Assessment {
     let kind = action.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
 
     match kind {
-        // Speech and notifications change nothing.
-        "say" | "notify" => allow(0, "no side effects"),
+        // Speech, notifications and telling an outcome change nothing.
+        "say" | "notify" | "tell" => allow(0, "no side effects"),
 
         "system" => assess_system(action),
 
