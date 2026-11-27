@@ -483,6 +483,17 @@ pub(crate) fn plan_says(plan: &serde_json::Value) -> String {
         .join(" ")
 }
 
+/// A turn of MAVIS's in the DO/SAY form the model answers in.
+fn mavis_turn(payload: &serde_json::Value) -> String {
+    let said = payload.get("plan").map(plan_says).unwrap_or_default();
+    match (payload["did"].as_str(), said.is_empty()) {
+        (Some(did), true) => format!("DO {}", did),
+        (Some(did), false) => format!("DO {} | {}", did, said),
+        (None, false) => format!("SAY {}", said),
+        (None, true) => String::new(),
+    }
+}
+
 /// The plan with the model's words spoken alongside it, and any note from
 /// the plan: something that didn't go as asked, which the model tells
 /// instead of the words it chose before knowing.
@@ -614,7 +625,7 @@ const ACTIONS: &[Action] = &[
     act("cancel", "", "no to the question you just asked", None, false),
     act("system_changes", "<number>", "tell what changed on the system in the last number of days", None, false),
     act("update_details", "", "describe the system update you last mentioned, or the latest one", None, false),
-    act("look_back", "<number>", "recall what happened over the last number of days, then answer", None, false),
+    act("user_history", "<number>", "for a question about what the user did in the past: look back over that many days, then answer", None, false),
     act("remember", "<fact>", "keep a lasting fact the user told you about themselves", None, false),
     act("user_name", "<name>", "the user tells you their name or what to call them", None, false),
 ];
@@ -1039,7 +1050,7 @@ impl Planner {
                 // is the backstop.
                 "max_tokens": 128,
                 // Lower than plain chat: choosing an action should be steady.
-                "temperature": 0.4,
+                "temperature": 0.3,
                 "working_memory": working_memory,
                 "actions": action_menu(self.question_open()),
                 "apps": self.apps.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
@@ -1064,7 +1075,7 @@ impl Planner {
                         timestamp: chrono::Utc::now(),
                         source: "planner".to_string(),
                         event_type: EventType::PlanReady,
-                        payload: serde_json::json!({ "plan": plan }),
+                        payload: serde_json::json!({ "plan": plan, "did": line.trim() }),
                     });
                 }
                 if let Some(note) = note {
@@ -1175,7 +1186,7 @@ impl Planner {
                 Some(text) => record(text),
                 None => Err("Nothing to tell: you aren't watching the system right now.".into()),
             },
-            "look_back" => {
+            "user_history" => {
                 let days = arg.parse::<u64>().unwrap_or(1).clamp(1, 365);
                 self.answer_from_memory(said, days).await;
                 Ok(serde_json::Value::Null)
@@ -1697,10 +1708,11 @@ impl Planner {
                 EventType::PlanReady => ("mavis", ""),
                 _ => continue,
             };
-            // "Workspace 2." and "Opening Filey." come with an action, in a list.
+            // MAVIS's turns in the form it answers in: what it did, and what
+            // it said. Plain words would teach it to narrate instead of act.
             let said;
             let content = if source == "mavis" {
-                said = event.payload.get("plan").map(plan_says).unwrap_or_default();
+                said = mavis_turn(&event.payload);
                 said.as_str()
             } else {
                 content
@@ -2469,6 +2481,18 @@ mod tests {
         let a = crate::safety::risk::assess_plan(&plan);
         assert_eq!(a.verdict, crate::safety::risk::Verdict::Confirm);
         assert_eq!(a.what, "close Surfy Web Browser");
+    }
+
+    /// MAVIS's earlier turns reach the model in the form it answers in.
+    #[test]
+    fn earlier_turns_are_in_do_and_say_form() {
+        let did = serde_json::json!({"plan": [{"type": "system"}, {"type": "say", "text": "Done."}], "did": "volume_set 40"});
+        assert_eq!(mavis_turn(&did), "DO volume_set 40 | Done.");
+        let quiet = serde_json::json!({"plan": [{"type": "undo"}], "did": "undo"});
+        assert_eq!(mavis_turn(&quiet), "DO undo");
+        let said = serde_json::json!({"plan": {"type": "say", "text": "Hello."}});
+        assert_eq!(mavis_turn(&said), "SAY Hello.");
+        assert_eq!(mavis_turn(&serde_json::json!({"plan": []})), "");
     }
 
     #[test]
