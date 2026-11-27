@@ -52,6 +52,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - **"Play X" works with any app**, not just a browser: browsers get the site from `[media]` in `config/config.toml`, media players get a matching file from your Music or Videos folder, and apps with their own link type get a search. The app you last played in is used next time. "Search for X" uses `[web]`. No site or app names in code.
 
 ### Fixed
+- **Replies no longer narrate or echo you,** questions are answered instead of acted on, and an action can't be read out loud.
 - **The model's actions were loose.** It wrote `volume_set <80>`, invented `volume_down 20`, and once produced `workspace 2. SAY "Thunar is now open…"`. The grammar now holds each argument to its kind: a level is a number from 0 to 100, a workspace a number, an app one of the installed or open apps, and a website a domain. `open_website` is separate from `open`. Choosing an action runs at temperature 0.4, and the instructions say questions get a SAY and requests get a DO.
 - **MAVIS sat deaf without saying so** when the mic was too quiet. Bursts of sound that stay above the room but below the speech threshold, four times in 30 seconds with no speech, now get one spoken warning.
 - **The Sentinel named packages twice** ("removed dux-gop, dux-shell, dux-gop and dux-shell"). Each package is described by what it ended up as. One installed and removed again in the same update isn't mentioned.
