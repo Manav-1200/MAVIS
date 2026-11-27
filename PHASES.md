@@ -27,7 +27,7 @@
 | 7 | Memory & Learning | Recall with decay, daily consolidation, episodic replay, entity graph, context compression. | Persistent memory | :white_check_mark: 7.1–7.2 complete; 7.3 deferred |
 | 8 | Safety & Permissions | Risk scoring, permission gate, confirmation flow, rollback, append-only audit log. | Trust layer | :white_check_mark: Built (per-skill permissions wait on Phase 9) |
 | 8.5 | System Sentinel | Notices what changed on the machine: packages, privileges, file integrity, advisories. | Machine awareness | :construction: Built — steps 2b–4 await a hardware run, step 5 unverified |
-| 8.6 | Understanding & Trust | The model decides what you mean (DO/SAY); sensitive actions warn and ask; your voice and face authorise them; it learns how you talk; it reads files and builds projects. | Understands, not scripted | :construction: In progress |
+| 8.6 | Understanding & Trust | The model decides what you mean (tool calls); sensitive actions warn and ask; your voice and face authorise them; it learns how you talk; it reads files and builds projects. | Understands, not scripted | :construction: In progress |
 | 9 | Skills Platform | Plugin API with manifest, lifecycle hooks, sandboxing, core skills. | Extensible companion | Not started |
 | 10 | Automation & Proactive Intelligence | Rule engine, predictive suggestions, workflow recording, wellness reminders, daily briefing. | Proactive assistant | Not started |
 | 11 | Vision & Advanced UX | OCR, screenshot understanding, UI element detection, secondary monitor dashboard, conversation history. | Sees the screen | Not started |
@@ -909,7 +909,8 @@ Next, in order:
   - [x] The Sentinel's answers, the gate's questions, "didn't catch that" and the mic warnings in the model's words; the name learned through the model ([§50](DECISIONS.md#50-the-rest-of-maviss-voice-and-its-name-through-the-model)).
   - [x] A long conversation on Qwen2.5-3B, with older turns summarised ([§51](DECISIONS.md#51-holding-a-long-conversation)).
   - [x] First hardware run on Qwen ([§52](DECISIONS.md#52-the-first-qwen-run-2026-11-27)): fast, but replies narrated and echoed, and questions were acted on. Fixed by giving MAVIS's turns in DO/SAY form.
-  - [ ] Second hardware run: replies, asking first, a long conversation, media, and the Sentinel switched on.
+  - [x] Second hardware run ([§53](DECISIONS.md#53-acting-through-qwens-own-tool-calls)): replies shrank to fragments ("your name.", "system_changes 1."). The DO/SAY format itself was the problem; replaced with Qwen's own tool calls, and outcomes told after the action runs.
+  - [ ] Third hardware run: replies, asking first, a long conversation, media, and the Sentinel switched on.
 - [ ] **2. The open action.** Beyond the catalogue, the model can propose its own command for anything the catalogue doesn't cover. Everything goes through the risk gate: harmless commands run, risky ones are explained in plain words and wait for a yes, root goes through `pkexec`, irreversible ones are asked twice. Then multi-step tasks: plan, act, read the result, carry on.
 - [ ] **3. Learning from use.** From the owner's confirmed actions, stated facts and daily patterns, never from undone or corrected ones or other voices. Stored as data that can be read out and forgotten; nothing leaves the machine; the model's weights never change.
 - [ ] **4. Voice and face for owner-only actions.** See the rules below. Enrollment is a separate command until the install script exists.
