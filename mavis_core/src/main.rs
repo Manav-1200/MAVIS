@@ -36,7 +36,7 @@ use util::supervise;
 /// Below this, a transcript is treated as "didn't catch that" rather than
 /// acted on. The worker's own floor (0.45) drops the hopeless ones; this
 /// covers the band above it, where Whisper returns fluent-but-wrong text.
-const UNCLEAR_CONFIDENCE: f32 = 0.55;
+const UNCLEAR_CONFIDENCE: f32 = 0.5;
 
 #[tokio::main]
 async fn main() -> Result<()> {
