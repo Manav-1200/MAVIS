@@ -1035,10 +1035,9 @@ fn speech_hints(apps: &[context_snapshot::AppEntry]) -> String {
     names.dedup();
     let mut out = String::new();
     for name in names {
-        // 300 cut the list off alphabetically, so Filey never made it.
-        // Whisper's prompt holds about 220 tokens, with the phrases that
-        // teach it "Mavis" after the apps.
-        if out.len() + name.len() + 2 > 450 {
+        // Whisper reads this prompt again on every transcription, so it's
+        // a cost each time; the names that fit, alphabetically.
+        if out.len() + name.len() + 2 > 250 {
             break;
         }
         if !out.is_empty() {
