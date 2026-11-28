@@ -164,11 +164,11 @@ mod tests {
     #[test]
     fn switches_come_from_the_config_and_the_variable_overrides() {
         assert!(switched_on("MAVIS_TEST_UNSET_SWITCH", "sentinel", "enabled"), "shipped on");
-        assert!(!switched_on("MAVIS_TEST_UNSET_SWITCH", "context", "clipboard"), "shipped off");
+        assert!(!switched_on("MAVIS_TEST_UNSET_SWITCH", "context", "calendar"), "shipped off");
         std::env::set_var("MAVIS_TEST_SWITCH_OFF", "0");
         assert!(!switched_on("MAVIS_TEST_SWITCH_OFF", "sentinel", "enabled"));
         std::env::set_var("MAVIS_TEST_SWITCH_ON", "1");
-        assert!(switched_on("MAVIS_TEST_SWITCH_ON", "context", "clipboard"));
+        assert!(switched_on("MAVIS_TEST_SWITCH_ON", "context", "calendar"));
     }
 
     #[test]
