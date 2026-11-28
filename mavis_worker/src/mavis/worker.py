@@ -108,6 +108,8 @@ class WorkerServer:
         self.replied_once = False
         # The prompt the last reply used, actions included: what warm-up primes.
         self.system_prompt = SYSTEM_PROMPT
+        # The last actions and apps sent, kept for calls that send none.
+        self.tools: tuple[list[str], list[str]] | None = None
         # Requests being worked on. The idle monitor never unloads a model
         # while this is above zero, so an inference can't lose its model
         # halfway through.
@@ -232,13 +234,15 @@ class WorkerServer:
                 }
             )
 
-        # With actions, a reply or one tool call; without, a reply only.
+        # With actions, a reply or one tool call; without, a reply only. The
+        # system prompt is the same either way, so the model's cache of it
+        # (the tool list is most of it) carries from one call to the next.
         if actions:
-            system_prompt = with_tools(SYSTEM_PROMPT, actions, payload.get("apps") or [])
+            self.tools = (actions, payload.get("apps") or [])
             grammar = tool_grammar(actions, payload.get("targets") or [])
         else:
-            system_prompt = SYSTEM_PROMPT
             grammar = REPLY_GRAMMAR
+        system_prompt = with_tools(SYSTEM_PROMPT, *self.tools) if self.tools else SYSTEM_PROMPT
         self.system_prompt = system_prompt
         chat_messages = build_chat_messages(
             user_messages=messages,
