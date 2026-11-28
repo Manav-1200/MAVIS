@@ -836,16 +836,12 @@ impl TtsQueue {
 /// Pause every media player that's playing; returns their names.
 /// Any player that speaks MPRIS counts, so no app is named here.
 async fn pause_playing_media() -> Vec<String> {
-    let Ok(list) = Command::new("playerctl").arg("-l").output().await else {
-        return Vec::new(); // playerctl not installed
-    };
     let mut paused = Vec::new();
-    for player in String::from_utf8_lossy(&list.stdout).lines().map(str::trim).filter(|p| !p.is_empty()) {
-        let status = Command::new("playerctl").args(["-p", player, "status"]).output().await;
-        let playing = status.is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "Playing");
-        if playing {
-            let _ = Command::new("playerctl").args(["-p", player, "pause"]).output().await;
-            paused.push(player.to_string());
+    for player in crate::system::dbus::media_players().await.unwrap_or_default() {
+        if crate::system::dbus::player_status(&player).await.as_deref() == Some("Playing")
+            && crate::system::dbus::player_call(&player, "Pause").await
+        {
+            paused.push(player);
         }
     }
     paused
@@ -853,7 +849,7 @@ async fn pause_playing_media() -> Vec<String> {
 
 async fn resume_media(players: &[String]) {
     for player in players {
-        let _ = Command::new("playerctl").args(["-p", player, "play"]).output().await;
+        crate::system::dbus::player_call(player, "Play").await;
     }
 }
 
