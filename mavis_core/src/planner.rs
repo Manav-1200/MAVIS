@@ -3,7 +3,7 @@ use crate::context_snapshot::{AppEntry, WindowInfo};
 use crate::event_bus::EventBus;
 use crate::memory::entities::{EntityKind, EntityStore};
 use crate::memory::long_term::LongTermMemory;
-use crate::memory::recall::{build_fts_query, RecallStore};
+use crate::memory::recall::RecallStore;
 use crate::memory::working::WorkingMemory;
 use crate::models::event::{Event, EventType};
 use crate::safety::SharedAwaiting;
@@ -410,6 +410,10 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// Lines waiting before they are folded into the summary.
 const SUMMARISE_AT: usize = 8;
 
+/// Turns of the conversation given to the model as turns (user and MAVIS
+/// each count one); earlier ones go in as short notes.
+const RECENT_TURNS: usize = 8;
+
 /// What came before the recent turns: the model's summary, then the lines
 /// not yet folded into it.
 fn earlier_in_conversation(summary: &str, waiting: &[String]) -> Option<String> {
@@ -619,6 +623,7 @@ const ACTIONS: &[Action] = &[
     act("remember", "<fact>", "keep a lasting fact the user told you about themselves", None, false),
     act("user_name", "<name>", "the user tells you their name or what to call them", None, false),
     act("clipboard", "", "look up what the user copied, to answer a question about it", None, false),
+    act("now_playing", "", "look up what music or video is playing, to answer a question about it", None, false),
 ];
 
 /// The actions as the model is shown them. Confirm and cancel only while
@@ -1006,11 +1011,8 @@ impl Planner {
             .and_then(|v| v.as_str())
             .unwrap_or("unknown");
 
-        let user_message = if source == "voice" {
-            format!("[Voice] {}", intent)
-        } else {
-            intent.to_string()
-        };
+        let _ = source;
+        let user_message = intent.to_string();
 
         let mut working_memory = self.build_working_memory(intent, event.id, None).await;
         // Pending system changes reach the model as news, told before the reply.
@@ -1187,6 +1189,10 @@ impl Planner {
                 }
             }
             "clipboard" => Err(self.clipboard_fact().await),
+            "now_playing" => Err(match crate::system::dbus::now_playing().await {
+                Some(playing) => format!("Playing now: {}", playing),
+                None => "No media player reports anything playing.".into(),
+            }),
             "user_name" => {
                 // Only a name they actually said, as they said it.
                 let name = said
@@ -1484,31 +1490,16 @@ impl Planner {
                     Err(e) => warn!("Planner: replay failed: {}", e),
                 }
             } else {
+                // Only facts the user asked MAVIS to keep. Old sentences and
+                // day summaries matched by a shared word are noise the model
+                // builds wrong answers from; the past is looked up on request.
                 match store.recall(current_intent, 3) {
-                    Ok(memories) if !memories.is_empty() => {
-                        // The context engine records each utterance as it
-                        // arrives, so recall can return the very sentence
-                        // being answered. That's not a memory.
-                        for m in memories.into_iter().filter(|m| m.text != current_intent) {
+                    Ok(memories) => {
+                        for m in memories.into_iter().filter(|m| m.importance >= crate::memory::recall::FACT_IMPORTANCE) {
                             items.push(serde_json::json!({
                                 "source": "recalled",
-                                "content": format!("Earlier, {} said: {}", m.role, m.text),
+                                "content": format!("The user told you: {}", m.text),
                             }));
-                        }
-                    }
-                    Ok(_) => {
-                        // Nothing in raw memory — the originals may have
-                        // decayed, so try the daily summaries.
-                        if let Some(fts) = build_fts_query(current_intent) {
-                            let lt = self.long_term.lock().await;
-                            if let Ok(summaries) = lt.search(&fts, 2) {
-                                for s in summaries {
-                                    items.push(serde_json::json!({
-                                        "source": "daily_summary",
-                                        "content": format!("On {}: {}", s.date, s.summary),
-                                    }));
-                                }
-                            }
                         }
                     }
                     Err(e) => warn!("Planner: recall failed: {}", e),
@@ -1669,39 +1660,47 @@ impl Planner {
         // The current utterance is skipped: it's the user message itself,
         // and depending on which task ran first it could also already be in
         // the ring.
-        let waiting: Vec<String> = snapshot.earlier.iter().cloned().collect();
-        if let Some(line) = earlier_in_conversation(&snapshot.summary, &waiting) {
-            items.push(serde_json::json!({ "source": "earlier", "content": line }));
-        }
-
+        // The conversation, oldest first: (who, as the model wrote it, as said).
+        let mut turns: Vec<(&str, String, String)> = Vec::new();
         for event in snapshot.recent_events(snapshot.events.len()) {
             if event.id == current_id {
                 continue;
             }
-            let (source, content) = match event.event_type {
-                EventType::UserIntent => (
-                    "user",
-                    event.payload.get("text").and_then(|v| v.as_str()).unwrap_or(""),
+            let turn = match event.event_type {
+                EventType::UserIntent => {
+                    let text = event.payload.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    ("user", text.clone(), text)
+                }
+                // MAVIS's turns as it wrote them: tool calls stay tool calls,
+                // so the model sees what it did apart from what it said.
+                EventType::PlanReady => (
+                    "mavis",
+                    mavis_turn(&event.payload),
+                    event.payload.get("plan").map(plan_says).unwrap_or_default(),
                 ),
-                EventType::PlanReady => ("mavis", ""),
                 _ => continue,
             };
-            // MAVIS's turns as it wrote them: tool calls stay tool calls, so
-            // the model sees what it did apart from what it said.
-            let said;
-            let content = if source == "mavis" {
-                said = mavis_turn(&event.payload);
-                said.as_str()
-            } else {
-                content
-            };
-
-            if !content.is_empty() {
-                items.push(serde_json::json!({
-                    "source": source,
-                    "content": content,
-                }));
+            if !turn.1.is_empty() {
+                turns.push(turn);
             }
+        }
+
+        // Only the last few turns go in as turns: a small model copies the
+        // shape of whatever replies it sees. Earlier ones join the summary's
+        // waiting lines, as short notes.
+        let recent_from = turns.len().saturating_sub(RECENT_TURNS);
+        let mut waiting: Vec<String> = snapshot.earlier.iter().cloned().collect();
+        for (who, _, said) in &turns[..recent_from] {
+            if !said.is_empty() {
+                let name = if *who == "user" { "User" } else { "MAVIS" };
+                waiting.push(format!("{}: {}", name, crate::util::truncate_bytes(said, 200)));
+            }
+        }
+        if let Some(line) = earlier_in_conversation(&snapshot.summary, &waiting) {
+            items.push(serde_json::json!({ "source": "earlier", "content": line }));
+        }
+        for (who, content, _) in &turns[recent_from..] {
+            items.push(serde_json::json!({ "source": who, "content": content }));
         }
 
         items
@@ -2476,6 +2475,36 @@ mod tests {
         let a = crate::safety::risk::assess_plan(&plan);
         assert_eq!(a.verdict, crate::safety::risk::Verdict::Confirm);
         assert_eq!(a.what, "close Surfy Web Browser");
+    }
+
+    /// Only the last few turns go in as turns; earlier ones become notes.
+    #[tokio::test]
+    async fn only_the_latest_turns_go_in_as_turns() {
+        let (planner, _rx, dir) = planner_with_pending_change("recent");
+        {
+            let mut wm = planner.working.write().await;
+            for i in 0..10 {
+                wm.push_event(utterance(&format!("ask {}", i)));
+                wm.push_event(Event {
+                    id: uuid::Uuid::new_v4(),
+                    timestamp: chrono::Utc::now(),
+                    source: "planner".into(),
+                    event_type: EventType::PlanReady,
+                    payload: serde_json::json!({"plan": {"type": "say", "text": format!("reply {}", i)}}),
+                });
+            }
+        }
+        let items = planner.build_working_memory("next", uuid::Uuid::new_v4(), None).await;
+        let turns: Vec<&str> = items
+            .iter()
+            .filter(|i| i["source"] == "user" || i["source"] == "mavis")
+            .filter_map(|i| i["content"].as_str())
+            .collect();
+        assert_eq!(turns.len(), RECENT_TURNS);
+        assert_eq!(turns[0], "ask 6");
+        let earlier = items.iter().find(|i| i["source"] == "earlier").unwrap()["content"].as_str().unwrap().to_string();
+        assert!(earlier.contains("User: ask 0") && earlier.contains("MAVIS: reply 5"), "{}", earlier);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// MAVIS's earlier turns reach the model as it wrote them: a tool call
