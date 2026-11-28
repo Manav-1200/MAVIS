@@ -182,7 +182,17 @@ Applications are discovered from what's actually installed, so this tracks your 
 
 An utterance that starts with an explicit action is never treated as system control — "google how to mute a tab" searches rather than muting your machine.
 
-`shell` execution exists in the executor and is scored by the permission gate, but it is **deliberately unreachable from voice**.
+### Anything else: commands
+
+For anything none of those actions covers, and anything about your computer it wasn't told, the model writes a shell command itself, the way you would: `df -h` to say how much space is left, `wpctl get-volume` for the volume. It reads what the command prints and answers from that, and may run up to three commands for one request. No question has a hand-written answer in the code.
+
+Every command goes through the permission gate first:
+- **Commands that only read** (`ls`, `df`, `cat`, `pacman -Q`, `systemctl status` and the like, with no `>` redirect, no `$(…)` and nothing that writes) run without asking.
+- **Anything else** is said in plain words and waits for your yes.
+- **`sudo`** becomes `pkexec`, so the system asks for your password, and MAVIS first needs "yes, administrator".
+- **Irreversible commands** (wiping a disk, deleting from `/`, piping a download into a shell) are refused.
+
+A command still running after 30 seconds is stopped. Its output stays on your machine and goes only to the local model.
 
 ### Interrupting
 
@@ -256,11 +266,10 @@ Each source is switched on or off under `[context]` in `config/config.toml`. Not
 | Setting | Shipped | Gives MAVIS |
 |---------|---------|-------------|
 | `active_window` | on | Focused window, the list of open apps and their workspaces, and the current git project (name, path, branch) |
-| `clipboard` | off | Clipboard text, up to 200 characters, read only when you ask about what you copied |
 | `calendar` | off | Next event from Evolution's local calendar |
 | `browser` | off | Tab URL/title, if something writes to `/tmp/mavis_browser.sock` |
 
-The date and time, the volume, brightness and battery are always there: they aren't private, and without them the model guesses. What's playing is looked up when you ask.
+The date and time and which system this is (its name and the tools installed) are always there. Anything else, such as the volume, the battery or what's playing, the model looks up with a command when you ask.
 
 ### All environment variables
 
