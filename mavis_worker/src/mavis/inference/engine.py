@@ -33,6 +33,11 @@ FALLBACK_GPU_LAYERS = 20
 # Room kept free in the context beyond the reply.
 CONTEXT_MARGIN = 64
 
+# Tokens looked back over for repeats, and how much a repeat is held back:
+# enough to reach its own last reply, so it says something new.
+REPEAT_WINDOW = 256
+REPEAT_PENALTY = 1.1
+
 
 class LlamaEngine:
     def __init__(self, model_path: str | None = None, n_gpu_layers: int = 20, n_ctx: int = 4096):
@@ -93,6 +98,7 @@ class LlamaEngine:
                 model_path=path,
                 n_ctx=self._n_ctx,
                 n_gpu_layers=self._n_gpu_layers,
+                last_n_tokens_size=REPEAT_WINDOW,
                 verbose=False,
             )
         except ValueError:
@@ -106,6 +112,7 @@ class LlamaEngine:
                     model_path=path,
                     n_ctx=self._n_ctx,
                     n_gpu_layers=self._n_gpu_layers,
+                    last_n_tokens_size=REPEAT_WINDOW,
                     verbose=False,
                 )
             else:
@@ -289,7 +296,7 @@ class LlamaEngine:
     def _post_process(self, text: str) -> str:
         """Aggressively clean generation: cut stops, split separators, truncate."""
         if not text:
-            return "I'm here."
+            return ""
 
         # 1. Cut at first stop token
         for stop in self._get_stop_tokens():
@@ -336,7 +343,7 @@ class LlamaEngine:
             match = re.search(rf".{{1,{MAX_CHARS}}}[.!?]", text)
             text = match.group(0) if match else text[:MAX_CHARS]
 
-        return text.strip() or "I'm here."
+        return text.strip()
 
     def generate(
         self,
@@ -366,7 +373,8 @@ class LlamaEngine:
         something that would have been kept.
         """
         t = text.lstrip()
-        if not t:
+        # A tool call runs to its closing tag, which the grammar ends on.
+        if not t or t.startswith("<"):
             return False
         if "\n" in t:
             return True
@@ -379,8 +387,9 @@ class LlamaEngine:
         # the very end (not yet followed by anything) don't count.
         return len(re.findall(r"[.!?]+[\"')\]]*\s", t)) >= MAX_SENTENCES
 
-    def _stream(self, chunks, get_text) -> tuple[str, str, int, float | None]:
-        """Consume a streaming completion, stopping as soon as the reply is complete."""
+    def _stream(self, chunks, get_text, early: bool = True) -> tuple[str, str, int, float | None]:
+        """Consume a streaming completion, stopping as soon as the reply is
+        complete; with `early` off, to the end (notes, not speech)."""
         started = time.perf_counter()
         first_token_at: float | None = None
         text = ""
@@ -394,7 +403,7 @@ class LlamaEngine:
             text += piece
             tokens += 1
             finish_reason = choice.get("finish_reason") or finish_reason
-            if self._reply_complete(text):
+            if early and self._reply_complete(text):
                 finish_reason = "complete"
                 break
         return text, finish_reason, tokens, first_token_at
@@ -434,12 +443,13 @@ class LlamaEngine:
                 prompt=manual_prompt,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                repeat_penalty=REPEAT_PENALTY,
                 stop=self._get_stop_tokens(),
                 stream=True,
                 **extra,
             )
             raw_text, finish_reason, tokens, ttft = self._stream(
-                chunks, lambda c: c.get("text", "")
+                chunks, lambda c: c.get("text", ""), early=not raw
             )
         else:
             # Native path — llama.cpp uses the GGUF's own chat template.
@@ -447,11 +457,12 @@ class LlamaEngine:
                 messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                repeat_penalty=REPEAT_PENALTY,
                 stream=True,
                 **extra,
             )
             raw_text, finish_reason, tokens, ttft = self._stream(
-                chunks, lambda c: c.get("delta", {}).get("content", "")
+                chunks, lambda c: c.get("delta", {}).get("content", ""), early=not raw
             )
 
         elapsed = time.perf_counter() - started
@@ -463,16 +474,20 @@ class LlamaEngine:
             flush=True,
         )
 
-        action, call = None, ""
-        if raw_text.strip().startswith("<tool_call>"):
+        action, call, unreadable = None, "", False
+        if raw_text.strip().startswith("<"):
             call = raw_text.strip()
             action = self._read_call(call)
+            # A call that can't be read is never spoken.
+            if action is None:
+                print(f"[engine] Unreadable tool call: {call[:120]!r}", flush=True)
+                call, unreadable = "", True
         if raw:
             for stop in self._get_stop_tokens():
                 raw_text = raw_text.split(stop, 1)[0]
             text = raw_text.strip()
         else:
-            text = "" if action else self._post_process(raw_text)
+            text = "" if action or unreadable else self._post_process(raw_text)
 
         return {
             "action": action,
