@@ -186,29 +186,39 @@ fn battery() -> Option<String> {
     None
 }
 
-/// What a media player says is playing: "Title by Artist (in Player,
-/// paused)", or None when no player reports anything.
-pub async fn now_playing() -> Option<String> {
-    let out = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        Command::new("playerctl")
-            .args(["metadata", "--format", "{{title}}\t{{artist}}\t{{playerName}}\t{{status}}"])
-            .output(),
-    )
-    .await
-    .ok()?
-    .ok()?;
-    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let mut fields = line.split('\t');
-    let title = fields.next().unwrap_or_default().trim();
-    if !out.status.success() || title.is_empty() {
-        return None;
+/// What the media players say is playing: "Title by Artist (in Player,
+/// playing)", the playing one first. None when no player reports a title.
+/// Err when playerctl, which asks them, isn't installed.
+pub async fn now_playing() -> Result<Option<String>> {
+    let run = |args: Vec<String>| async move {
+        tokio::time::timeout(std::time::Duration::from_secs(2), Command::new("playerctl").args(args).output()).await
+    };
+    let listed = match run(vec!["-l".into()]).await {
+        Ok(Ok(out)) => out,
+        Ok(Err(_)) => return Err(anyhow::anyhow!("playerctl isn't installed")),
+        Err(_) => return Ok(None),
+    };
+    let mut found: Vec<(bool, String)> = Vec::new();
+    for player in String::from_utf8_lossy(&listed.stdout).lines().map(str::trim).filter(|p| !p.is_empty()) {
+        let format = "{{title}}\t{{artist}}\t{{status}}";
+        let Ok(Ok(out)) = run(vec!["-p".into(), player.into(), "metadata".into(), "--format".into(), format.into()]).await else {
+            continue;
+        };
+        let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let mut fields = line.split('\t');
+        let title = fields.next().unwrap_or_default().trim();
+        if !out.status.success() || title.is_empty() {
+            continue;
+        }
+        let artist = fields.next().unwrap_or_default().trim();
+        let status = fields.next().unwrap_or_default().trim().to_lowercase();
+        let by = if artist.is_empty() { String::new() } else { format!(" by {}", artist) };
+        let name = player.split('.').next().unwrap_or(player);
+        found.push((status == "playing", format!("{}{} (in {}, {})", title, by, name, status)));
     }
-    let artist = fields.next().unwrap_or_default().trim();
-    let player = fields.next().unwrap_or_default().trim();
-    let status = fields.next().unwrap_or_default().trim().to_lowercase();
-    let by = if artist.is_empty() { String::new() } else { format!(" by {}", artist) };
-    Some(format!("{}{} (in {}, {})", title, by, player, status))
+    // Playing before paused or stopped.
+    found.sort_by_key(|(playing, _)| !playing);
+    Ok((!found.is_empty()).then(|| found.into_iter().map(|(_, f)| f).collect::<Vec<_>>().join("; ")))
 }
 
 /// Run the first of these commands that's installed. A missing tool moves
