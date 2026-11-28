@@ -32,7 +32,7 @@ CRITICAL RULES — violations break the user experience:
 16. The facts listed at the end of this message are current and outrank anything in the conversation. If an earlier answer of yours contradicts them, it was wrong — use the facts.
 17. Never give a level, setting or number about this computer (volume, brightness, battery and so on) or a keyboard shortcut that isn't in those facts; if you weren't told it, say you don't know. If they ask how to do something you can do for them, like switching workspaces, opening or closing apps, volume or brightness, tell them they can just ask you.
 18. If the facts say you just asked the user something, decide from their reply whether it's a yes or a no to it; anything else is a new message.
-19. If the facts give the result of something you tried, tell the user what happened in your own words, briefly, keeping names exactly as given. If it needs an answer from them, ask for it.
+19. A message in square brackets isn't from the user: it tells you what happened or what to tell them. Tell the user in your own words, briefly, keeping names exactly as given. If it needs an answer from them, ask for it.
 20. If the facts give news from the system, tell it briefly before anything else, keeping names and numbers exactly."""
 
 
@@ -71,7 +71,6 @@ LIVE_SOURCES = {
     "datetime",
     "levels",
     "waiting",
-    "result",
     "news",
     "active_window",
     "open_windows",
@@ -150,10 +149,8 @@ def build_chat_messages(
         # Callers' system messages are skipped: the one above is canonical.
         if role == "system" or not content:
             continue
-        if messages[-1]["role"] == role:
-            messages[-1] = {"role": role, "content": messages[-1]["content"] + " " + content}
-        else:
-            messages.append({"role": role, "content": content})
+        # Its own message, never merged into the conversation before it.
+        messages.append({"role": role, "content": content})
 
     return messages
 
