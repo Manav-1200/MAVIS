@@ -64,14 +64,11 @@ const STARTUP_DELAY: Duration = Duration::from_secs(20);
 #[cfg(unix)]
 const SETUID_INTERVAL: Duration = Duration::from_secs(3600);
 
-/// Whether the sentinel is switched on. Same opt-in shape as the
-/// MAVIS_CONTEXT_* sources: reading the machine's package history is
-/// still reading something about the user, so it is their call.
+/// Whether the sentinel is switched on: `[sentinel] enabled` in
+/// config.toml, or MAVIS_SENTINEL for one run. Reading the machine's
+/// package history is reading something about the user, so it's a switch.
 pub fn enabled() -> bool {
-    matches!(
-        std::env::var("MAVIS_SENTINEL").as_deref(),
-        Ok("1") | Ok("true")
-    )
+    crate::listen::switched_on("MAVIS_SENTINEL", "sentinel", "enabled")
 }
 
 /// Which log entries a scan should consider, given the last watermark.
