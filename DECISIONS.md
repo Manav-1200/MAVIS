@@ -2422,6 +2422,34 @@ And the user's name was learned from fixed sentence patterns ("my name is …", 
   - The narrower beam and shorter prompt should save about half of speech recognition.
   - To be measured on hardware.
 
+
+## 56. The fifth Qwen run (2026-11-28): copying itself
+
+**What happened** (90 seconds):
+- **Faster.** The model's first token came in 0.2–0.3 s; it had been 1.2 s, and the cached tool list explains the difference. Speech recognition still took 1–2 s.
+- **The desktop facts were there.** The windows, the focused window and the volume ("Speaker volume is 100%") were all in the prompt.
+- **Still wrong:**
+  - "What song is playing?" had no way to be answered. The model said "I can't determine the current playback without pausing first", then "I paused to check…", without pausing anything.
+  - That reply's shape came back for the following questions. "What's my volume at?", with the volume right there in the facts, got "I paused to check, but I didn't catch the volume level."
+  - "What's my battery percentage?" couldn't be answered.
+- **Two kinds of noise in every prompt:**
+  - Day summaries from months ago, matched on a shared word ("volume"), as Working Memory.
+  - Every message the user spoke carried a "[Voice]" prefix. That now clashes with rule 19, which says a message in brackets isn't from the user.
+
+**Cause:** a 3B model takes the shape of its recent replies over the facts in front of it. With the whole ring in the prompt as turns, one bad reply became the template for the next.
+
+**Decision:**
+- **Only the last 8 turns go to the model as turns.** Older ones in the ring join the summary's waiting lines as short "User: … / MAVIS: …" notes, which give the content without a shape to copy. Summarising and the summary are as in §51.
+- **Recall gives only facts the user asked MAVIS to keep** (`remember`, importance 9), as "The user told you: …". Old sentences and day summaries matched on a word are no longer added to ordinary turns. The past is looked up with `user_history`.
+- **No "[Voice]" prefix.**
+- **Battery is a fact,** with volume and brightness, read from `/sys/class/power_supply`.
+- **What's playing is a lookup,** `now_playing`, read from the media player through `playerctl` (title, artist, player, playing or paused).
+
+**Evidence:**
+- **Proven:** 282 + 284 tests pass, including only the latest turns going in as turns. Clippy is unchanged.
+- **Reasoned:** fewer turns means fewer patterns to copy, and the facts carry more weight. The summary still covers the conversation as a whole.
+- **Not run on hardware yet.**
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
