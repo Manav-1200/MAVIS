@@ -410,6 +410,38 @@ fn edit_distance(a: &str, b: &str) -> usize {
 /// Lines waiting before they are folded into the summary.
 const SUMMARISE_AT: usize = 8;
 
+/// Commands one request may run before MAVIS has to answer.
+const MAX_STEPS: usize = 3;
+
+/// How much of a command's output the model is given.
+const COMMAND_OUTPUT_BYTES: usize = 1500;
+
+/// What this computer is, for choosing commands that fit it: the system,
+/// and which of the usual tools are installed.
+fn system_profile() -> Option<String> {
+    static PROFILE: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PROFILE
+        .get_or_init(|| {
+            let os = std::fs::read_to_string("/etc/os-release").ok().and_then(|text| {
+                text.lines()
+                    .find_map(|l| l.strip_prefix("PRETTY_NAME="))
+                    .map(|v| v.trim_matches('"').to_string())
+            });
+            let path = std::env::var("PATH").unwrap_or_default();
+            let installed = |tool: &str| std::env::split_paths(&path).any(|dir| dir.join(tool).is_file());
+            let tools: Vec<&str> = [
+                "wpctl", "pactl", "brightnessctl", "busctl", "nmcli", "bluetoothctl", "pacman", "apt", "dnf",
+                "flatpak", "systemctl", "upower", "sensors", "nvidia-smi", "wl-paste",
+            ]
+            .into_iter()
+            .filter(|tool| installed(tool))
+            .collect();
+            let os = os?;
+            Some(format!("This computer runs {}. Tools installed: {}.", os, tools.join(", ")))
+        })
+        .clone()
+}
+
 /// Turns of the conversation given to the model as turns (user and MAVIS
 /// each count one); earlier ones go in as short notes.
 const RECENT_TURNS: usize = 8;
@@ -502,8 +534,8 @@ fn with_tell(plan: serde_json::Value, line: &str) -> serde_json::Value {
         .filter_map(|a| a["text"].as_str().map(String::from))
         .collect();
     actions.retain(|a| a["type"] != "note");
-    // Undo's result is told once it's known.
-    if actions.iter().any(|a| a["type"] == "undo") {
+    // Undo's and a command's results are told once they're known.
+    if actions.iter().any(|a| a["type"] == "undo" || a["type"] == "shell") {
         return serde_json::Value::Array(actions);
     }
     let fact = if notes.is_empty() { format!("Done: {}", line) } else { notes.join(" ") };
@@ -622,8 +654,7 @@ const ACTIONS: &[Action] = &[
     act("user_history", "<number>", "look up what the user did over that many days, to answer a question about their past", None, false),
     act("remember", "<fact>", "keep a lasting fact the user told you about themselves", None, false),
     act("user_name", "<name>", "the user tells you their name or what to call them", None, false),
-    act("clipboard", "", "look up what the user copied, to answer a question about it", None, false),
-    act("now_playing", "", "look up what music or video is playing, to answer a question about it", None, false),
+    act("run_command", "<command>", "run a shell command on this computer: to find out anything the facts don't say (then answer from what it prints), or to do something no other function does", None, false),
 ];
 
 /// The actions as the model is shown them. Confirm and cancel only while
@@ -899,6 +930,8 @@ pub struct Planner {
     last_said: std::sync::Mutex<String>,
     /// Lines of conversation sent to be summarised, while that's under way.
     summarising: std::sync::Mutex<Option<usize>>,
+    /// Commands run for the current request, so one question can't loop.
+    steps: std::sync::atomic::AtomicUsize,
 }
 
 impl Planner {
@@ -930,6 +963,7 @@ impl Planner {
             last_opened: std::sync::Mutex::new(None),
             last_said: std::sync::Mutex::new(String::new()),
             summarising: std::sync::Mutex::new(None),
+            steps: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -1004,6 +1038,7 @@ impl Planner {
             rest => rest,
         };
         *self.last_said.lock().unwrap_or_else(|p| p.into_inner()) = intent.to_string();
+        self.steps.store(0, std::sync::atomic::Ordering::SeqCst);
 
         let source = event
             .payload
@@ -1020,16 +1055,9 @@ impl Planner {
             info!("Planner: leading with pending system changes");
             working_memory.push(serde_json::json!({ "source": "news", "content": spoken.text }));
         }
-        let targets: Vec<String> = {
-            let wm = self.working.read().await;
-            let mut names: Vec<String> = self.apps.iter().map(|a| a.name.clone()).collect();
-            names.extend(wm.open_windows.iter().map(|w| with_app_name(w, &self.apps).app_name));
-            names.sort();
-            names.dedup();
-            names
-        };
-        // One call: the model answers "DO <action>" or "SAY <reply>". The
-        // system prompt lives in Python; the actions are listed from code.
+        let targets = self.targets().await;
+        // One call: the model replies, or calls one of the actions listed
+        // from code. The system prompt lives in Python.
         self.bus.publish(Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
@@ -1188,12 +1216,8 @@ impl Planner {
                     Err(e) => Err(format!("Nothing was stored: {}", e)),
                 }
             }
-            "clipboard" => Err(self.clipboard_fact().await),
-            "now_playing" => Err(match crate::system::dbus::now_playing().await {
-                Ok(Some(playing)) => format!("Media players report: {}", playing),
-                Ok(None) => "No media player reports a title. Something may still be playing in a window that doesn't report it.".into(),
-                Err(e) => format!("You can't ask the media players: {}.", e),
-            }),
+            // Its output is told once it has run.
+            "run_command" => Ok(serde_json::json!([{"type": "shell", "command": arg, "description": arg}])),
             "user_name" => {
                 // Only a name they actually said, as they said it.
                 let name = said
@@ -1225,16 +1249,31 @@ impl Planner {
         let p = &event.payload;
         let kind = p["action_type"].as_str().unwrap_or_default();
         let ok = p["success"].as_bool().unwrap_or(true);
+        let said = self.last_said.lock().unwrap_or_else(|p| p.into_inner()).clone();
         let fact = match (kind, ok) {
             ("say" | "notify" | "tell", _) => return,
             ("undo", true) => format!("Undo ran: {}", p["output"].as_str().unwrap_or_default()),
+            // What a command printed, or why it failed: the model answers
+            // from it, or tries another command, a few times at most.
+            ("shell", _) => {
+                let command = p["description"].as_str().unwrap_or_default();
+                let printed = if ok { p["output"].as_str() } else { p["error"].as_str() }.unwrap_or_default();
+                let printed = crate::util::truncate_bytes(printed.trim(), COMMAND_OUTPUT_BYTES);
+                let fact = match (ok, printed.is_empty()) {
+                    (true, true) => format!("The command `{}` ran and printed nothing.", command),
+                    (true, false) => format!("The command `{}` printed:\n{}", command, printed),
+                    (false, _) => format!("The command `{}` failed: {}", command, printed),
+                };
+                let step = self.steps.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                self.report_with(&said, &fact, step < MAX_STEPS).await;
+                return;
+            }
             (_, true) => return,
             (_, false) => {
                 let reason = p["error"].as_str().unwrap_or_default().lines().next().unwrap_or_default().to_string();
                 format!("That didn't work, so it didn't happen: {}", crate::util::truncate_bytes(&reason, 160))
             }
         };
-        let said = self.last_said.lock().unwrap_or_else(|p| p.into_inner()).clone();
         self.report(&said, &fact).await;
     }
 
@@ -1269,29 +1308,15 @@ impl Planner {
         });
     }
 
-    /// What the clipboard holds, when reading it is switched on.
-    async fn clipboard_fact(&self) -> String {
-        if !context_source_enabled("MAVIS_CONTEXT_CLIPBOARD") {
-            return "You can't read the clipboard: it's switched off ([context] clipboard in config.toml).".into();
-        }
-        let copied = self.working.read().await.last_clipboard.clone().unwrap_or_default();
-        // One line: a copied terminal session is dozens of lines.
-        let flat = copied.split_whitespace().collect::<Vec<_>>().join(" ");
-        if flat.is_empty() {
-            return "The clipboard is empty.".into();
-        }
-        let total = flat.chars().count();
-        let shown: String = flat.chars().take(200).collect();
-        if total > 200 {
-            format!("The clipboard holds {} characters, beginning: \"{}…\"", total, shown)
-        } else {
-            format!("The clipboard holds: \"{}\"", shown)
-        }
-    }
-
     /// Have the model tell what happened, in its own words.
     async fn report(&self, said: &str, fact: &str) {
-        info!("Planner: telling the outcome — {}", fact);
+        self.report_with(said, fact, false).await;
+    }
+
+    /// As `report`; with `tools`, the model may act again instead (another
+    /// command after one that failed or didn't show enough).
+    async fn report_with(&self, said: &str, fact: &str, tools: bool) {
+        info!("Planner: telling the outcome — {}", crate::util::truncate_bytes(fact, 200));
         // The conversation as it stands, then the fact as the last message,
         // so it's what gets answered rather than the user's last question.
         let working_memory = self.build_working_memory("", uuid::Uuid::new_v4(), None).await;
@@ -1306,10 +1331,23 @@ impl Planner {
                 "text": said,
                 "messages": [{"role": "user", "content": note}],
                 "max_tokens": 96,
-                "temperature": 0.6,
+                "temperature": if tools { 0.3 } else { 0.6 },
                 "working_memory": working_memory,
+                "actions": if tools { action_menu(self.question_open()) } else { Vec::new() },
+                "apps": self.apps.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+                "targets": self.targets().await,
             }),
         });
+    }
+
+    /// What an app argument may be: installed apps and open windows.
+    async fn targets(&self) -> Vec<String> {
+        let wm = self.working.read().await;
+        let mut names: Vec<String> = self.apps.iter().map(|a| a.name.clone()).collect();
+        names.extend(wm.open_windows.iter().map(|w| with_app_name(w, &self.apps).app_name));
+        names.sort();
+        names.dedup();
+        names
     }
 
     /// Whether the permission gate is waiting for an answer.
@@ -1518,9 +1556,9 @@ impl Planner {
             ),
         }));
 
-        // Volume and brightness aren't private: always there to answer from.
-        if let Some(levels) = crate::system::dbus::current_levels().await {
-            items.push(serde_json::json!({ "source": "levels", "content": levels }));
+        // What this computer is, so commands that look things up fit it.
+        if let Some(profile) = system_profile() {
+            items.push(serde_json::json!({ "source": "system", "content": profile }));
         }
 
         // The windows on screen, when switched on ([context] active_window).
@@ -2735,6 +2773,31 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A command's output goes back to the model to answer from; it may
+    /// run another, a few times, then it has to answer.
+    #[tokio::test]
+    async fn a_commands_output_is_answered_from_and_steps_are_limited() {
+        let (planner, mut rx, dir) = planner_with_pending_change("command");
+        planner.handle_event(model_did("run_command df -h /home", "how much space is left")).await.unwrap();
+        let plan = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::PlanReady).unwrap();
+        assert_eq!(plan.payload["plan"], serde_json::json!([{"type": "shell", "command": "df -h /home", "description": "df -h /home"}]));
+        let done = |n: usize| Event {
+            id: uuid::Uuid::new_v4(),
+            timestamp: chrono::Utc::now(),
+            source: "executor".into(),
+            event_type: EventType::ActionComplete,
+            payload: serde_json::json!({"action_type": "shell", "description": "df -h /home", "success": true, "output": format!("aaa {}", n)}),
+        };
+        for step in 1..=MAX_STEPS {
+            planner.handle_event(done(step)).await.unwrap();
+            let asked = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
+            assert!(told(&asked)[0].contains(&format!("printed:\naaa {}", step)));
+            let can_act = asked.payload["actions"].as_array().is_some_and(|a| !a.is_empty());
+            assert_eq!(can_act, step < MAX_STEPS, "step {}", step);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A failed action is told by the model, with the reason.
     #[tokio::test]
     async fn a_failure_is_told_in_the_models_words() {
@@ -2751,7 +2814,7 @@ mod tests {
         planner.handle_event(done).await.unwrap();
         let request = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
         assert_eq!(request.payload["text"], "brighter please");
-        assert!(request.payload.get("actions").is_none(), "only a reply");
+        assert!(request.payload["actions"].as_array().is_some_and(|a| a.is_empty()), "only a reply");
         let fact = told(&request).join(" ");
         assert!(fact.contains("no backlight found") && !fact.contains("details"), "{}", fact);
         let _ = std::fs::remove_dir_all(&dir);
