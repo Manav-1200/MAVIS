@@ -91,7 +91,6 @@ const READ_ONLY_SUBCOMMANDS: &[(&str, &[&str])] = &[
     ("wpctl", &["get-volume", "status", "inspect"]),
     ("pactl", &["list", "info", "get-sink-volume", "get-source-volume", "get-sink-mute", "stat"]),
     ("busctl", &["list", "get-property", "introspect", "tree", "status"]),
-    ("nmcli", &["general", "device", "connection", "radio", ""]),
     ("systemctl", &["status", "is-active", "is-enabled", "list-units", "list-timers", "show"]),
     ("loginctl", &["", "list-sessions", "show-session", "session-status", "show-user", "list-users", "user-status"]),
     ("timedatectl", &["", "status", "show"]),
@@ -108,13 +107,97 @@ const READ_ONLY_SUBCOMMANDS: &[(&str, &[&str])] = &[
     ("brightnessctl", &["", "get", "info", "max", "-l", "-m"]),
 ];
 
+/// Settings that are easily undone and only touch the user's own session
+/// (sound, brightness, Bluetooth, Wi-Fi, media, workspaces): program and
+/// verbs. Changing these doesn't ask.
+const SESSION_SETTINGS: &[(&str, &[&str])] = &[
+    ("wpctl", &["set-volume", "set-mute", "set-default"]),
+    (
+        "pactl",
+        &[
+            "set-sink-volume", "set-sink-mute", "set-source-volume", "set-source-mute", "set-default-sink",
+            "set-default-source",
+        ],
+    ),
+    ("amixer", &["set", "sset"]),
+    ("brightnessctl", &["set", "s"]),
+    ("bluetoothctl", &["power", "connect", "disconnect"]),
+    ("playerctl", &["play", "pause", "play-pause", "stop", "next", "previous", "position", "volume"]),
+];
+
+/// Window manager actions that can't lose work or start programs.
+const UNSAFE_WINDOW_ACTIONS: &[&str] = &[
+    "spawn", "spawn-sh", "quit", "close-window", "exec", "exit", "killactive", "forcekillactive", "closewindow",
+    "kill",
+];
+
+/// The program a command segment runs and its arguments.
+fn program_and_args(segment: &str) -> Option<(String, Vec<String>)> {
+    let words = crate::util::split_command_line(segment);
+    let program = words.first()?.rsplit('/').next()?.to_string();
+    Some((program, words[1..].to_vec()))
+}
+
+/// The verb: the first argument that isn't a flag, except for the package
+/// tools, whose verbs are flags.
+fn verb<'a>(program: &str, args: &'a [String]) -> &'a str {
+    if matches!(program, "pacman" | "dpkg") {
+        args.first().map(String::as_str).unwrap_or("")
+    } else {
+        args.iter().find(|a| !a.starts_with('-')).map(String::as_str).unwrap_or("")
+    }
+}
+
+/// nmcli words that change something.
+const NMCLI_CHANGES: &[&str] = &[
+    "up", "down", "on", "off", "add", "delete", "modify", "edit", "clone", "import", "connect", "disconnect",
+    "reapply", "set", "reload", "load", "hostname", "rescan", "hotspot", "monitor",
+];
+
+/// Whether one command of a pipeline only changes an easily undone session
+/// setting.
+fn segment_sets_session(segment: &str) -> bool {
+    let Some((program, args)) = program_and_args(segment) else {
+        return false;
+    };
+    let has = |word: &str| args.iter().any(|a| a == word);
+    match program.as_str() {
+        // Radios on or off, and joining or leaving networks already set up.
+        "nmcli" => {
+            let words: Vec<&str> = args.iter().map(String::as_str).filter(|a| !a.starts_with('-')).collect();
+            matches!(
+                words.as_slice(),
+                ["radio" | "r", "wifi" | "wwan" | "all", "on" | "off"]
+                    | ["connection" | "con" | "c", "up" | "down", _]
+                    | ["device" | "dev" | "d", "connect" | "disconnect", _]
+            )
+        }
+        // Workspaces, focus, layout: anything but closing, quitting or launching.
+        "niri" => {
+            args.first().is_some_and(|a| a == "msg")
+                && has("action")
+                && !UNSAFE_WINDOW_ACTIONS.iter().any(|a| has(a))
+        }
+        "hyprctl" => has("dispatch") && !UNSAFE_WINDOW_ACTIONS.iter().any(|a| has(a)),
+        // Play, pause and skip, sent to a media player.
+        "busctl" => {
+            has("call")
+                && args.iter().any(|a| a.starts_with("org.mpris.MediaPlayer2."))
+                && args.iter().any(|a| ["Play", "Pause", "PlayPause", "Stop", "Next", "Previous"].contains(&a.as_str()))
+        }
+        _ => SESSION_SETTINGS
+            .iter()
+            .any(|(name, verbs)| *name == program && verbs.contains(&verb(&program, &args))),
+    }
+}
+
 /// Whether one command of a pipeline only reads.
 fn segment_only_reads(segment: &str) -> bool {
-    let words = crate::util::split_command_line(segment);
-    let Some(program) = words.first().map(|w| w.rsplit('/').next().unwrap_or(w)) else {
+    let Some((program, args)) = program_and_args(segment) else {
         return true;
     };
-    let args = &words[1..];
+    let program = program.as_str();
+    let args = &args[..];
     let has = |flag: &str| args.iter().any(|a| a == flag || a.starts_with(&format!("{}=", flag)));
     match program {
         // These read, unless told to edit, run, set or clear something.
@@ -126,24 +209,16 @@ fn segment_only_reads(segment: &str) -> bool {
         "journalctl" => !args.iter().any(|a| a.starts_with("--vacuum") || a == "--rotate" || a == "--flush"),
         "dmesg" => !args.iter().any(|a| a == "-c" || a == "-C" || a == "--clear" || a == "--read-clear"),
         "niri" => args.first().is_some_and(|a| a == "msg") && !args.iter().any(|a| a == "action"),
+        "nmcli" => !args.iter().any(|a| NMCLI_CHANGES.contains(&a.as_str())),
         "hyprctl" | "swaymsg" => !args.iter().any(|a| ["dispatch", "keyword", "exec", "reload", "kill"].contains(&a.as_str())),
         _ if READ_ONLY_PROGRAMS.contains(&program) => true,
-        _ => {
-            // The verb: the first argument that isn't a flag, except for the
-            // package tools, whose verbs are flags.
-            let first = if matches!(program, "pacman" | "dpkg") {
-                args.first().map(String::as_str).unwrap_or("")
-            } else {
-                args.iter().find(|a| !a.starts_with('-')).map(String::as_str).unwrap_or("")
-            };
-            READ_ONLY_SUBCOMMANDS.iter().any(|(name, reads)| *name == program && reads.contains(&first))
-        }
+        _ => READ_ONLY_SUBCOMMANDS.iter().any(|(name, reads)| *name == program && reads.contains(&verb(program, args))),
     }
 }
 
-/// Whether a whole command only reads: every part of every pipeline only
-/// reads, nothing is written to a file, and nothing is substituted in.
-fn only_reads(command: &str) -> bool {
+/// Whether every part of every pipeline passes `each`, with nothing written
+/// to a file and nothing substituted in.
+fn every_segment(command: &str, each: impl Fn(&str) -> bool) -> bool {
     let quiet = command.replace("2>/dev/null", "").replace("2>&1", "").replace(">/dev/null", "");
     if quiet.contains('>') || quiet.contains('`') || quiet.contains("$(") || quiet.contains("<(") {
         return false;
@@ -152,7 +227,18 @@ fn only_reads(command: &str) -> bool {
         .split(['|', ';', '&'])
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .all(segment_only_reads)
+        .all(each)
+}
+
+/// Whether a whole command only reads.
+fn only_reads(command: &str) -> bool {
+    every_segment(command, segment_only_reads)
+}
+
+/// Whether a whole command only reads or changes easily undone session
+/// settings, and at least one part changes one.
+fn only_sets_session(command: &str) -> bool {
+    every_segment(command, |s| segment_only_reads(s) || segment_sets_session(s))
 }
 
 /// Arguments that hand a program code to run: `sh -c …`, `python -c …`.
@@ -344,6 +430,9 @@ fn assess_shell(command: &str) -> Assessment {
     if !elevated && !destructive && only_reads(command) {
         return Assessment { score: 1, verdict: Verdict::Allow, reason: "only reads".into(), what };
     }
+    if !elevated && !destructive && only_sets_session(command) {
+        return Assessment { score: 2, verdict: Verdict::Allow, reason: "an easily undone setting".into(), what };
+    }
 
     let score = match (elevated, destructive) {
         (true, true) => 9,
@@ -445,8 +534,41 @@ mod tests {
             "journalctl --vacuum-time=1d",
             "date -s 10:00",
             "nano notes.txt",
+            "nmcli connection delete home",
+            "nmcli general hostname box",
         ] {
             assert_ne!(shell(changes).verdict, Verdict::Allow, "{}", changes);
+        }
+    }
+
+    /// Sound, brightness, radios, media and workspaces change without
+    /// asking; closing, launching and root still ask.
+    #[test]
+    fn session_settings_change_without_asking() {
+        for setting in [
+            "wpctl set-volume @DEFAULT_AUDIO_SINK@ 30%",
+            "pactl set-sink-mute @DEFAULT_SINK@ toggle",
+            "brightnessctl set 50%",
+            "bluetoothctl power on",
+            "nmcli radio wifi off",
+            "nmcli connection up home",
+            "niri msg action focus-workspace 3",
+            "busctl --user call org.mpris.MediaPlayer2.player /org/mpris/MediaPlayer2 org.mpris.MediaPlayer2.Player Pause",
+            "wpctl set-volume @DEFAULT_AUDIO_SINK@ 30% && wpctl get-volume @DEFAULT_AUDIO_SINK@",
+        ] {
+            let a = shell(setting);
+            assert_eq!((a.score, &a.verdict), (2, &Verdict::Allow), "{}", setting);
+        }
+        for asks in [
+            "niri msg action spawn -- alpha",
+            "niri msg action close-window",
+            "niri msg action quit",
+            "hyprctl dispatch exec alpha",
+            "sudo wpctl set-volume @DEFAULT_AUDIO_SINK@ 30%",
+            "wpctl set-volume @DEFAULT_AUDIO_SINK@ 30% > notes.txt",
+            "brightnessctl set 50% ; rm notes.txt",
+        ] {
+            assert_ne!(shell(asks).verdict, Verdict::Allow, "{}", asks);
         }
     }
 
