@@ -49,6 +49,10 @@ def _speech_gate_enabled() -> bool:
     return os.environ.get("MAVIS_SPEECH_GATE", "1").lower() not in ("0", "false", "off")
 
 
+# Beam width for decoding.
+BEAM_SIZE = 2
+
+
 class STTEngine:
     """
     AI-agnostic STT wrapper. Currently backed by faster-whisper.
@@ -272,8 +276,10 @@ class STTEngine:
 
         segments, info = self._model.transcribe(
             audio,
-            beam_size=5,
-            best_of=5,
+            # A narrow beam: a wide one costs most of the wait on the
+            # processor for little difference in short spoken requests.
+            beam_size=BEAM_SIZE,
+            best_of=BEAM_SIZE,
             # 2.0 → 1.0 (the standard setting). Patience widens the beam
             # search beyond beam_size; doubling it roughly doubled decode
             # time for no difference observed in the transcripts.
@@ -284,21 +290,10 @@ class STTEngine:
             # Whisper sees only the speech regions (see SPEECH_GATE_OPTIONS).
             vad_filter=gate,
             vad_parameters=SPEECH_GATE_OPTIONS if gate else None,
-            # Bias the decoder toward the vocabulary actually used when
-            # talking to a desktop assistant. This is not a filter: it tells
-            # Whisper which rare words exist, so a weak signal resolves to
-            # the right word and to "MAVIS". App names come from this
-            # machine, not from here.
-            # Written as things said to her: a bare "MAVIS." is misheard as
-            # similar-sounding words. App names go
-            # first: a prompt over ~220 tokens loses its beginning, and the
-            # name matters more than the last few apps.
-            initial_prompt=(
-                (f"Apps: {hints}. " if hints else "")
-                + "Mavis, can you hear me? Mavis, open the terminal. Mavis, what's "
-                "on my clipboard? Mavis, close the browser window. Mavis, which "
-                "workspace and project am I on? Volume up, brightness down."
-            ),
+            # Which rare words exist: her name and this machine's apps, so a
+            # weak signal resolves to them. Not a filter, and kept short:
+            # every word of it is read again on each transcription.
+            initial_prompt=(f"Apps: {hints}. " if hints else "") + "Talking to Mavis.",
         )
 
         # Consume generator so we can inspect per-segment confidence
