@@ -2391,6 +2391,37 @@ And the user's name was learned from fixed sentence patterns ("my name is …", 
   - The engine was run against a scripted model. A tool call split across lines is read whole. A broken call is neither spoken nor replaced by a stock line. A raw summary keeps all its lines.
 - **Not run on hardware yet.**
 
+
+## 55. The fourth Qwen run (2026-11-28): facts, speed and hearing
+
+**What happened** (90 seconds; reported as slow, imprecise, and missing what was said):
+- **MAVIS knew almost nothing about the desktop.** With `MAVIS_PROMPT_DEBUG`, the prompt showed the date and time and nothing else. The windows and the volume were behind `MAVIS_CONTEXT_ACTIVE_WINDOW`, an environment variable that wasn't set for the run. "What's my volume at?" got "Your volume is at 50%", which was made up, and "It's not at 50%" couldn't be answered.
+- **A result was answered as the user's question.** The mic warning was handed over as a fact beside the conversation, and the model answered the last thing the user had asked, saying the volume again.
+- **About 4–5 seconds a reply:**
+  - Speech recognition took about 2 s for 2.6 s of speech, with a 5-wide beam and a long initial prompt of app names and sample sentences.
+  - The model's first token took 1.2 s on every call with actions. Reply calls took 0.14 s. The tool list (about 2,400 tokens) was processed afresh each time, because reply calls used a different system prompt and threw away the cache of it.
+- **Half of what was said went unheard.** The capture level was 0.4, which I suggested after the last run, and that was a mistake: speech peaked at 0.08–0.16 against a 0.075 start threshold. One request was cut off mid-word, and the too-quiet warning fired. The clipping in the last run came from MAVIS's own voice through the speakers, not from the user at 0.5.
+- **The clipboard was still read by a phrase list** ("clipboard", "copied", "paste", …), and Whisper's prompt held sample sentences.
+
+**Decision:**
+- **Switches live in `config/config.toml`,** not in variables that have to be set every run. `[context] active_window` (on as shipped), `clipboard`, `calendar` and `browser` (off), and `[sentinel] enabled` (on). Everything stays local. A variable still overrides a switch for one run.
+- **Volume and brightness are always facts.** They aren't private.
+- **The clipboard is a lookup action,** `clipboard`, for when the user asks about what they copied, and it is still behind its switch. The phrase list is removed.
+- **A told fact is the last message,** in brackets, marked as not from the user, after the conversation, so it's what gets answered. Rule 19 says what a bracketed message is. The worker never merges the current message into the turn before it.
+- **One system prompt for every call.** The worker keeps the last action list and sends the same system prompt with the tools for reply-only calls, which still allow only a reply. Warm-up primes that same prompt. The tool list is then cached across calls.
+- **Faster speech recognition:** beam width 2 (was 5), app names capped at 250 characters, and the sample sentences replaced with "Talking to Mavis."
+- **Mic at 0.5.**
+
+**Evidence:**
+- **Proven:**
+  - 281 + 283 tests pass. Switches are read from the config and overridden by their variable, and told facts arrive as the last message.
+  - Checked in Python: the message builder keeps the told fact as its own message after the conversation.
+  - Clippy is unchanged. Ruff is clean.
+- **Reasoned:**
+  - Caching the tool list should save about 1 s on calls with actions.
+  - The narrower beam and shorter prompt should save about half of speech recognition.
+  - To be measured on hardware.
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
