@@ -2484,6 +2484,28 @@ And the user's name was learned from fixed sentence patterns ("my name is …", 
 - **Reasoned:** `busctl`'s list and property output follows systemd's documented format. This workspace has no session bus to try it on.
 - **Not run on hardware.**
 
+
+## 59. The open action: commands the model writes
+
+**Problem:** every question about the computer needed its own code: one lookup for the volume, one for the battery, one for what's playing, and a hand-written fact for each. The user asked that MAVIS answer from its own intelligence, since nobody can write a lookup for everything people will ask. It should be a system-wide intelligence, not a bot.
+
+**Decision:**
+- **One new action, `run_command <command>`.** The model writes the command itself. It is used to find out anything the facts don't say, then answer from what the command printed, or to do something no other action does.
+- **The output goes back to the model** (up to 1,500 bytes), which answers or acts again. A request gets at most three steps, so it can try another command when the first one fails or shows too little.
+- **The gate decides, not a list of allowed questions:**
+  - A command that only reads runs without asking (score 1). That means: its programs are known readers, nothing writes (`>`, `sed -i`, `find -delete`, `date -s` and so on), and there is no `$(…)` or backtick.
+  - Anything else asks first, as before.
+  - `sudo` is run as `pkexec`, so the system asks for the password, after "yes, administrator".
+  - Irreversible commands are still refused.
+- **Commands are stopped after 30 seconds** and get no input.
+- **Removed:** the volume, brightness and battery facts given on every turn, the `now_playing` and clipboard lookups, and the `[context] clipboard` switch. In their place, every turn gets a fact naming the system and the tools installed, so the model knows which commands will work.
+- **Prompt:** never guess anything about the computer; find out with a command. The tool grammar allows escaped quotes, so commands can contain them.
+
+**Evidence:**
+- **Proven:** 285 + 287 tests pass, including read-only commands running without asking, a command's output being answered from, and the step limit. Clippy is unchanged. Ruff is clean. The new grammar loads in llama.cpp.
+- **Reasoned:** a 3B model writes common Linux commands well. Whether it picks good ones on its own, and how often it needs a second try, only a hardware run will show.
+- **Not run on hardware.**
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
