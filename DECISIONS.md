@@ -2466,6 +2466,24 @@ And the user's name was learned from fixed sentence patterns ("my name is …", 
 - **Proven:** 282 + 284 tests pass. Clippy is unchanged. Ruff is clean.
 - **Not run on hardware.**
 
+
+## 58. Media players without playerctl
+
+**Problem:** `playerctl` wasn't installed on the development machine, and nothing said so. So "what's playing?" could never work, and pausing for MAVIS's voice did nothing. It was one more thing every user would have had to install.
+
+**Decision:** MAVIS talks to media players over D-Bus itself (MPRIS), with `busctl`, which comes with systemd. All of this lives in `system/dbus.rs`:
+- **Listing players:** players are found by their `org.mpris.MediaPlayer2.*` names.
+- **What's playing:** each player's status and metadata (title and artists) are read.
+- **Control:** play, pause, skip and back go to the player that's playing, or the first one.
+- **MAVIS's own voice:** pausing for it, and resuming after, use the same calls.
+
+`playerctl` is no longer used anywhere.
+
+**Evidence:**
+- **Proven:** 283 + 285 tests pass, including reading a player's metadata as busctl prints it. Clippy is unchanged.
+- **Reasoned:** `busctl`'s list and property output follows systemd's documented format. This workspace has no session bus to try it on.
+- **Not run on hardware.**
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
