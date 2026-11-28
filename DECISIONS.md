@@ -2450,6 +2450,22 @@ And the user's name was learned from fixed sentence patterns ("my name is …", 
 - **Reasoned:** fewer turns means fewer patterns to copy, and the facts carry more weight. The summary still covers the conversation as a whole.
 - **Not run on hardware yet.**
 
+
+## 57. The sixth Qwen run (2026-11-28): what's playing
+
+**What happened** (one minute):
+- **`now_playing` was called and said nothing was playing,** while something was. `playerctl metadata` asks only the first player, and a player that has stopped answers with no title.
+- **Replies ended with advice nobody asked for** ("check the volume or try pausing and resuming"). The next two replies copied that ending, one of them to a misheard question.
+- **Speed held:** first tokens in 0.2–0.3 s once warm.
+
+**Decision:**
+- **`now_playing` asks every player** (`playerctl -l`) and reports each one that has a title, the playing ones first. When none reports a title, the fact says something may still be playing in a window that doesn't report it, so the open windows stay in play. When `playerctl` isn't installed, it says so.
+- **Rule 5 also rules out suggesting things to try that weren't asked for.**
+
+**Evidence:**
+- **Proven:** 282 + 284 tests pass. Clippy is unchanged. Ruff is clean.
+- **Not run on hardware.**
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
