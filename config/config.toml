@@ -28,7 +28,6 @@ listen_mode = "always"
 # What MAVIS may know about your desktop. Everything stays on this machine.
 # Each MAVIS_CONTEXT_* variable overrides its line for one run.
 active_window = true     # the focused window, open apps and their workspaces
-clipboard = false        # read only when you ask about what you copied
 calendar = false
 browser = false
 
