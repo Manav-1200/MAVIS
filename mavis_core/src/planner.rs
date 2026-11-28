@@ -16,16 +16,11 @@ use tokio::sync::{Mutex, RwLock};
 // Phase 6 privacy gate: each context source is off by default and must be
 // explicitly opted into. This is the specific gate Phase 6 itself asks for —
 // not the fuller 5-tier system Phase 8 builds later.
-/// Is the user asking about what they copied?
-fn mentions_clipboard(text: &str) -> bool {
-    let lower = text.to_lowercase();
-    ["clipboard", "copied", "i copy", "just copy", "paste", "pasted"]
-        .iter()
-        .any(|w| lower.contains(w))
-}
-
+/// A context source's switch: `[context] <key>` in config.toml, or its
+/// MAVIS_CONTEXT_* variable for one run.
 fn context_source_enabled(env_var: &str) -> bool {
-    matches!(std::env::var(env_var).as_deref(), Ok("1") | Ok("true"))
+    let key = env_var.trim_start_matches("MAVIS_CONTEXT_").to_lowercase();
+    crate::listen::switched_on(env_var, "context", &key)
 }
 
 // Common code file extensions, used only by the generic fallback below —
@@ -623,6 +618,7 @@ const ACTIONS: &[Action] = &[
     act("user_history", "<number>", "look up what the user did over that many days, to answer a question about their past", None, false),
     act("remember", "<fact>", "keep a lasting fact the user told you about themselves", None, false),
     act("user_name", "<name>", "the user tells you their name or what to call them", None, false),
+    act("clipboard", "", "look up what the user copied, to answer a question about it", None, false),
 ];
 
 /// The actions as the model is shown them. Confirm and cancel only while
@@ -1190,6 +1186,7 @@ impl Planner {
                     Err(e) => Err(format!("Nothing was stored: {}", e)),
                 }
             }
+            "clipboard" => Err(self.clipboard_fact().await),
             "user_name" => {
                 // Only a name they actually said, as they said it.
                 let name = said
@@ -1265,11 +1262,33 @@ impl Planner {
         });
     }
 
+    /// What the clipboard holds, when reading it is switched on.
+    async fn clipboard_fact(&self) -> String {
+        if !context_source_enabled("MAVIS_CONTEXT_CLIPBOARD") {
+            return "You can't read the clipboard: it's switched off ([context] clipboard in config.toml).".into();
+        }
+        let copied = self.working.read().await.last_clipboard.clone().unwrap_or_default();
+        // One line: a copied terminal session is dozens of lines.
+        let flat = copied.split_whitespace().collect::<Vec<_>>().join(" ");
+        if flat.is_empty() {
+            return "The clipboard is empty.".into();
+        }
+        let total = flat.chars().count();
+        let shown: String = flat.chars().take(200).collect();
+        if total > 200 {
+            format!("The clipboard holds {} characters, beginning: \"{}…\"", total, shown)
+        } else {
+            format!("The clipboard holds: \"{}\"", shown)
+        }
+    }
+
     /// Have the model tell what happened, in its own words.
     async fn report(&self, said: &str, fact: &str) {
         info!("Planner: telling the outcome — {}", fact);
-        let mut working_memory = self.build_working_memory(said, uuid::Uuid::new_v4(), None).await;
-        working_memory.push(serde_json::json!({ "source": "result", "content": fact }));
+        // The conversation as it stands, then the fact as the last message,
+        // so it's what gets answered rather than the user's last question.
+        let working_memory = self.build_working_memory("", uuid::Uuid::new_v4(), None).await;
+        let note = format!("[Not from the user. Tell them, in your own words: {}]", fact);
         self.bus.publish(Event {
             id: uuid::Uuid::new_v4(),
             timestamp: chrono::Utc::now(),
@@ -1278,7 +1297,7 @@ impl Planner {
             payload: serde_json::json!({
                 "request_type": "chat",
                 "text": said,
-                "messages": [{"role": "user", "content": said}],
+                "messages": [{"role": "user", "content": note}],
                 "max_tokens": 96,
                 "temperature": 0.6,
                 "working_memory": working_memory,
@@ -1507,7 +1526,12 @@ impl Planner {
             ),
         }));
 
-        // Phase 6 — active window and clipboard, both off by default.
+        // Volume and brightness aren't private: always there to answer from.
+        if let Some(levels) = crate::system::dbus::current_levels().await {
+            items.push(serde_json::json!({ "source": "levels", "content": levels }));
+        }
+
+        // The windows on screen, when switched on ([context] active_window).
         if context_source_enabled("MAVIS_CONTEXT_ACTIVE_WINDOW") {
             // App names, not window ids: "Moovie", not "org.kde.moovie".
             let active = snapshot.active_window.as_ref().map(|w| with_app_name(w, &self.apps));
@@ -1528,9 +1552,6 @@ impl Planner {
 
             if let Some(content) = describe_open_windows(&open_windows, snapshot.active_workspace) {
                 items.push(serde_json::json!({ "source": "open_windows", "content": content }));
-            }
-            if let Some(levels) = crate::system::dbus::current_levels().await {
-                items.push(serde_json::json!({ "source": "levels", "content": levels }));
             }
             // The desktop names itself; nothing here assumes which one.
             if let Ok(desktop) = std::env::var("XDG_CURRENT_DESKTOP") {
@@ -1626,37 +1647,6 @@ impl Planner {
                     "source": "calendar",
                     "content": content,
                 }));
-            }
-        }
-
-        // Only when the user is asking about it. Sent on every turn, the
-        // clipboard was noise the model had to ignore — and whatever
-        // happened to be copied (a launch command, a password) went into
-        // every prompt.
-        if context_source_enabled("MAVIS_CONTEXT_CLIPBOARD") && mentions_clipboard(current_intent) {
-            if let Some(clipboard) = &snapshot.last_clipboard {
-                // Flattened to one line first. A copied terminal session
-                // is thousands of characters over dozens of lines, and
-                // pasting it raw broke the prompt apart: every line after
-                // the first read as its own context item, and a stray
-                // word from a shell prompt became the answer.
-                let flat = clipboard.split_whitespace().collect::<Vec<_>>().join(" ");
-                if !flat.is_empty() {
-                    let total = flat.chars().count();
-                    let shown: String = flat.chars().take(200).collect();
-                    let content = if total > 200 {
-                        format!(
-                            "The user's clipboard holds {} characters, beginning: \"{}…\"",
-                            total, shown
-                        )
-                    } else {
-                        format!("The user's clipboard contains: \"{}\"", shown)
-                    };
-                    items.push(serde_json::json!({
-                        "source": "clipboard",
-                        "content": content,
-                    }));
-                }
             }
         }
 
@@ -2318,6 +2308,18 @@ mod tests {
         out
     }
 
+    /// What the model was handed to tell, from a request's last message.
+    fn told(request: &Event) -> Vec<String> {
+        request.payload["messages"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| m["content"].as_str())
+            .filter_map(|c| c.strip_prefix("[Not from the user. Tell them, in your own words: "))
+            .map(|c| c.trim_end_matches(']').to_string())
+            .collect()
+    }
+
     /// The facts handed to the model with a request, by source.
     fn facts(request: &Event, source: &str) -> Vec<String> {
         request.payload["working_memory"]
@@ -2569,7 +2571,7 @@ mod tests {
             drain(rx)
                 .into_iter()
                 .filter(|e| e.event_type == EventType::WorkerRequest)
-                .flat_map(|e| facts(&e, "result"))
+                .flat_map(|e| told(&e))
                 .collect()
         };
         planner.handle_event(model_did("system_changes 7", "what changed lately")).await.unwrap();
@@ -2643,13 +2645,10 @@ mod tests {
         for (action, said) in cases {
             planner.handle_event(model_did(action, said)).await.unwrap();
             let events = drain(&mut rx);
-            let result = events.iter().find(|e| e.event_type == EventType::WorkerRequest).and_then(|e| {
-                e.payload["working_memory"]
-                    .as_array()?
-                    .iter()
-                    .find(|i| i["source"] == "result")
-                    .and_then(|i| i["content"].as_str().map(String::from))
-            });
+            let result = events
+                .iter()
+                .find(|e| e.event_type == EventType::WorkerRequest)
+                .and_then(|e| told(e).into_iter().next());
             let plan = events.iter().find(|e| e.event_type == EventType::PlanReady).map(|e| e.payload["plan"].clone());
             turns.push(match (plan, result) {
                 (Some(plan), None) => Ok(plan),
@@ -2687,7 +2686,7 @@ mod tests {
         let events = drain(&mut rx);
         assert!(!events.iter().any(|e| e.event_type == EventType::PlanReady));
         let asked = events.iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
-        assert_eq!(facts(asked, "result"), ["the mic is too quiet"]);
+        assert_eq!(told(asked), ["the mic is too quiet"]);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2702,7 +2701,7 @@ mod tests {
         planner.handle_event(model_did("user_name Alex", "you can call me whatever")).await.unwrap();
         assert_eq!(planner.working.read().await.user_name.as_deref(), Some("Robin"), "never invented");
         let asked = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
-        assert!(facts(&asked, "result")[0].contains("isn't a name they said"));
+        assert!(told(&asked)[0].contains("isn't a name they said"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2723,8 +2722,8 @@ mod tests {
         let request = drain(&mut rx).into_iter().find(|e| e.event_type == EventType::WorkerRequest).unwrap();
         assert_eq!(request.payload["text"], "brighter please");
         assert!(request.payload.get("actions").is_none(), "only a reply");
-        let wm = request.payload["working_memory"].to_string();
-        assert!(wm.contains("no backlight found") && !wm.contains("details"), "{}", wm);
+        let fact = told(&request).join(" ");
+        assert!(fact.contains("no backlight found") && !fact.contains("details"), "{}", fact);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
