@@ -2366,6 +2366,31 @@ And the user's name was learned from fixed sentence patterns ("my name is …", 
 - **Reasoned:** an action now costs a second, short model call for its reply. In both runs that took 0.25–0.5 s, and it starts while the action runs.
 - **Not run on hardware yet.**
 
+
+## 54. The third Qwen run (2026-11-28)
+
+**What happened** (three minutes, Sentinel on, music playing):
+- **Replies were full sentences.** "What's my name?" → "Your name is Manav." The fragments from §53's run were gone.
+- **Every tool call was cut off and read aloud.** "Close the music" and "pause the music" each spoke "<tool_call>". The engine stops a reply early at its first line break, to save time on speech, and a tool call has a line break straight after `<tool_call>`.
+- **Asked about recent changes, MAVIS said "Let me check the last few days" and checked nothing.** The tool prompt told it to answer every question in words, which also ruled out the functions that look things up to answer questions.
+- **It heard itself.** The end of that sentence came back through the mic as "Let me check the last one". The echo check only knew exact matches, so it went to the model as the user. The input was clipping (1.26× full scale), which makes speaker bleed worse.
+- **From there it repeated the same sentence** to "repeat that", to a request to say something again, and to "What am I looking at?".
+- **"Yeah, sure, last morning" (confidence 0.54)** was treated as unclear.
+
+**Decision:**
+- **A tool call is never cut short.** Early stopping applies only to spoken replies, not to output that starts with `<`. A call that still can't be read is never spoken. A summary (raw) is read to its end too. It had also been cut at its first line.
+- **No stock lines for empty output.** An empty reply says nothing. "I'm here." and "I didn't understand that." are removed.
+- **Looking up is separate from changing.** Functions are called for things the user asks to have done, and for questions only a lookup function can answer (`system_changes`, `update_details`, `user_history`, which are now described as lookups). A question about something a function could change is still answered from the facts. MAVIS must never say it will check without calling the function.
+- **The echo check knows misheard repeats.** A transcript of four or more words, at least 80% of them words MAVIS just said, in order, counts as its own voice.
+- **Small hold-back on repeats.** The model now looks back 256 tokens and a repeat is held back slightly (penalty 1.1), enough to reach its own last reply without bending names copied from the user.
+- **"Didn't catch that" below confidence 0.5** (was 0.55).
+
+**Evidence:**
+- **Proven:**
+  - 280 + 282 tests pass, including the misheard echo. Clippy is unchanged. Ruff is clean.
+  - The engine was run against a scripted model. A tool call split across lines is read whole. A broken call is neither spoken nor replaced by a stock line. A raw summary keeps all its lines.
+- **Not run on hardware yet.**
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
