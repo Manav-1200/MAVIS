@@ -14,6 +14,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 192 commits since `v0.3.0-ai-worker`, covering Phases 4 through 8.5.
 
 ### Added
+- **Commands MAVIS works out itself:** for anything its actions and facts don't cover, the model writes a shell command, reads what it prints and answers from it, up to three commands per request. Commands that only read run without asking; anything else asks first, `sudo` goes through `pkexec`, and a command is stopped after 30 seconds. The hand-written volume, brightness, battery, what's-playing and clipboard lookups are gone.
 - **"Close whatever you just opened"** closes the app MAVIS last opened. "Close the active window" works without the model.
 - **Requests in your own words:** when no rule knows a request ("it's way too loud", "kill the browser", "go to my third desktop"), the model picks one of MAVIS's commands, or none. The pick goes through the same rules and confirmations as a spoken command; with none, MAVIS replies as before. Questions go straight to the reply.
 - **Window and system controls by voice:** switch workspace, full screen, volume and brightness to a level, Bluetooth and Wi-Fi on or off, lock, log out, suspend, shut down and restart. The last four ask first.
