@@ -2506,6 +2506,27 @@ And the user's name was learned from fixed sentence patterns ("my name is …", 
 - **Reasoned:** a 3B model writes common Linux commands well. Whether it picks good ones on its own, and how often it needs a second try, only a hardware run will show.
 - **Not run on hardware.**
 
+
+## 60. Easily undone settings don't ask
+
+**Problem:** after §59, only commands that read ran without asking. Turning the volume down or Bluetooth on through a command would have waited for a yes. The user asked that small things like these never need approval.
+
+**Decision:**
+- **A second kind of command runs without asking (score 2):** one that only changes a setting that is easily undone and touches only the user's session.
+  - Volume, mute and default device (`wpctl`, `pactl`, `amixer`).
+  - Brightness (`brightnessctl`).
+  - Bluetooth power and connecting devices (`bluetoothctl`).
+  - Wi-Fi on or off, and joining or leaving networks already set up (`nmcli`).
+  - Play, pause and skip (`playerctl`, or MPRIS over `busctl`).
+  - Window manager actions (`niri msg action`, `hyprctl dispatch`), except closing windows, quitting and launching programs.
+- **Such a command may also read,** but anything else in it, `sudo`, a `>` redirect or a substitution makes it ask as before.
+- **`rfkill` is left out:** its name contains "kill", which the destructive check catches, and `bluetoothctl` and `nmcli` already do the same job.
+- **Fixed on the way:** §59 counted any `nmcli connection …` or `nmcli device …` command as read-only, which would have let `nmcli connection delete` run without asking. nmcli now reads only when none of its changing words is present.
+
+**Evidence:**
+- **Proven:** 286 + 288 tests pass. A new test checks that the settings above run without asking, and that closing, launching, root, redirects and chained deletes still ask. Clippy is unchanged.
+- **Not run on hardware.**
+
 ---
 
 *Maintained alongside `PHASES.md`. When a decision is made or a problem is solved, add an entry here in the same change.*
