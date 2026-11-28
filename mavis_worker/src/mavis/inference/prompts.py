@@ -177,7 +177,8 @@ TOOLS_PROMPT = """
 
 # Tools
 
-Call one of these functions only when the user asks you to do something now and a function does exactly that. For anything else, including any question (even about something a function could change), answer in your own words and change nothing. Never say you did something without calling the function.
+Call a function when the user asks you to do something now and a function does exactly that, or asks something only a function that looks things up can answer. Never say you did, are doing or will do something, or that you'll check, without calling the function.
+Anything else you answer in your own words. A question about something a function could change (a level, a window, a setting) is answered from the facts above, and nothing is changed.
 
 You are provided with function signatures within <tools></tools> XML tags:
 <tools>
