@@ -186,35 +186,79 @@ fn battery() -> Option<String> {
     None
 }
 
-/// What the media players say is playing: "Title by Artist (in Player,
-/// playing)", the playing one first. None when no player reports a title.
-/// Err when playerctl, which asks them, isn't installed.
+// ---------------------------------------------------------------------
+// Media players, over D-Bus (MPRIS) with busctl, which comes with systemd.
+// ---------------------------------------------------------------------
+
+const MPRIS_PREFIX: &str = "org.mpris.MediaPlayer2.";
+const MPRIS_PATH: &str = "/org/mpris/MediaPlayer2";
+const MPRIS_PLAYER: &str = "org.mpris.MediaPlayer2.Player";
+
+async fn busctl(args: &[&str]) -> Result<std::process::Output> {
+    let run = Command::new("busctl").arg("--user").args(args).output();
+    match tokio::time::timeout(std::time::Duration::from_secs(2), run).await {
+        Ok(Ok(out)) => Ok(out),
+        Ok(Err(_)) => Err(anyhow::anyhow!("busctl isn't installed, so media players can't be reached")),
+        Err(_) => Err(anyhow::anyhow!("the media players didn't answer in time")),
+    }
+}
+
+/// Every media player on the session bus, by its bus name.
+pub async fn media_players() -> Result<Vec<String>> {
+    let out = busctl(&["list", "--no-legend", "--no-pager"]).await?;
+    Ok(String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|n| n.starts_with(MPRIS_PREFIX))
+        .map(String::from)
+        .collect())
+}
+
+/// "Playing", "Paused" or "Stopped".
+pub async fn player_status(player: &str) -> Option<String> {
+    let out = busctl(&["get-property", player, MPRIS_PATH, MPRIS_PLAYER, "PlaybackStatus"]).await.ok()?;
+    // `s "Playing"`
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split('"').nth(1).map(String::from)
+}
+
+/// Ask a player to Pause, Play, PlayPause, Next or Previous.
+pub async fn player_call(player: &str, method: &str) -> bool {
+    busctl(&["call", player, MPRIS_PATH, MPRIS_PLAYER, method]).await.is_ok_and(|o| o.status.success())
+}
+
+/// A player's name as people say it: "org.mpris.MediaPlayer2.vlc.instance42" → "vlc".
+fn player_name(player: &str) -> &str {
+    let name = player.trim_start_matches(MPRIS_PREFIX);
+    name.split('.').next().unwrap_or(name)
+}
+
+/// Title and artist from `busctl --json=short get-property … Metadata`.
+fn read_metadata(json: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    let data = &value["data"];
+    let title = data["xesam:title"]["data"].as_str().unwrap_or_default().trim().to_string();
+    let artist = match &data["xesam:artist"]["data"] {
+        serde_json::Value::Array(names) => names.iter().filter_map(|n| n.as_str()).collect::<Vec<_>>().join(", "),
+        other => other.as_str().unwrap_or_default().to_string(),
+    };
+    (!title.is_empty()).then_some((title, artist.trim().to_string()))
+}
+
+/// What the media players say is playing: "Title by Artist (in player,
+/// playing)", the playing ones first. None when none reports a title.
 pub async fn now_playing() -> Result<Option<String>> {
-    let run = |args: Vec<String>| async move {
-        tokio::time::timeout(std::time::Duration::from_secs(2), Command::new("playerctl").args(args).output()).await
-    };
-    let listed = match run(vec!["-l".into()]).await {
-        Ok(Ok(out)) => out,
-        Ok(Err(_)) => return Err(anyhow::anyhow!("playerctl isn't installed")),
-        Err(_) => return Ok(None),
-    };
     let mut found: Vec<(bool, String)> = Vec::new();
-    for player in String::from_utf8_lossy(&listed.stdout).lines().map(str::trim).filter(|p| !p.is_empty()) {
-        let format = "{{title}}\t{{artist}}\t{{status}}";
-        let Ok(Ok(out)) = run(vec!["-p".into(), player.into(), "metadata".into(), "--format".into(), format.into()]).await else {
+    for player in media_players().await? {
+        let Ok(out) = busctl(&["--json=short", "get-property", &player, MPRIS_PATH, MPRIS_PLAYER, "Metadata"]).await else {
             continue;
         };
-        let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let mut fields = line.split('\t');
-        let title = fields.next().unwrap_or_default().trim();
-        if !out.status.success() || title.is_empty() {
+        let Some((title, artist)) = read_metadata(&String::from_utf8_lossy(&out.stdout)) else {
             continue;
-        }
-        let artist = fields.next().unwrap_or_default().trim();
-        let status = fields.next().unwrap_or_default().trim().to_lowercase();
+        };
+        let status = player_status(&player).await.unwrap_or_default().to_lowercase();
         let by = if artist.is_empty() { String::new() } else { format!(" by {}", artist) };
-        let name = player.split('.').next().unwrap_or(player);
-        found.push((status == "playing", format!("{}{} (in {}, {})", title, by, name, status)));
+        found.push((status == "playing", format!("{}{} (in {}, {})", title, by, player_name(&player), status)));
     }
     // Playing before paused or stopped.
     found.sort_by_key(|(playing, _)| !playing);
@@ -245,20 +289,43 @@ async fn send_notification(title: &str, body: &str) -> Result<String> {
     first_of(&[&["notify-send", title, body]]).await
 }
 
+/// Play, pause, skip: sent to the player that's playing, or the first one.
 async fn media_control(action: &str) -> Result<String> {
-    match Command::new("playerctl").arg(action).output().await {
-        Ok(o) if o.status.success() => Ok(format!("Media {} via playerctl", action)),
-        _ => {
-            let method = match action {
-                "play-pause" => "PlayPause",
-                "next" => "Next",
-                "previous" => "Previous",
-                "pause" => "Pause",
-                "play" => "Play",
-                _ => action,
-            };
-            let member = format!("org.mpris.MediaPlayer2.Player.{}", method);
-            first_of(&[&["dbus-send", "--type=method_call", "--dest=org.mpris.MediaPlayer2", "/org/mpris/MediaPlayer2", &member]]).await
+    let method = match action {
+        "play-pause" => "PlayPause",
+        "next" => "Next",
+        "previous" => "Previous",
+        "pause" => "Pause",
+        "play" => "Play",
+        other => return Err(anyhow::anyhow!("no media action called {}", other)),
+    };
+    let players = media_players().await?;
+    let mut target = None;
+    for player in &players {
+        if player_status(player).await.as_deref() == Some("Playing") {
+            target = Some(player);
+            break;
         }
+    }
+    let Some(player) = target.or(players.first()) else {
+        return Err(anyhow::anyhow!("no media player is open"));
+    };
+    if player_call(player, method).await {
+        Ok(format!("{} sent to {}", method, player_name(player)))
+    } else {
+        Err(anyhow::anyhow!("{} didn't accept {}", player_name(player), method))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_players_metadata_gives_title_and_artist() {
+        let json = r#"{"type":"a{sv}","data":{"xesam:title":{"type":"s","data":"Song A"},"xesam:artist":{"type":"as","data":["Band B","Band C"]}}}"#;
+        assert_eq!(read_metadata(json), Some(("Song A".into(), "Band B, Band C".into())));
+        assert_eq!(read_metadata(r#"{"type":"a{sv}","data":{}}"#), None, "no title, nothing to tell");
+        assert_eq!(player_name("org.mpris.MediaPlayer2.tunes.instance42"), "tunes");
     }
 }
