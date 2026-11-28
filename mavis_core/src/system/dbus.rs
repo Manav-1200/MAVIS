@@ -156,11 +156,59 @@ pub async fn current_levels() -> Option<String> {
     if let Some((_, now, max)) = backlight().filter(|(_, _, max)| *max > 0) {
         parts.push(format!("screen brightness is {}%", now * 100 / max));
     }
+    if let Some(battery) = battery() {
+        parts.push(battery);
+    }
     (!parts.is_empty()).then(|| {
         let mut line = parts.join(" and ");
         line.replace_range(..1, &line[..1].to_uppercase());
         format!("{}.", line)
     })
+}
+
+/// "the battery is at 64% and charging", from the first battery the kernel lists.
+fn battery() -> Option<String> {
+    let entries = std::fs::read_dir("/sys/class/power_supply").ok()?;
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok().map(|s| s.trim().to_string());
+        if read("type").as_deref() != Some("Battery") {
+            continue;
+        }
+        let capacity = read("capacity")?;
+        let status = read("status").unwrap_or_default().to_lowercase();
+        let state = match status.as_str() {
+            "charging" | "discharging" | "full" => format!(" and {}", status),
+            _ => String::new(),
+        };
+        return Some(format!("the battery is at {}%{}", capacity, state));
+    }
+    None
+}
+
+/// What a media player says is playing: "Title by Artist (in Player,
+/// paused)", or None when no player reports anything.
+pub async fn now_playing() -> Option<String> {
+    let out = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        Command::new("playerctl")
+            .args(["metadata", "--format", "{{title}}\t{{artist}}\t{{playerName}}\t{{status}}"])
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let mut fields = line.split('\t');
+    let title = fields.next().unwrap_or_default().trim();
+    if !out.status.success() || title.is_empty() {
+        return None;
+    }
+    let artist = fields.next().unwrap_or_default().trim();
+    let player = fields.next().unwrap_or_default().trim();
+    let status = fields.next().unwrap_or_default().trim().to_lowercase();
+    let by = if artist.is_empty() { String::new() } else { format!(" by {}", artist) };
+    Some(format!("{}{} (in {}, {})", title, by, player, status))
 }
 
 /// Run the first of these commands that's installed. A missing tool moves
