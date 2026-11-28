@@ -44,6 +44,17 @@ pub fn config_text() -> Option<String> {
         .ok()
 }
 
+/// A switch: the environment variable when it's set ("1"/"true" or
+/// "0"/"false"), otherwise `key` under `[section]` in config.toml.
+pub fn switched_on(env_var: &str, section: &str, key: &str) -> bool {
+    match std::env::var(env_var).as_deref() {
+        Ok("1") | Ok("true") => return true,
+        Ok("0") | Ok("false") => return false,
+        _ => {}
+    }
+    config_text().and_then(|t| read_setting(&t, section, key)).is_some_and(|v| v == "true")
+}
+
 /// `key = "value"` inside `[section]` of a TOML file. Just enough to read
 /// one setting without a TOML dependency; anything unusual reads as absent.
 pub fn read_setting(text: &str, section: &str, key: &str) -> Option<String> {
@@ -148,6 +159,17 @@ impl ListenGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A switch comes from config.toml, and its variable overrides it.
+    #[test]
+    fn switches_come_from_the_config_and_the_variable_overrides() {
+        assert!(switched_on("MAVIS_TEST_UNSET_SWITCH", "sentinel", "enabled"), "shipped on");
+        assert!(!switched_on("MAVIS_TEST_UNSET_SWITCH", "context", "clipboard"), "shipped off");
+        std::env::set_var("MAVIS_TEST_SWITCH_OFF", "0");
+        assert!(!switched_on("MAVIS_TEST_SWITCH_OFF", "sentinel", "enabled"));
+        std::env::set_var("MAVIS_TEST_SWITCH_ON", "1");
+        assert!(switched_on("MAVIS_TEST_SWITCH_ON", "context", "clipboard"));
+    }
 
     #[test]
     fn quoted_values_keep_their_symbols() {
