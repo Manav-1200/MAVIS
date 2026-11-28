@@ -451,6 +451,30 @@ impl Executor {
 /// picked up by the mic, from the user's.
 pub type SpokenLog = Arc<std::sync::Mutex<std::collections::VecDeque<(String, std::time::Instant)>>>;
 
+/// Least words, and share of them MAVIS just said, for a transcript to be
+/// its own voice heard with a word or two wrong.
+const ECHO_WORDS: usize = 4;
+const ECHO_SHARE: f32 = 0.8;
+
+/// Most of what was heard is words MAVIS just said, in the same order.
+fn mostly_said(heard: &str, said: &str) -> bool {
+    let heard: Vec<&str> = heard.split(' ').collect();
+    if heard.len() < ECHO_WORDS {
+        return false;
+    }
+    let said: Vec<&str> = said.split(' ').collect();
+    // Heard words found in order through what was said.
+    let mut at = 0;
+    let mut found = 0;
+    for word in &heard {
+        if let Some(i) = said[at..].iter().position(|w| w == word) {
+            at += i + 1;
+            found += 1;
+        }
+    }
+    found as f32 / heard.len() as f32 >= ECHO_SHARE
+}
+
 /// Whether a transcript heard during playback is MAVIS's own words, picked
 /// up by the mic — often cut short or run together — so it doesn't answer
 /// itself.
@@ -475,7 +499,7 @@ pub fn is_echo(transcript: &str, spoken: &SpokenLog) -> bool {
         .any(|(text, _)| {
             let said = words(text);
             if !one_word {
-                return said.contains(&heard) || compact(text).contains(&heard_compact);
+                return said.contains(&heard) || compact(text).contains(&heard_compact) || mostly_said(&heard, &said);
             }
             // One word: only a piece of something MAVIS read out (part of a
             // file name), never a word it said whole, so "stop" still
@@ -1122,6 +1146,16 @@ mod tests {
     }
 
     /// A destructive command run through the executor can be undone.
+    /// Its own sentence heard with a word wrong is still its own voice; the
+    /// user saying something else is not.
+    #[test]
+    fn its_own_words_misheard_are_still_its_voice() {
+        let log = SpokenLog::default();
+        log.lock().unwrap().push_back(("Sure. Let me check aaa bbb days for you.".into(), std::time::Instant::now()));
+        assert!(is_echo("Let me check aaa bbb one.", &log));
+        assert!(!is_echo("Check the weather for me please.", &log));
+    }
+
     /// A plan's outcome is handed on to be told, not spoken from here.
     #[tokio::test]
     async fn an_outcome_is_handed_on_to_be_told() {
