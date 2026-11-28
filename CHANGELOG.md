@@ -39,6 +39,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Changed
+- **Steadier answers:** MAVIS sees its last few turns in full and older ones as notes, so one bad reply doesn't spread. It knows the battery level and can tell you what's playing.
 - **Context and the Sentinel are switched in `config/config.toml`,** not per-run variables; desktop awareness and the Sentinel are on as shipped. **Faster replies:** the tool list is cached between calls and speech recognition does less work. The clipboard is read only when you ask, through a lookup.
 - **Actions work again** (tool calls were being cut off and read aloud), **questions about system changes and your past are looked up**, and MAVIS no longer mistakes its own voice for yours when it hears it slightly wrong.
 - **MAVIS acts through its model's own tool calls** and tells you what happened after it's done, in its own words. Replies are full sentences again.
