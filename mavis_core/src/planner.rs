@@ -618,9 +618,9 @@ const ACTIONS: &[Action] = &[
     act("stop", "", "stop talking, or pause what's playing if you're quiet", None, false),
     act("confirm", "", "yes to the question you just asked", None, false),
     act("cancel", "", "no to the question you just asked", None, false),
-    act("system_changes", "<number>", "tell what changed on the system in the last number of days", None, false),
-    act("update_details", "", "describe the system update you last mentioned, or the latest one", None, false),
-    act("user_history", "<number>", "for a question about what the user did in the past: look back over that many days, then answer", None, false),
+    act("system_changes", "<number>", "look up what changed on the system (updates, installs, removals) over that many days, to answer a question about it", None, false),
+    act("update_details", "", "look up the details of the system update you last mentioned, or the latest one, to answer a question about it", None, false),
+    act("user_history", "<number>", "look up what the user did over that many days, to answer a question about their past", None, false),
     act("remember", "<fact>", "keep a lasting fact the user told you about themselves", None, false),
     act("user_name", "<name>", "the user tells you their name or what to call them", None, false),
 ];
@@ -1727,16 +1727,21 @@ impl Planner {
                     .get("result")
                     .and_then(|r| r.get("content"))
                     .and_then(|c| c.as_str())
-                    .unwrap_or("I didn't understand that.");
-
+                    .unwrap_or_default()
+                    .trim();
+                // Nothing came out: nothing is said, rather than a stock line.
+                let plan = if content.is_empty() {
+                    info!("Planner: the model's reply was empty");
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!({"type": "say", "text": content})
+                };
                 let plan_event = Event {
                     id: uuid::Uuid::new_v4(),
                     timestamp: chrono::Utc::now(),
                     source: "planner".to_string(),
                     event_type: EventType::PlanReady,
-                    payload: serde_json::json!({
-                        "plan": {"type": "say", "text": content}
-                    }),
+                    payload: serde_json::json!({ "plan": plan }),
                 };
                 self.bus.publish(plan_event);
                 self.maybe_summarise().await;
