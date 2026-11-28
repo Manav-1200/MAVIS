@@ -260,7 +260,7 @@ Each source is switched on or off under `[context]` in `config/config.toml`. Not
 | `calendar` | off | Next event from Evolution's local calendar |
 | `browser` | off | Tab URL/title, if something writes to `/tmp/mavis_browser.sock` |
 
-The date and time, and the volume and brightness, are always there: they aren't private, and without them the model guesses.
+The date and time, the volume, brightness and battery are always there: they aren't private, and without them the model guesses. What's playing is looked up when you ask.
 
 ### All environment variables
 
