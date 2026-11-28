@@ -73,6 +73,88 @@ const DESTRUCTIVE_TOKENS: &[&str] = &[
 
 const ELEVATED_TOKENS: &[&str] = &["sudo ", "doas ", "pkexec ", "su -"];
 
+/// Programs that only show things, whatever their arguments (barring the
+/// exceptions in `segment_only_reads`). A command made only of these, with
+/// no redirection into a file, changes nothing and runs without asking.
+const READ_ONLY_PROGRAMS: &[&str] = &[
+    "cat", "ls", "df", "du", "free", "uptime", "uname", "whoami", "id", "ps", "pgrep", "pidof", "head", "tail",
+    "grep", "egrep", "fgrep", "rg", "wc", "sort", "uniq", "cut", "tr", "column", "stat", "file", "which",
+    "whereis", "type", "echo", "printf", "printenv", "lsblk", "lscpu", "lsusb", "lspci", "lsmod", "lsof",
+    "findmnt", "ss", "ping", "dig", "host", "nslookup", "sensors", "nvidia-smi", "who", "w", "last",
+    "basename", "dirname", "realpath", "readlink", "tree", "locate", "jq", "xxd", "md5sum", "sha256sum",
+    "upower", "acpi", "fc-list", "glxinfo", "inxi", "neofetch", "fastfetch", "wl-paste",
+];
+
+/// Programs whose first argument decides whether they only read, and the
+/// first arguments that do ("" for none).
+const READ_ONLY_SUBCOMMANDS: &[(&str, &[&str])] = &[
+    ("wpctl", &["get-volume", "status", "inspect"]),
+    ("pactl", &["list", "info", "get-sink-volume", "get-source-volume", "get-sink-mute", "stat"]),
+    ("busctl", &["list", "get-property", "introspect", "tree", "status"]),
+    ("nmcli", &["general", "device", "connection", "radio", ""]),
+    ("systemctl", &["status", "is-active", "is-enabled", "list-units", "list-timers", "show"]),
+    ("loginctl", &["", "list-sessions", "show-session", "session-status", "show-user", "list-users", "user-status"]),
+    ("timedatectl", &["", "status", "show"]),
+    ("localectl", &["", "status"]),
+    ("hostnamectl", &["", "status"]),
+    ("bluetoothctl", &["show", "devices", "info", "list", "paired-devices"]),
+    ("pacman", &["-Q", "-Qi", "-Ql", "-Qe", "-Qs", "-Si", "-Ss", "-Qu", "-Qm", "-Qdt"]),
+    ("apt", &["list", "show", "search", "policy"]),
+    ("dpkg", &["-l", "-L", "-s", "--list"]),
+    ("dnf", &["list", "info", "search"]),
+    ("flatpak", &["list", "info", "search"]),
+    ("git", &["status", "log", "diff", "show", "branch", "remote"]),
+    ("xdg-mime", &["query"]),
+    ("brightnessctl", &["", "get", "info", "max", "-l", "-m"]),
+];
+
+/// Whether one command of a pipeline only reads.
+fn segment_only_reads(segment: &str) -> bool {
+    let words = crate::util::split_command_line(segment);
+    let Some(program) = words.first().map(|w| w.rsplit('/').next().unwrap_or(w)) else {
+        return true;
+    };
+    let args = &words[1..];
+    let has = |flag: &str| args.iter().any(|a| a == flag || a.starts_with(&format!("{}=", flag)));
+    match program {
+        // These read, unless told to edit, run, set or clear something.
+        "sed" => !args.iter().any(|a| a.starts_with("-i") || a == "--in-place"),
+        "find" => !["-delete", "-exec", "-execdir", "-ok", "-fprint", "-fls"].iter().any(|f| has(f)),
+        "awk" => !segment.contains("system(") && !segment.contains("getline") && !segment.contains("print >"),
+        "date" => !has("-s") && !has("--set"),
+        "ip" => !args.iter().any(|a| ["set", "add", "del", "delete", "flush", "change", "replace", "append"].contains(&a.as_str())),
+        "journalctl" => !args.iter().any(|a| a.starts_with("--vacuum") || a == "--rotate" || a == "--flush"),
+        "dmesg" => !args.iter().any(|a| a == "-c" || a == "-C" || a == "--clear" || a == "--read-clear"),
+        "niri" => args.first().is_some_and(|a| a == "msg") && !args.iter().any(|a| a == "action"),
+        "hyprctl" | "swaymsg" => !args.iter().any(|a| ["dispatch", "keyword", "exec", "reload", "kill"].contains(&a.as_str())),
+        _ if READ_ONLY_PROGRAMS.contains(&program) => true,
+        _ => {
+            // The verb: the first argument that isn't a flag, except for the
+            // package tools, whose verbs are flags.
+            let first = if matches!(program, "pacman" | "dpkg") {
+                args.first().map(String::as_str).unwrap_or("")
+            } else {
+                args.iter().find(|a| !a.starts_with('-')).map(String::as_str).unwrap_or("")
+            };
+            READ_ONLY_SUBCOMMANDS.iter().any(|(name, reads)| *name == program && reads.contains(&first))
+        }
+    }
+}
+
+/// Whether a whole command only reads: every part of every pipeline only
+/// reads, nothing is written to a file, and nothing is substituted in.
+fn only_reads(command: &str) -> bool {
+    let quiet = command.replace("2>/dev/null", "").replace("2>&1", "").replace(">/dev/null", "");
+    if quiet.contains('>') || quiet.contains('`') || quiet.contains("$(") || quiet.contains("<(") {
+        return false;
+    }
+    quiet
+        .split(['|', ';', '&'])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .all(segment_only_reads)
+}
+
 /// Arguments that hand a program code to run: `sh -c …`, `python -c …`.
 const INLINE_CODE_FLAGS: &[&str] = &["-c", "-e", "--command", "--eval"];
 
@@ -258,6 +340,11 @@ fn assess_shell(command: &str) -> Assessment {
     let elevated = ELEVATED_TOKENS.iter().any(|t| collapsed.contains(t));
     let destructive = DESTRUCTIVE_TOKENS.iter().any(|t| collapsed.contains(t));
 
+    // Looking something up changes nothing.
+    if !elevated && !destructive && only_reads(command) {
+        return Assessment { score: 1, verdict: Verdict::Allow, reason: "only reads".into(), what };
+    }
+
     let score = match (elevated, destructive) {
         (true, true) => 9,
         (true, false) => 8,
@@ -323,9 +410,44 @@ mod tests {
 
     #[test]
     fn shell_scores_follow_the_bands() {
-        assert_eq!(shell("ls").score, 4);
+        assert_eq!(shell("ls").score, 1, "only reads");
+        assert_eq!(shell("nano notes.txt").score, 4);
         assert_eq!(shell("sudo pacman -Syu").score, 8);
         assert_eq!(shell("sudo rm /etc/x").score, 9);
+    }
+
+    /// Looking things up runs without asking; anything that changes
+    /// something, or could, still asks.
+    #[test]
+    fn commands_that_only_read_run_without_asking() {
+        for reads in [
+            "cat /sys/class/power_supply/BAT0/capacity",
+            "df -h /home",
+            "wpctl get-volume @DEFAULT_AUDIO_SINK@",
+            "ip addr | grep inet",
+            "busctl --user list",
+            "systemctl --user status pipewire",
+            "pacman -Qi bash 2>/dev/null",
+            "sensors && uptime",
+        ] {
+            let a = shell(reads);
+            assert_eq!((a.score, &a.verdict), (1, &Verdict::Allow), "{}", reads);
+        }
+        for changes in [
+            "echo hi > notes.txt",
+            "sed -i s/a/b/ notes.txt",
+            "find . -name x -delete",
+            "busctl --user call x /y z Pause",
+            "systemctl --user stop pipewire",
+            "ip link set wlan0 down",
+            "cat $(rm notes.txt)",
+            "pacman -Syu",
+            "journalctl --vacuum-time=1d",
+            "date -s 10:00",
+            "nano notes.txt",
+        ] {
+            assert_ne!(shell(changes).verdict, Verdict::Allow, "{}", changes);
+        }
     }
 
     #[test]
