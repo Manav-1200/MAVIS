@@ -233,7 +233,7 @@ Search uses SQLite FTS5 rather than vector embeddings — no extra dependency, n
 
 ### System Sentinel
 
-With `MAVIS_SENTINEL=1`, MAVIS reads your package manager's own log and notices what changed — especially packages that arrived as a dependency of something else, which is how you end up with software you never chose.
+With the Sentinel on (`[sentinel] enabled` in `config/config.toml`, on as shipped), MAVIS reads your package manager's own log and notices what changed — especially packages that arrived as a dependency of something else, which is how you end up with software you never chose.
 
 - Works with **pacman**, **dpkg/apt** and **dnf** (dnf untested on real hardware)
 - The first run imports your history silently; only changes after that are reported
@@ -251,30 +251,23 @@ Changes worth knowing are said the next time you speak to MAVIS; anything that g
 
 ### Context sources
 
-Every context source is opt-in and off by default. Enable the ones you want:
+Each source is switched on or off under `[context]` in `config/config.toml`. Nothing leaves your machine. A `MAVIS_CONTEXT_*` variable overrides its line for one run (`1` on, `0` off).
 
-```bash
-MAVIS_CONTEXT_ACTIVE_WINDOW=1 \
-MAVIS_CONTEXT_CLIPBOARD=1 \
-MAVIS_CONTEXT_CALENDAR=1 \
-cargo run
-```
+| Setting | Shipped | Gives MAVIS |
+|---------|---------|-------------|
+| `active_window` | on | Focused window, the list of open apps and their workspaces, and the current git project (name, path, branch) |
+| `clipboard` | off | Clipboard text, up to 200 characters, read only when you ask about what you copied |
+| `calendar` | off | Next event from Evolution's local calendar |
+| `browser` | off | Tab URL/title, if something writes to `/tmp/mavis_browser.sock` |
 
-| Variable | Gives MAVIS |
-|----------|-------------|
-| `MAVIS_CONTEXT_ACTIVE_WINDOW` | Focused window, the list of open apps and their workspaces, and the current git project (name, path, branch) |
-| `MAVIS_CONTEXT_CLIPBOARD` | Current clipboard text, truncated to 200 characters — only sent when you ask about the clipboard, copying or pasting |
-| `MAVIS_CONTEXT_CALENDAR` | Next event from Evolution's local calendar |
-| `MAVIS_CONTEXT_BROWSER` | Tab URL/title, if something writes to `/tmp/mavis_browser.sock` |
-
-Current date and time is always injected — it isn't private, and without it the model guesses at anything time-related.
+The date and time, and the volume and brightness, are always there: they aren't private, and without them the model guesses.
 
 ### All environment variables
 
 | Variable | Default | Effect |
 |----------|---------|--------|
-| `MAVIS_CONTEXT_*` | off | The four context sources above |
-| `MAVIS_SENTINEL` | off | The System Sentinel: packages, privileges, file integrity |
+| `MAVIS_CONTEXT_*` | from config | The four context sources above, for one run |
+| `MAVIS_SENTINEL` | from config | The System Sentinel, for one run |
 | `MAVIS_SENTINEL_ADVISORIES` | off | Also ask `arch-audit` / `debsecan` for security advisories — they download the advisory list |
 | `MAVIS_SENTINEL_CHECK_NOW` | off | Run the Sentinel's daily checks at startup even if they ran recently — for testing |
 | `MAVIS_TTS_ENGINE` | `kokoro` | `kokoro` (natural voice, via the worker) or `piper` (lighter, flatter); Kokoro falls back to Piper if the worker can't speak |
