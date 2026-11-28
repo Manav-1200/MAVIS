@@ -39,6 +39,7 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/).
 - `MAVIS_ORB=off` and `MAVIS_ORB_POS=x,y`.
 
 ### Changed
+- **Actions work again** (tool calls were being cut off and read aloud), **questions about system changes and your past are looked up**, and MAVIS no longer mistakes its own voice for yours when it hears it slightly wrong.
 - **MAVIS acts through its model's own tool calls** and tells you what happened after it's done, in its own words. Replies are full sentences again.
 - **Long conversations.** Qwen2.5-3B is now the default model and sees far more of the conversation; older parts are summarised instead of forgotten.
 - **Questions, warnings and system news in MAVIS's own words,** and your name is learned from what you say, not from fixed phrases.
