@@ -136,56 +136,6 @@ fn backlight() -> Option<(String, u64, u64)> {
     Some((entry.file_name().to_string_lossy().to_string(), read("brightness")?, read("max_brightness")?))
 }
 
-/// Speaker volume and screen brightness as they are now, for the model,
-/// which otherwise guesses.
-pub async fn current_levels() -> Option<String> {
-    let mut parts = Vec::new();
-    let volume = tokio::time::timeout(
-        std::time::Duration::from_secs(1),
-        Command::new("wpctl").args(["get-volume", "@DEFAULT_AUDIO_SINK@"]).output(),
-    )
-    .await;
-    if let Ok(Ok(out)) = volume {
-        // "Volume: 0.50" or "Volume: 0.50 [MUTED]"
-        let text = String::from_utf8_lossy(&out.stdout);
-        if let Some(v) = text.split_whitespace().nth(1).and_then(|v| v.parse::<f64>().ok()) {
-            let muted = if text.contains("MUTED") { ", muted" } else { "" };
-            parts.push(format!("speaker volume is {}%{}", (v * 100.0).round(), muted));
-        }
-    }
-    if let Some((_, now, max)) = backlight().filter(|(_, _, max)| *max > 0) {
-        parts.push(format!("screen brightness is {}%", now * 100 / max));
-    }
-    if let Some(battery) = battery() {
-        parts.push(battery);
-    }
-    (!parts.is_empty()).then(|| {
-        let mut line = parts.join(" and ");
-        line.replace_range(..1, &line[..1].to_uppercase());
-        format!("{}.", line)
-    })
-}
-
-/// "the battery is at 64% and charging", from the first battery the kernel lists.
-fn battery() -> Option<String> {
-    let entries = std::fs::read_dir("/sys/class/power_supply").ok()?;
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        let read = |name: &str| std::fs::read_to_string(dir.join(name)).ok().map(|s| s.trim().to_string());
-        if read("type").as_deref() != Some("Battery") {
-            continue;
-        }
-        let capacity = read("capacity")?;
-        let status = read("status").unwrap_or_default().to_lowercase();
-        let state = match status.as_str() {
-            "charging" | "discharging" | "full" => format!(" and {}", status),
-            _ => String::new(),
-        };
-        return Some(format!("the battery is at {}%{}", capacity, state));
-    }
-    None
-}
-
 // ---------------------------------------------------------------------
 // Media players, over D-Bus (MPRIS) with busctl, which comes with systemd.
 // ---------------------------------------------------------------------
@@ -231,38 +181,6 @@ pub async fn player_call(player: &str, method: &str) -> bool {
 fn player_name(player: &str) -> &str {
     let name = player.trim_start_matches(MPRIS_PREFIX);
     name.split('.').next().unwrap_or(name)
-}
-
-/// Title and artist from `busctl --json=short get-property … Metadata`.
-fn read_metadata(json: &str) -> Option<(String, String)> {
-    let value: serde_json::Value = serde_json::from_str(json).ok()?;
-    let data = &value["data"];
-    let title = data["xesam:title"]["data"].as_str().unwrap_or_default().trim().to_string();
-    let artist = match &data["xesam:artist"]["data"] {
-        serde_json::Value::Array(names) => names.iter().filter_map(|n| n.as_str()).collect::<Vec<_>>().join(", "),
-        other => other.as_str().unwrap_or_default().to_string(),
-    };
-    (!title.is_empty()).then_some((title, artist.trim().to_string()))
-}
-
-/// What the media players say is playing: "Title by Artist (in player,
-/// playing)", the playing ones first. None when none reports a title.
-pub async fn now_playing() -> Result<Option<String>> {
-    let mut found: Vec<(bool, String)> = Vec::new();
-    for player in media_players().await? {
-        let Ok(out) = busctl(&["--json=short", "get-property", &player, MPRIS_PATH, MPRIS_PLAYER, "Metadata"]).await else {
-            continue;
-        };
-        let Some((title, artist)) = read_metadata(&String::from_utf8_lossy(&out.stdout)) else {
-            continue;
-        };
-        let status = player_status(&player).await.unwrap_or_default().to_lowercase();
-        let by = if artist.is_empty() { String::new() } else { format!(" by {}", artist) };
-        found.push((status == "playing", format!("{}{} (in {}, {})", title, by, player_name(&player), status)));
-    }
-    // Playing before paused or stopped.
-    found.sort_by_key(|(playing, _)| !playing);
-    Ok((!found.is_empty()).then(|| found.into_iter().map(|(_, f)| f).collect::<Vec<_>>().join("; ")))
 }
 
 /// Run the first of these commands that's installed. A missing tool moves
@@ -322,10 +240,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_players_metadata_gives_title_and_artist() {
-        let json = r#"{"type":"a{sv}","data":{"xesam:title":{"type":"s","data":"Song A"},"xesam:artist":{"type":"as","data":["Band B","Band C"]}}}"#;
-        assert_eq!(read_metadata(json), Some(("Song A".into(), "Band B, Band C".into())));
-        assert_eq!(read_metadata(r#"{"type":"a{sv}","data":{}}"#), None, "no title, nothing to tell");
+    fn a_player_is_named_as_people_say_it() {
         assert_eq!(player_name("org.mpris.MediaPlayer2.tunes.instance42"), "tunes");
     }
 }
