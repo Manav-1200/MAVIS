@@ -910,7 +910,8 @@ Next, in order:
   - [x] A long conversation on Qwen2.5-3B, with older turns summarised ([§51](DECISIONS.md#51-holding-a-long-conversation)).
   - [x] First hardware run on Qwen ([§52](DECISIONS.md#52-the-first-qwen-run-2026-11-27)): fast, but replies narrated and echoed, and questions were acted on. Fixed by giving MAVIS's turns in DO/SAY form.
   - [x] Second hardware run ([§53](DECISIONS.md#53-acting-through-qwens-own-tool-calls)): replies shrank to fragments ("your name.", "system_changes 1."). The DO/SAY format itself was the problem; replaced with Qwen's own tool calls, and outcomes told after the action runs.
-  - [ ] Third hardware run: replies, asking first, a long conversation, media, and the Sentinel switched on.
+  - [x] Third hardware run ([§54](DECISIONS.md#54-the-third-qwen-run-2026-11-28)): full sentences, but tool calls were cut off and read aloud, lookups were never called, and MAVIS heard itself. Fixed.
+  - [ ] Fourth hardware run: replies, actions, lookups, asking first, a long conversation, media.
 - [ ] **2. The open action.** Beyond the catalogue, the model can propose its own command for anything the catalogue doesn't cover. Everything goes through the risk gate: harmless commands run, risky ones are explained in plain words and wait for a yes, root goes through `pkexec`, irreversible ones are asked twice. Then multi-step tasks: plan, act, read the result, carry on.
 - [ ] **3. Learning from use.** From the owner's confirmed actions, stated facts and daily patterns, never from undone or corrected ones or other voices. Stored as data that can be read out and forgotten; nothing leaves the machine; the model's weights never change.
 - [ ] **4. Voice and face for owner-only actions.** See the rules below. Enrollment is a separate command until the install script exists.
@@ -1145,4 +1146,4 @@ Other machines get models that fit them; see Phase 8.6, models by machine.
 
 ---
 
-*Last updated: 2026-11-27*
+*Last updated: 2026-11-28*
