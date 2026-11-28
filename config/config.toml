@@ -24,6 +24,19 @@ enabled = true
 # tap on the orb. MAVIS_LISTEN_MODE overrides it.
 listen_mode = "always"
 
+[context]
+# What MAVIS may know about your desktop. Everything stays on this machine.
+# Each MAVIS_CONTEXT_* variable overrides its line for one run.
+active_window = true     # the focused window, open apps and their workspaces
+clipboard = false        # read only when you ask about what you copied
+calendar = false
+browser = false
+
+[sentinel]
+# Watch the package log, privileged accounts and system files for changes.
+# MAVIS_SENTINEL overrides it for one run.
+enabled = true
+
 [stt]
 # Whisper model for speech recognition. "small.en" is English-only and
 # hears English better than "small" at the same speed (downloaded once,
