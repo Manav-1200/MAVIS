@@ -188,6 +188,7 @@ For anything none of those actions covers, and anything about your computer it w
 
 Every command goes through the permission gate first:
 - **Commands that only read** (`ls`, `df`, `cat`, `pacman -Q`, `systemctl status` and the like, with no `>` redirect, no `$(…)` and nothing that writes) run without asking.
+- **Settings that are easily undone and only touch your session** run without asking too: volume and mute, brightness, Bluetooth on or off and connecting devices, Wi-Fi on or off and joining networks you've already set up, play, pause and skip, and moving between workspaces. Closing windows, quitting and launching programs through the window manager still ask.
 - **Anything else** is said in plain words and waits for your yes.
 - **`sudo`** becomes `pkexec`, so the system asks for your password, and MAVIS first needs "yes, administrator".
 - **Irreversible commands** (wiping a disk, deleting from `/`, piping a download into a shell) are refused.
