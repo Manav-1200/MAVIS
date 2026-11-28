@@ -912,7 +912,8 @@ Next, in order:
   - [x] Second hardware run ([§53](DECISIONS.md#53-acting-through-qwens-own-tool-calls)): replies shrank to fragments ("your name.", "system_changes 1."). The DO/SAY format itself was the problem; replaced with Qwen's own tool calls, and outcomes told after the action runs.
   - [x] Third hardware run ([§54](DECISIONS.md#54-the-third-qwen-run-2026-11-28)): full sentences, but tool calls were cut off and read aloud, lookups were never called, and MAVIS heard itself. Fixed.
   - [x] Fourth hardware run ([§55](DECISIONS.md#55-the-fourth-qwen-run-2026-11-28-facts-speed-and-hearing)): MAVIS had no desktop facts (a variable left unset), told facts were answered as questions, replies took 4–5 s, and the mic was too quiet. Switches moved to config, tool list cached, faster recognition.
-  - [ ] Fifth hardware run, mic at 0.5.
+  - [x] Fifth hardware run ([§56](DECISIONS.md#56-the-fifth-qwen-run-2026-11-28-copying-itself)): first token 0.2–0.3 s and the desktop facts present, but the model copied its own bad replies. Only the last 8 turns as turns; recall limited to kept facts; battery and what's playing added.
+  - [ ] Sixth hardware run.
 - [ ] **2. The open action.** Beyond the catalogue, the model can propose its own command for anything the catalogue doesn't cover. Everything goes through the risk gate: harmless commands run, risky ones are explained in plain words and wait for a yes, root goes through `pkexec`, irreversible ones are asked twice. Then multi-step tasks: plan, act, read the result, carry on.
 - [ ] **3. Learning from use.** From the owner's confirmed actions, stated facts and daily patterns, never from undone or corrected ones or other voices. Stored as data that can be read out and forgotten; nothing leaves the machine; the model's weights never change.
 - [ ] **4. Voice and face for owner-only actions.** See the rules below. Enrollment is a separate command until the install script exists.
