@@ -1190,8 +1190,9 @@ impl Planner {
             }
             "clipboard" => Err(self.clipboard_fact().await),
             "now_playing" => Err(match crate::system::dbus::now_playing().await {
-                Some(playing) => format!("Playing now: {}", playing),
-                None => "No media player reports anything playing.".into(),
+                Ok(Some(playing)) => format!("Media players report: {}", playing),
+                Ok(None) => "No media player reports a title. Something may still be playing in a window that doesn't report it.".into(),
+                Err(e) => format!("You can't ask the media players: {}.", e),
             }),
             "user_name" => {
                 // Only a name they actually said, as they said it.
