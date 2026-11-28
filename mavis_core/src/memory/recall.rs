@@ -22,7 +22,7 @@ const STOPWORDS: &[&str] = &[
 ];
 
 /// Importance of a fact the model chose to remember: above the recall line.
-const FACT_IMPORTANCE: i64 = 9;
+pub(crate) const FACT_IMPORTANCE: i64 = 9;
 
 #[derive(Debug, Clone)]
 pub struct Memory {
