@@ -299,14 +299,25 @@ impl Executor {
     }
 
     async fn run_shell(&self, command: &str) -> Result<String> {
+        // Root goes through the desktop's own password prompt: there's no
+        // terminal here for sudo to ask in.
+        let command = match command.trim_start().strip_prefix("sudo ") {
+            Some(rest) => format!("pkexec {}", rest.trim_start()),
+            None => command.to_string(),
+        };
+        let command = command.as_str();
         info!("Executor: shell exec: {}", command);
         self.save_for_undo(command).await;
-        let output = Command::new("sh")
+        let run = Command::new("sh")
             .arg("-c")
             .arg(command)
-            .output()
-            .await
-            .map_err(|e| anyhow::anyhow!("failed to spawn shell: {}", e))?;
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .output();
+        let output = match tokio::time::timeout(SHELL_TIMEOUT, run).await {
+            Ok(result) => result.map_err(|e| anyhow::anyhow!("failed to spawn shell: {}", e))?,
+            Err(_) => return Err(anyhow::anyhow!("it was still running after {} seconds, so it was stopped", SHELL_TIMEOUT.as_secs())),
+        };
 
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -450,6 +461,10 @@ impl Executor {
 /// What MAVIS said lately, and when: lets the STT task tell its own voice,
 /// picked up by the mic, from the user's.
 pub type SpokenLog = Arc<std::sync::Mutex<std::collections::VecDeque<(String, std::time::Instant)>>>;
+
+/// Longest a command may run: one that waits for input or never ends is
+/// stopped rather than holding MAVIS.
+const SHELL_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Least words, and share of them MAVIS just said, for a transcript to be
 /// its own voice heard with a word or two wrong.
